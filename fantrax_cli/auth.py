@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from requests import Session
-from fantraxapi import League, NotLoggedIn, api
+from fantraxapi import League, NotLoggedIn, FantraxException, api
 from fantraxapi.api import Method
 from selenium import webdriver
 from selenium.webdriver import Keys
@@ -48,7 +48,7 @@ def add_cookie_to_session(session: Session, ignore_cookie: bool = False) -> None
         options = Options()
         options.add_argument("--headless")
         options.add_argument("--window-size=1920,1600")
-        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36")
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
         with webdriver.Chrome(service=service, options=options) as driver:
             driver.get("https://www.fantrax.com/login")
@@ -86,6 +86,8 @@ def new_request(league: League, methods: list[Method] | Method) -> dict:
     This function is installed as a replacement for the default api.request
     to automatically handle login and cookie management.
     """
+    global _cookie_file_path
+
     try:
         if not league.logged_in:
             add_cookie_to_session(league.session)
@@ -93,6 +95,17 @@ def new_request(league: League, methods: list[Method] | Method) -> dict:
     except NotLoggedIn:
         add_cookie_to_session(league.session, ignore_cookie=True)
         return new_request(league, methods)
+    except FantraxException as e:
+        # Check if this is an INVALID_REQUEST error (stale cookies)
+        error_str = str(e)
+        if "INVALID_REQUEST" in error_str and _cookie_file_path and _cookie_file_path.exists():
+            # Delete stale cookie file and re-authenticate
+            _cookie_file_path.unlink()
+            add_cookie_to_session(league.session, ignore_cookie=True)
+            return _old_request(league, methods)
+        else:
+            # Re-raise if it's not a cookie issue
+            raise
 
 
 def get_authenticated_session(username: str, password: str, cookie_file: Path) -> Session:
