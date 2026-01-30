@@ -24,6 +24,10 @@ _password: Optional[str] = None
 _old_request = api.request
 _override_installed = False
 
+# Rate limiting variables
+_last_request_time: Optional[float] = None
+_min_request_interval: float = 1.0  # Default minimum seconds between requests
+
 
 def add_cookie_to_session(session: Session, ignore_cookie: bool = False) -> None:
     """
@@ -81,17 +85,30 @@ def add_cookie_to_session(session: Session, ignore_cookie: bool = False) -> None
 
 def new_request(league: League, methods: list[Method] | Method) -> dict:
     """
-    Override for api.request that handles authentication.
+    Override for api.request that handles authentication and rate limiting.
 
     This function is installed as a replacement for the default api.request
-    to automatically handle login and cookie management.
+    to automatically handle login, cookie management, and rate limiting.
     """
-    global _cookie_file_path
+    global _cookie_file_path, _last_request_time, _min_request_interval
+
+    # Rate limiting: ensure minimum interval between requests
+    if _last_request_time is not None:
+        elapsed = time.time() - _last_request_time
+        if elapsed < _min_request_interval:
+            sleep_time = _min_request_interval - elapsed
+            time.sleep(sleep_time)
 
     try:
         if not league.logged_in:
             add_cookie_to_session(league.session)
-        return _old_request(league, methods)
+
+        result = _old_request(league, methods)
+
+        # Update last request time after successful request
+        _last_request_time = time.time()
+
+        return result
     except NotLoggedIn:
         add_cookie_to_session(league.session, ignore_cookie=True)
         return new_request(league, methods)
@@ -134,7 +151,13 @@ def get_authenticated_session(username: str, password: str, cookie_file: Path) -
     return session
 
 
-def get_authenticated_league(league_id: str, username: str, password: str, cookie_file: Path) -> League:
+def get_authenticated_league(
+    league_id: str,
+    username: str,
+    password: str,
+    cookie_file: Path,
+    min_request_interval: float = 1.0
+) -> League:
     """
     Get an authenticated League instance for a private league.
 
@@ -146,6 +169,7 @@ def get_authenticated_league(league_id: str, username: str, password: str, cooki
         username: Fantrax username/email.
         password: Fantrax password.
         cookie_file: Path to the cookie cache file.
+        min_request_interval: Minimum seconds between API requests (default: 1.0).
 
     Returns:
         Authenticated League instance.
@@ -153,12 +177,13 @@ def get_authenticated_league(league_id: str, username: str, password: str, cooki
     Raises:
         Exception: If authentication fails.
     """
-    global _cookie_file_path, _username, _password, _override_installed
+    global _cookie_file_path, _username, _password, _override_installed, _min_request_interval
 
     # Set global variables for the authentication functions
     _cookie_file_path = cookie_file
     _username = username
     _password = password
+    _min_request_interval = min_request_interval
 
     # Install the request override if not already installed
     if not _override_installed:

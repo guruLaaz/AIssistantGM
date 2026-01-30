@@ -72,7 +72,8 @@ def teams_command(
                 config.league_id,
                 config.username,
                 config.password,
-                config.cookie_path
+                config.cookie_path,
+                config.min_request_interval
             )
 
         # Retrieve teams

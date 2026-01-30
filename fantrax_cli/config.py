@@ -15,6 +15,7 @@ class Config:
     password: str
     league_id: str
     cookie_file: str = "fantraxloggedin.cookie"
+    min_request_interval: float = 1.0  # Minimum seconds between API requests
 
     @property
     def cookie_path(self) -> Path:
@@ -62,9 +63,14 @@ def load_config(league_id: Optional[str] = None) -> Config:
             f"See .env.example for reference."
         )
 
+    # Get optional configuration
+    cookie_file = os.getenv("FANTRAX_COOKIE_FILE", "fantraxloggedin.cookie")
+    min_request_interval = float(os.getenv("FANTRAX_MIN_REQUEST_INTERVAL", "1.0"))
+
     return Config(
         username=username,
         password=password,
         league_id=final_league_id,
-        cookie_file=os.getenv("FANTRAX_COOKIE_FILE", "fantraxloggedin.cookie")
+        cookie_file=cookie_file,
+        min_request_interval=min_request_interval
     )

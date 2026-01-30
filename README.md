@@ -36,6 +36,9 @@ Edit the `.env` file with your Fantrax credentials:
 FANTRAX_USERNAME=your_email@example.com
 FANTRAX_PASSWORD=your_password
 FANTRAX_LEAGUE_ID=88nib84gmbc80pu3
+
+# Optional settings:
+# FANTRAX_MIN_REQUEST_INTERVAL=1.0  # Minimum seconds between API requests
 ```
 
 4. Install the package and dependencies:
