@@ -2,6 +2,7 @@
 
 import traceback
 import typer
+from typing import Optional
 from typing_extensions import Annotated
 from rich.console import Console
 
@@ -9,6 +10,7 @@ from fantrax_cli.cli import OutputFormat
 from fantrax_cli.config import load_config
 from fantrax_cli.auth import get_authenticated_league
 from fantrax_cli.display import format_roster_table, format_roster_json, format_roster_simple
+from fantrax_cli.stats import calculate_recent_fpg
 
 
 def roster_command(
@@ -20,6 +22,10 @@ def roster_command(
         "--format", "-f",
         help="Output format"
     )] = OutputFormat.table,
+    last_n_days: Annotated[Optional[int], typer.Option(
+        "--last-n-days",
+        help="Calculate FP/G over the last N days (Warning: requires N API calls, takes ~N seconds)"
+    )] = None,
 ):
     """Display roster for a specific team."""
     console = Console()
@@ -98,17 +104,27 @@ def roster_command(
             console.print(f"[yellow]No roster found for team {team.name}.[/yellow]")
             return
 
+        # Calculate recent FP/G if requested
+        recent_stats = None
+        if last_n_days:
+            if last_n_days < 1 or last_n_days > 365:
+                console.print("[bold red]Error:[/bold red] --last-n-days must be between 1 and 365")
+                raise typer.Exit(code=1)
+            recent_stats = calculate_recent_fpg(league, team.id, last_n_days)
+
         # Format and display based on selected format
         if format == OutputFormat.table:
-            format_roster_table(roster, team_name=team.name)
+            format_roster_table(roster, team_name=team.name, recent_stats=recent_stats, last_n_days=last_n_days)
         elif format == OutputFormat.json:
             format_roster_json(
                 roster,
                 team_id=team.id,
-                team_name=team.name
+                team_name=team.name,
+                recent_stats=recent_stats,
+                last_n_days=last_n_days
             )
         else:  # simple format
-            format_roster_simple(roster)
+            format_roster_simple(roster, recent_stats=recent_stats)
 
     except ValueError as e:
         # Configuration error

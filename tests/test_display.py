@@ -174,18 +174,24 @@ class MockPosition:
 class MockPlayer:
     """Mock Player object for testing."""
 
-    def __init__(self, name):
+    def __init__(self, name, suspended=False, injured_reserve=False, out=False, day_to_day=False):
         self.name = name
+        self.suspended = suspended
+        self.injured_reserve = injured_reserve
+        self.out = out
+        self.day_to_day = day_to_day
 
 
 class MockRosterRow:
     """Mock RosterRow object for testing."""
 
-    def __init__(self, position_short, player_name=None, fp_total=None, fp_per_game=None):
+    def __init__(self, position_short, player_name=None, fp_total=None, fp_per_game=None, status_id=None, salary=None):
         self.position = MockPosition(position_short)
         self.player = MockPlayer(player_name) if player_name else None
         self.total_fantasy_points = fp_total
         self.fantasy_points_per_game = fp_per_game
+        self.status_id = status_id
+        self.salary = salary
 
 
 class MockRoster:
@@ -308,9 +314,9 @@ class TestFormatRosterSimple:
         output_lines = captured.out.strip().split('\n')
 
         assert len(output_lines) == 6
-        assert "C: Connor McDavid" in output_lines[0]
-        assert "LW: Artemi Panarin" in output_lines[1]
-        assert "BN: (Empty)" in output_lines[5]
+        assert "C (Unknown): Connor McDavid" in output_lines[0]
+        assert "LW (Unknown): Artemi Panarin" in output_lines[1]
+        assert "BN (Unknown): (Empty)" in output_lines[5]
 
     def test_format_roster_simple_empty_roster(self, capsys):
         """Test simple formatting with empty roster."""
@@ -332,5 +338,5 @@ class TestFormatRosterSimple:
         output_lines = captured.out.strip().split('\n')
 
         assert len(output_lines) == 2
-        assert "C: (Empty)" in output_lines[0]
-        assert "LW: (Empty)" in output_lines[1]
+        assert "C (Unknown): (Empty)" in output_lines[0]
+        assert "LW (Unknown): (Empty)" in output_lines[1]

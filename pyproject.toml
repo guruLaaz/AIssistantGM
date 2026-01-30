@@ -34,7 +34,10 @@ fantrax = "fantrax_cli.cli:app"
 packages = ["fantrax_cli", "fantrax_cli.commands"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "integration_tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+]
