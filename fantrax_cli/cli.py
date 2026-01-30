@@ -1,11 +1,20 @@
 """Main CLI interface for Fantrax CLI."""
 
+import sys
+import io
 import typer
 from enum import Enum
 from typing import Optional
 from typing_extensions import Annotated
 
 from fantrax_cli import __version__
+
+# Configure UTF-8 encoding for stdout/stderr to handle Unicode characters on Windows
+# This fixes issues with team names containing special characters like "Udûn"
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
 app = typer.Typer(

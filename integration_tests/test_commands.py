@@ -20,7 +20,9 @@ def cli_runner():
         result = subprocess.run(
             ["fantrax"] + list(args),
             capture_output=True,
-            text=True
+            text=True,
+            encoding='utf-8',
+            errors='replace'
         )
         return result
     return run_command
@@ -75,8 +77,8 @@ class TestRosterCommand:
         assert result.returncode == 0, f"Command failed: {result.stderr}"
 
         if format_name == "table":
-            # Check for expected columns
-            expected_columns = ["Pos", "Roster Status", "Inj Report", "Player Name", "Salary"]
+            # Check for expected columns (note: Rich may wrap headers across lines)
+            expected_columns = ["Pos", "Roster", "Status", "Inj", "Report", "Salary", "FP Total", "FP/G"]
             for col in expected_columns:
                 assert col in result.stdout, f"Missing column: {col}"
         elif format_name == "json":

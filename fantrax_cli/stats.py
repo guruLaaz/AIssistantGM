@@ -24,7 +24,7 @@ def calculate_recent_fpg(league, team_id: str, last_n_days: int) -> dict:
             }
         }
     """
-    console = Console()
+    console = Console(stderr=True)
     today = date.today()
     start_date = today - timedelta(days=last_n_days)
 

@@ -222,7 +222,7 @@ def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats
     if team_name:
         output["team_name"] = team_name
 
-    if recent_stats and last_n_days:
+    if last_n_days:
         output["stats_period"] = f"last_{last_n_days}_days"
 
     output["roster_stats"] = {
@@ -258,7 +258,9 @@ def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats
         else:
             return None
 
-    if recent_stats:
+    if last_n_days:
+        # Ensure recent_stats is a dict (could be None or empty)
+        stats_dict = recent_stats if recent_stats else {}
         output["players"] = [
             {
                 "position": row.position.short_name,
@@ -266,9 +268,9 @@ def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats
                 "injury_report": get_injury_report(row),
                 "player_name": row.player.name if row.player else None,
                 "salary": getattr(row, 'salary', None),
-                "games_played": recent_stats[row.player.id]['games_played'] if row.player and row.player.id in recent_stats else 0,
-                "total_fantasy_points": recent_stats[row.player.id]['total_points'] if row.player and row.player.id in recent_stats else 0.0,
-                "fantasy_points_per_game": recent_stats[row.player.id]['fpg'] if row.player and row.player.id in recent_stats else 0.0,
+                "games_played": stats_dict[row.player.id]['games_played'] if row.player and row.player.id in stats_dict else 0,
+                "total_fantasy_points": stats_dict[row.player.id]['total_points'] if row.player and row.player.id in stats_dict else 0.0,
+                "fantasy_points_per_game": stats_dict[row.player.id]['fpg'] if row.player and row.player.id in stats_dict else 0.0,
             }
             for row in roster.rows
         ]
