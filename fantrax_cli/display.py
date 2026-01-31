@@ -86,7 +86,7 @@ def format_teams_simple(teams: List) -> None:
         print(f"{team.name} ({team.short})")
 
 
-def format_roster_table(roster, team_name: str = None, recent_stats: dict = None, last_n_days: int = None) -> None:
+def format_roster_table(roster, team_name: str = None, recent_stats: dict = None, last_n_days: int = None, recent_trends: dict = None) -> None:
     """
     Display roster in a formatted table using Rich.
 
@@ -95,25 +95,38 @@ def format_roster_table(roster, team_name: str = None, recent_stats: dict = None
         team_name: Optional team name to display in title.
         recent_stats: Optional dictionary of recent player stats.
         last_n_days: Optional number of days for recent stats.
+        recent_trends: Optional dictionary of 7/14/30 day trends.
     """
     console = Console()
 
     # Create table
-    if recent_stats and last_n_days:
+    if recent_trends:
+        title = f"Roster - {team_name} (with Recent Trends)" if team_name else "Roster (with Recent Trends)"
+    elif recent_stats and last_n_days:
         title = f"Roster - {team_name} (Last {last_n_days} Days)" if team_name else f"Roster (Last {last_n_days} Days)"
     else:
         title = f"Roster - {team_name}" if team_name else "Roster"
     table = Table(title=title, show_header=True, header_style="bold magenta")
 
     # Add columns
-    table.add_column("#", style="dim", width=4, justify="right")
-    table.add_column("Pos", style="cyan", width=6)
-    table.add_column("Roster Status", style="magenta", width=13)
-    table.add_column("Inj Report", style="red", width=10)
-    table.add_column("Player Name", style="green", min_width=20)
+    table.add_column("#", style="dim", width=3, justify="right")
+    table.add_column("Pos", style="cyan", width=4)
+    table.add_column("Status", style="magenta", width=7)
+    table.add_column("Inj", style="red", width=4)
+    table.add_column("Player Name", style="green", min_width=18)
     table.add_column("Salary", style="blue", width=10, justify="right")
 
-    if recent_stats:
+    if recent_trends:
+        # Add trend columns: 3 weeks (Sat-Fri), 14-day, 30-day
+        table.add_column("W1 GP", style="yellow", width=5, justify="right")
+        table.add_column("W1 FP/G", style="bold yellow", width=7, justify="right")
+        table.add_column("W2 GP", style="yellow", width=5, justify="right")
+        table.add_column("W2 FP/G", style="bold yellow", width=7, justify="right")
+        table.add_column("W3 GP", style="yellow", width=5, justify="right")
+        table.add_column("W3 FP/G", style="bold yellow", width=7, justify="right")
+        table.add_column("14d", style="cyan", width=4, justify="right")
+        table.add_column("30d", style="cyan", width=4, justify="right")
+    elif recent_stats:
         table.add_column("Games", style="yellow", width=8, justify="right")
         table.add_column("FP Total", style="yellow", width=10, justify="right")
         table.add_column(f"FP/G (L{last_n_days}d)", style="bold yellow", width=12, justify="right")
@@ -131,17 +144,17 @@ def format_roster_table(roster, team_name: str = None, recent_stats: dict = None
         if status_id == "1":
             roster_status = "Active"
         elif status_id == "2":
-            roster_status = "Reserve"
+            roster_status = "Res"
         elif status_id == "3":
             roster_status = "IR"
         else:
-            roster_status = "Unknown"
+            roster_status = "?"
 
         # Determine injury report from player flags
         injury_report = "-"
         if row.player:
             if row.player.suspended:
-                injury_report = "Suspended"
+                injury_report = "Susp"
             elif row.player.injured_reserve:
                 injury_report = "IR"
             elif row.player.out:
@@ -153,7 +166,45 @@ def format_roster_table(roster, team_name: str = None, recent_stats: dict = None
         salary_value = getattr(row, 'salary', None)
         salary = f"${salary_value:,.0f}" if salary_value else "-"
 
-        if recent_stats and row.player:
+        if recent_trends and row.player:
+            # Show recent trends (3 weeks + 14d + 30d)
+            player_id = row.player.id
+            if player_id in recent_trends:
+                trends = recent_trends[player_id]
+                # Week 1 (most recent)
+                gp_w1 = str(trends['week1']['games_played'])
+                fpg_w1 = f"{trends['week1']['fpg']:.2f}"
+                # Week 2
+                gp_w2 = str(trends['week2']['games_played'])
+                fpg_w2 = f"{trends['week2']['fpg']:.2f}"
+                # Week 3
+                gp_w3 = str(trends['week3']['games_played'])
+                fpg_w3 = f"{trends['week3']['fpg']:.2f}"
+                # 14-day and 30-day FP/G only (to save space)
+                fpg_14 = f"{trends['14']['fpg']:.2f}"
+                fpg_30 = f"{trends['30']['fpg']:.2f}"
+            else:
+                gp_w1 = gp_w2 = gp_w3 = "0"
+                fpg_w1 = fpg_w2 = fpg_w3 = "0.00"
+                fpg_14 = fpg_30 = "0.00"
+
+            table.add_row(
+                str(idx),
+                position_short,
+                roster_status,
+                injury_report,
+                player_name,
+                salary,
+                gp_w1,
+                fpg_w1,
+                gp_w2,
+                fpg_w2,
+                gp_w3,
+                fpg_w3,
+                fpg_14,
+                fpg_30
+            )
+        elif recent_stats and row.player:
             # Show recent stats
             player_id = row.player.id
             if player_id in recent_stats:
@@ -201,7 +252,7 @@ def format_roster_table(roster, team_name: str = None, recent_stats: dict = None
     console.print(f"[bold]Injured:[/bold] {roster.injured}/{roster.injured_max}")
 
 
-def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats: dict = None, last_n_days: int = None) -> None:
+def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats: dict = None, last_n_days: int = None, recent_trends: dict = None) -> None:
     """
     Display roster in JSON format.
 
@@ -211,6 +262,7 @@ def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats
         team_name: Optional team name.
         recent_stats: Optional dictionary of recent player stats.
         last_n_days: Optional number of days for recent stats.
+        recent_trends: Optional dictionary of 7/14/30 day trends.
     """
     console = Console()
 
@@ -224,6 +276,9 @@ def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats
 
     if last_n_days:
         output["stats_period"] = f"last_{last_n_days}_days"
+
+    if recent_trends:
+        output["stats_period"] = "recent_trends"
 
     output["roster_stats"] = {
         "active": f"{roster.active}/{roster.active_max}",
@@ -258,7 +313,40 @@ def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats
         else:
             return None
 
-    if last_n_days:
+    def get_trends_for_player(player_id, trends_dict):
+        """Helper to get trends data for a player."""
+        empty_week = {"games_played": 0, "total_points": 0.0, "fpg": 0.0, "start": "", "end": ""}
+        empty_period = {"games_played": 0, "total_points": 0.0, "fpg": 0.0}
+        if not trends_dict or player_id not in trends_dict:
+            return {
+                "week1": empty_week,
+                "week2": empty_week,
+                "week3": empty_week,
+                "14_day": empty_period,
+                "30_day": empty_period
+            }
+        t = trends_dict[player_id]
+        return {
+            "week1": t.get('week1', empty_week),
+            "week2": t.get('week2', empty_week),
+            "week3": t.get('week3', empty_week),
+            "14_day": {"games_played": t['14']['games_played'], "total_points": t['14']['total_points'], "fpg": t['14']['fpg']},
+            "30_day": {"games_played": t['30']['games_played'], "total_points": t['30']['total_points'], "fpg": t['30']['fpg']}
+        }
+
+    if recent_trends:
+        output["players"] = [
+            {
+                "position": row.position.short_name,
+                "roster_status": get_roster_status(row),
+                "injury_report": get_injury_report(row),
+                "player_name": row.player.name if row.player else None,
+                "salary": getattr(row, 'salary', None),
+                "trends": get_trends_for_player(row.player.id if row.player else None, recent_trends),
+            }
+            for row in roster.rows
+        ]
+    elif last_n_days:
         # Ensure recent_stats is a dict (could be None or empty)
         stats_dict = recent_stats if recent_stats else {}
         output["players"] = [
@@ -292,13 +380,14 @@ def format_roster_json(roster, team_id: str, team_name: str = None, recent_stats
     console.print_json(json.dumps(output, indent=2))
 
 
-def format_roster_simple(roster, recent_stats: dict = None) -> None:
+def format_roster_simple(roster, recent_stats: dict = None, recent_trends: dict = None) -> None:
     """
     Display roster in simple text format.
 
     Args:
         roster: Roster object from FantraxAPI.
         recent_stats: Optional dictionary of recent player stats.
+        recent_trends: Optional dictionary of 7/14/30 day trends.
     """
     for row in roster.rows:
         player_name = row.player.name if row.player else "(Empty)"
@@ -328,7 +417,13 @@ def format_roster_simple(roster, recent_stats: dict = None) -> None:
             elif row.player.day_to_day:
                 injury_report = " [DTD]"
 
-        if recent_stats and row.player and row.player.id in recent_stats:
+        if recent_trends and row.player and row.player.id in recent_trends:
+            trends = recent_trends[row.player.id]
+            w1 = trends.get('week1', {})
+            w2 = trends.get('week2', {})
+            w3 = trends.get('week3', {})
+            print(f"{row.position.short_name} ({roster_status}): {player_name}{injury_report} - {salary_str} | W1:{w1.get('games_played', 0)}G/{w1.get('fpg', 0):.2f} W2:{w2.get('games_played', 0)}G/{w2.get('fpg', 0):.2f} W3:{w3.get('games_played', 0)}G/{w3.get('fpg', 0):.2f} 14d:{trends['14']['fpg']:.2f} 30d:{trends['30']['fpg']:.2f}")
+        elif recent_stats and row.player and row.player.id in recent_stats:
             stats = recent_stats[row.player.id]
             print(f"{row.position.short_name} ({roster_status}): {player_name}{injury_report} - {salary_str} ({stats['games_played']}G, {stats['fpg']:.2f} FP/G)")
         else:

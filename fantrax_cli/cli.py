@@ -66,8 +66,10 @@ def main(
 # Import and register commands
 from fantrax_cli.commands.teams import teams_command
 from fantrax_cli.commands.roster import roster_command
+from fantrax_cli.commands.players import players_command
 app.command("teams")(teams_command)
 app.command("roster")(roster_command)
+app.command("players")(players_command)
 
 
 if __name__ == "__main__":

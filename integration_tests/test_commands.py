@@ -148,6 +148,58 @@ class TestRosterCommand:
             player = data["players"][0]
             assert "games_played" in player
 
+    @pytest.mark.slow
+    def test_roster_with_trends(self, cli_runner):
+        """Test roster command with --trends option."""
+        # This test is slow (fetches 35 days of data)
+        result = cli_runner("roster", self.TEAM_NAME, "--trends", "--format", "json")
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+
+        # Should have stats_period = recent_trends
+        assert "stats_period" in data
+        assert data["stats_period"] == "recent_trends"
+
+        # Players should have trends field with week1, week2, week3, 14_day, 30_day
+        if data["players"]:
+            player = data["players"][0]
+            assert "trends" in player
+            trends = player["trends"]
+
+            # Check for 3 weekly periods (Sat-Fri)
+            assert "week1" in trends
+            assert "week2" in trends
+            assert "week3" in trends
+            assert "14_day" in trends
+            assert "30_day" in trends
+
+            # Each week should have games_played, total_points, fpg, start, end
+            for week in ["week1", "week2", "week3"]:
+                assert "games_played" in trends[week]
+                assert "total_points" in trends[week]
+                assert "fpg" in trends[week]
+                assert "start" in trends[week]
+                assert "end" in trends[week]
+
+            # 14_day and 30_day should have games_played, total_points, fpg
+            for period in ["14_day", "30_day"]:
+                assert "games_played" in trends[period]
+                assert "total_points" in trends[period]
+                assert "fpg" in trends[period]
+
+    @pytest.mark.slow
+    def test_roster_trends_table_format(self, cli_runner):
+        """Test roster command with --trends in table format."""
+        result = cli_runner("roster", self.TEAM_NAME, "--trends")
+
+        assert result.returncode == 0
+        # Check for week column headers (W1, W2, W3)
+        assert "W1" in result.stdout
+        assert "W2" in result.stdout
+        assert "W3" in result.stdout
+        assert "FP/G" in result.stdout
+
 
 # Players command tests
 @pytest.mark.integration

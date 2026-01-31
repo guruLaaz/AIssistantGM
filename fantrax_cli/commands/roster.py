@@ -10,7 +10,7 @@ from fantrax_cli.cli import OutputFormat
 from fantrax_cli.config import load_config
 from fantrax_cli.auth import get_authenticated_league
 from fantrax_cli.display import format_roster_table, format_roster_json, format_roster_simple
-from fantrax_cli.stats import calculate_recent_fpg
+from fantrax_cli.stats import calculate_recent_fpg, calculate_recent_trends
 
 
 def roster_command(
@@ -26,6 +26,10 @@ def roster_command(
         "--last-n-days",
         help="Calculate FP/G over the last N days (Warning: requires N API calls, takes ~N seconds)"
     )] = None,
+    trends: Annotated[bool, typer.Option(
+        "--trends", "-t",
+        help="Show recent trends (7-day, 14-day, 30-day FP/G). Takes ~30 seconds."
+    )] = False,
 ):
     """Display roster for a specific team."""
     console = Console()
@@ -112,19 +116,25 @@ def roster_command(
                 raise typer.Exit(code=1)
             recent_stats = calculate_recent_fpg(league, team.id, last_n_days)
 
+        # Calculate recent trends if requested
+        recent_trends = None
+        if trends:
+            recent_trends = calculate_recent_trends(league, team.id)
+
         # Format and display based on selected format
         if format == OutputFormat.table:
-            format_roster_table(roster, team_name=team.name, recent_stats=recent_stats, last_n_days=last_n_days)
+            format_roster_table(roster, team_name=team.name, recent_stats=recent_stats, last_n_days=last_n_days, recent_trends=recent_trends)
         elif format == OutputFormat.json:
             format_roster_json(
                 roster,
                 team_id=team.id,
                 team_name=team.name,
                 recent_stats=recent_stats,
-                last_n_days=last_n_days
+                last_n_days=last_n_days,
+                recent_trends=recent_trends
             )
         else:  # simple format
-            format_roster_simple(roster, recent_stats=recent_stats)
+            format_roster_simple(roster, recent_stats=recent_stats, recent_trends=recent_trends)
 
     except ValueError as e:
         # Configuration error
