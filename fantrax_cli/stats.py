@@ -272,3 +272,132 @@ def calculate_recent_fpg(league, team_id: str, last_n_days: int) -> dict:
 
     console.print(f"\n[green]✓[/green] Fetched scores for {last_n_days} days\n")
     return result
+
+
+def fetch_fa_player_trends(league, player_ids: list, limit: int = 25, sort_key: str = 'SCORE', pos_filter: str = None) -> dict:
+    """
+    Fetch trends for free agent players using the getPlayerStats API with date ranges.
+
+    This is more efficient than daily fetching - only requires 5 API calls total
+    (one for each time period: W1, W2, W3, 14-day, 30-day).
+
+    Args:
+        league: League instance
+        player_ids: List of player IDs to get trends for (used to filter results)
+        limit: Number of players to fetch per API call
+        sort_key: Sort key for API call
+        pos_filter: Position filter for API call
+
+    Returns:
+        Dictionary mapping player IDs to their trends data
+    """
+    from fantraxapi.api import Method, _request
+    console = Console(stderr=True)
+    today = date.today()
+
+    # Get Fantrax week boundaries
+    weeks = _get_fantrax_week_boundaries(today)
+    week1_start, week1_end, _ = weeks[0]
+    week2_start, week2_end, _ = weeks[1]
+    week3_start, week3_end, _ = weeks[2]
+
+    # Calculate 14-day and 30-day boundaries
+    cutoff_30 = week1_end - timedelta(days=29)
+
+    # Define the periods we need to fetch
+    periods = [
+        ('week1', week1_start, week1_end),
+        ('week2', week2_start, week2_end),
+        ('week3', week3_start, week3_end),
+        ('14', week2_start, week1_end),  # 14-day = week1 + week2
+        ('30', cutoff_30, week1_end),    # 30-day
+    ]
+
+    # Store results: player_id -> period -> stats
+    player_trends = defaultdict(dict)
+
+    console.print(f"\n[yellow]Fetching trends data (5 API calls)...[/yellow]")
+
+    with console.status("[bold green]Fetching period stats...") as status:
+        for period_name, start_date, end_date in periods:
+            status.update(f"[bold green]Fetching {period_name} stats ({start_date} to {end_date})...")
+
+            try:
+                method_kwargs = {
+                    'statusOrTeam': 'ALL_AVAILABLE',
+                    'maxResultsPerPage': str(limit),
+                    'sortType': sort_key,
+                    'timeframeTypeCode': 'BY_DATE',
+                    'startDate': start_date.strftime('%Y-%m-%d'),
+                    'endDate': end_date.strftime('%Y-%m-%d')
+                }
+                if pos_filter:
+                    method_kwargs['scoringCategoryType'] = pos_filter
+
+                response = _request(
+                    league.league_id,
+                    Method('getPlayerStats', **method_kwargs),
+                    session=league.session
+                )
+
+                if response and 'statsTable' in response:
+                    for player in response['statsTable']:
+                        scorer = player.get('scorer', {})
+                        player_id = scorer.get('scorerId')
+                        cells = player.get('cells', [])
+
+                        # Cell 5 = FPts, Cell 6 = FP/G for the period
+                        fpts_str = cells[5].get('content', '0') if len(cells) > 5 else '0'
+                        fpg_str = cells[6].get('content', '0') if len(cells) > 6 else '0'
+
+                        # Parse values (handle empty strings)
+                        try:
+                            fpts = float(fpts_str) if fpts_str else 0.0
+                        except (ValueError, TypeError):
+                            fpts = 0.0
+                        try:
+                            fpg = float(fpg_str) if fpg_str else 0.0
+                        except (ValueError, TypeError):
+                            fpg = 0.0
+
+                        # Calculate games played (FPts / FP/G if FP/G > 0)
+                        if fpg > 0:
+                            games = round(fpts / fpg)
+                        else:
+                            games = 0
+
+                        # Store the data
+                        if period_name.startswith('week'):
+                            player_trends[player_id][period_name] = {
+                                'total_points': round(fpts, 1),
+                                'games_played': games,
+                                'fpg': round(fpg, 2),
+                                'start': start_date.strftime('%b %d'),
+                                'end': end_date.strftime('%b %d')
+                            }
+                        else:
+                            player_trends[player_id][period_name] = {
+                                'total_points': round(fpts, 1),
+                                'games_played': games,
+                                'fpg': round(fpg, 2)
+                            }
+
+            except Exception as e:
+                console.print(f"[red]Error fetching {period_name}: {e}[/red]")
+
+    # Fill in missing periods with zeros for players that didn't appear in some periods
+    empty_week = {'total_points': 0.0, 'games_played': 0, 'fpg': 0.0, 'start': '', 'end': ''}
+    empty_period = {'total_points': 0.0, 'games_played': 0, 'fpg': 0.0}
+
+    result = {}
+    for player_id, trends in player_trends.items():
+        result[player_id] = {
+            'week1': trends.get('week1', {**empty_week, 'start': week1_start.strftime('%b %d'), 'end': week1_end.strftime('%b %d')}),
+            'week2': trends.get('week2', {**empty_week, 'start': week2_start.strftime('%b %d'), 'end': week2_end.strftime('%b %d')}),
+            'week3': trends.get('week3', {**empty_week, 'start': week3_start.strftime('%b %d'), 'end': week3_end.strftime('%b %d')}),
+            '14': trends.get('14', empty_period),
+            '30': trends.get('30', empty_period)
+        }
+
+    console.print(f"\n[green]✓[/green] Fetched trends for {len(result)} players\n")
+    return result

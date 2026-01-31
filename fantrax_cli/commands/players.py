@@ -9,6 +9,7 @@ from rich.table import Table
 from fantrax_cli.cli import OutputFormat
 from fantrax_cli.config import load_config
 from fantrax_cli.auth import get_authenticated_league
+from fantrax_cli.stats import fetch_fa_player_trends
 from fantraxapi.api import Method, _request
 import json
 
@@ -31,6 +32,10 @@ def players_command(
         "--format", "-f",
         help="Output format"
     )] = OutputFormat.table,
+    trends: Annotated[bool, typer.Option(
+        "--trends", "-t",
+        help="Show recent trends (7-day, 14-day, 30-day FP/G). Requires 5 extra API calls."
+    )] = False,
 ):
     """List available free agent players."""
     console = Console()
@@ -129,17 +134,35 @@ def players_command(
         players = response['statsTable']
         total_available = response.get('paginatedResultSet', {}).get('totalNumResults', len(players))
 
+        # Fetch trends if requested
+        player_trends = {}
+        if trends:
+            # Get player IDs from the results
+            player_ids = [p.get('scorer', {}).get('scorerId') for p in players]
+            player_trends = fetch_fa_player_trends(
+                league,
+                player_ids,
+                limit=limit,
+                sort_key=sort_key,
+                pos_filter=pos_filter
+            )
+
         if format == OutputFormat.json:
             output = {
                 'total_available': total_available,
                 'showing': len(players),
                 'players': []
             }
+            if trends:
+                output['stats_period'] = 'recent_trends'
+
             for player in players:
                 scorer = player.get('scorer', {})
                 cells = player.get('cells', [])
-                output['players'].append({
-                    'id': scorer.get('scorerId'),
+                player_id = scorer.get('scorerId')
+
+                player_data = {
+                    'id': player_id,
                     'name': scorer.get('name'),
                     'team': scorer.get('teamShortName'),
                     'position': scorer.get('posShortNames'),
@@ -149,24 +172,55 @@ def players_command(
                     'salary': cells[4].get('content') if len(cells) > 4 else None,
                     'fpts': cells[5].get('content') if len(cells) > 5 else None,
                     'fpg': cells[6].get('content') if len(cells) > 6 else None,
-                })
+                }
+
+                # Add trends if available
+                if trends and player_id in player_trends:
+                    t = player_trends[player_id]
+                    player_data['trends'] = {
+                        'week1': t.get('week1', {}),
+                        'week2': t.get('week2', {}),
+                        'week3': t.get('week3', {}),
+                        '14_day': t.get('14', {}),
+                        '30_day': t.get('30', {})
+                    }
+
+                output['players'].append(player_data)
             print(json.dumps(output, indent=2))
         else:
             # Table format
-            table = Table(title=f"Available Players ({len(players)} of {total_available:,})")
+            title = f"Available Players ({len(players)} of {total_available:,})"
+            if trends:
+                title += " - with Recent Trends"
+            table = Table(title=title)
 
             table.add_column("#", style="dim", width=3)
-            table.add_column("Rk", justify="right", width=4)
-            table.add_column("Player", min_width=20)
-            table.add_column("Pos", width=4)
-            table.add_column("Team", width=5)
-            table.add_column("Salary", justify="right", width=10)
-            table.add_column("FPts", justify="right", width=6)
-            table.add_column("FP/G", justify="right", width=6)
+            table.add_column("Rk", justify="right", width=3)
+
+            if trends:
+                # Narrower player column when showing trends
+                table.add_column("Player", min_width=14)
+                table.add_column("Pos", width=3)
+                table.add_column("Team", width=4)
+                table.add_column("Salary", justify="right", width=9)
+                # Add trend columns
+                table.add_column("W1", justify="right", width=4, style="yellow")
+                table.add_column("W2", justify="right", width=4, style="yellow")
+                table.add_column("W3", justify="right", width=4, style="yellow")
+                table.add_column("14d", justify="right", width=4, style="cyan")
+                table.add_column("30d", justify="right", width=4, style="cyan")
+            else:
+                table.add_column("Player", min_width=18)
+                table.add_column("Pos", width=4)
+                table.add_column("Team", width=5)
+                table.add_column("Salary", justify="right", width=10)
+                table.add_column("FPts", justify="right", width=6)
+                table.add_column("FP/G", justify="right", width=6)
 
             for idx, player in enumerate(players, 1):
                 scorer = player.get('scorer', {})
                 cells = player.get('cells', [])
+                player_id = scorer.get('scorerId')
 
                 name = scorer.get('name', 'Unknown')
                 team = scorer.get('teamShortName', '')
@@ -174,23 +228,47 @@ def players_command(
 
                 rank = cells[0].get('content', '') if len(cells) > 0 else ''
                 salary = cells[4].get('content', '') if len(cells) > 4 else ''
-                fpts = cells[5].get('content', '') if len(cells) > 5 else ''
-                fpg = cells[6].get('content', '') if len(cells) > 6 else ''
 
                 # Format salary
                 if salary and salary.isdigit():
                     salary = f"${int(salary):,}"
 
-                table.add_row(
-                    str(idx),
-                    rank,
-                    name,
-                    position_str,
-                    team,
-                    salary,
-                    fpts,
-                    fpg
-                )
+                if trends:
+                    # Get trends data for this player
+                    t = player_trends.get(player_id, {})
+                    w1_fpg = f"{t.get('week1', {}).get('fpg', 0):.2f}"
+                    w2_fpg = f"{t.get('week2', {}).get('fpg', 0):.2f}"
+                    w3_fpg = f"{t.get('week3', {}).get('fpg', 0):.2f}"
+                    d14_fpg = f"{t.get('14', {}).get('fpg', 0):.2f}"
+                    d30_fpg = f"{t.get('30', {}).get('fpg', 0):.2f}"
+
+                    table.add_row(
+                        str(idx),
+                        rank,
+                        name,
+                        position_str,
+                        team,
+                        salary,
+                        w1_fpg,
+                        w2_fpg,
+                        w3_fpg,
+                        d14_fpg,
+                        d30_fpg
+                    )
+                else:
+                    fpts = cells[5].get('content', '') if len(cells) > 5 else ''
+                    fpg = cells[6].get('content', '') if len(cells) > 6 else ''
+
+                    table.add_row(
+                        str(idx),
+                        rank,
+                        name,
+                        position_str,
+                        team,
+                        salary,
+                        fpts,
+                        fpg
+                    )
 
             console.print(table)
             console.print(f"\n[dim]Showing top {len(players)} of {total_available:,} available players[/dim]")
