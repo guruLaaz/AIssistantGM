@@ -149,6 +149,89 @@ class TestRosterCommand:
             assert "games_played" in player
 
 
+# Players command tests
+@pytest.mark.integration
+class TestPlayersCommand:
+    """Integration tests for the players command."""
+
+    @pytest.mark.parametrize("format_arg,format_name", [
+        ([], "table"),
+        (["--format", "json"], "json"),
+    ])
+    def test_players_output_formats(self, cli_runner, format_arg, format_name):
+        """Test players command with different output formats."""
+        result = cli_runner("players", "--limit", "5", *format_arg)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        if format_name == "table":
+            # Check for expected columns
+            assert "Player" in result.stdout
+            assert "Pos" in result.stdout
+            assert "Team" in result.stdout
+            assert "Available Players" in result.stdout
+        elif format_name == "json":
+            data = json.loads(result.stdout)
+            assert "total_available" in data
+            assert "showing" in data
+            assert "players" in data
+            assert len(data["players"]) == 5
+
+    def test_players_limit_option(self, cli_runner):
+        """Test players command with --limit option."""
+        result = cli_runner("players", "--limit", "10", "--format", "json")
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+
+        assert data["showing"] == 10
+        assert len(data["players"]) == 10
+
+    def test_players_sort_option(self, cli_runner):
+        """Test players command with --sort option."""
+        # Test sorting by FP/G
+        result = cli_runner("players", "--limit", "5", "--sort", "fpg", "--format", "json")
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+
+        assert len(data["players"]) > 0
+        # All players should have fpg field
+        for player in data["players"]:
+            assert "fpg" in player
+
+    def test_players_json_structure(self, cli_runner):
+        """Test that players JSON output has expected fields."""
+        result = cli_runner("players", "--limit", "3", "--format", "json")
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+
+        # Check top-level structure
+        assert "total_available" in data
+        assert "showing" in data
+        assert "players" in data
+        assert data["total_available"] > 0
+
+        # Check player structure
+        if data["players"]:
+            player = data["players"][0]
+            expected_fields = ["id", "name", "team", "position", "rank", "status", "salary", "fpts", "fpg"]
+            for field in expected_fields:
+                assert field in player, f"Missing field: {field}"
+
+    def test_players_returns_free_agents(self, cli_runner):
+        """Test that players command returns free agents (FA status)."""
+        result = cli_runner("players", "--limit", "5", "--format", "json")
+
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+
+        # All returned players should be free agents
+        for player in data["players"]:
+            assert player["status"] == "FA", f"Player {player['name']} is not FA: {player['status']}"
+
+
 # Smoke tests for other potential commands
 @pytest.mark.integration
 class TestCliBasics:
