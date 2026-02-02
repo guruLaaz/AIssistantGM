@@ -2,7 +2,10 @@
 .env
 *.cookie
 
+#debug files
 nul
+*.txt
+*.html
 
 # Python
 __pycache__/

@@ -688,7 +688,9 @@ class SyncManager:
         news_by_player: dict[str, list] = {}
 
         try:
-            # Call getPlayerNews with poolType='ALL' to get news for all players
+            # Call getPlayerNews API
+            # Note: The Fantrax API only returns current day's news regardless of parameters.
+            # Historical news must be accumulated through regular syncs over time.
             response = request(self.league, Method("getPlayerNews", poolType="ALL"))
             self.api_calls += 1
 

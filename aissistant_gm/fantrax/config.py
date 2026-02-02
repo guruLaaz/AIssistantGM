@@ -28,6 +28,7 @@ class Config:
     fa_fetch_limit: int = 5000  # Free agents to fetch
     sync_days_scores: int = 35  # Days of daily scores to sync
     max_news_per_player: int = 30  # Max news items kept per player
+    news_days_back: int = 30  # Days of news history to fetch (0 = API default)
     # Browser automation settings
     selenium_timeout: int = 10  # Seconds to wait for page elements
     login_wait_time: int = 5  # Seconds to wait after login
@@ -107,6 +108,7 @@ def load_config(league_id: Optional[str] = None) -> Config:
     fa_fetch_limit = int(os.getenv("FANTRAX_FA_FETCH_LIMIT", "5000"))
     sync_days_scores = int(os.getenv("FANTRAX_SYNC_DAYS_SCORES", "35"))
     max_news_per_player = int(os.getenv("FANTRAX_MAX_NEWS_PER_PLAYER", "30"))
+    news_days_back = int(os.getenv("FANTRAX_NEWS_DAYS_BACK", "30"))
 
     # Browser automation settings
     selenium_timeout = int(os.getenv("FANTRAX_SELENIUM_TIMEOUT", "10"))
@@ -130,6 +132,7 @@ def load_config(league_id: Optional[str] = None) -> Config:
         fa_fetch_limit=fa_fetch_limit,
         sync_days_scores=sync_days_scores,
         max_news_per_player=max_news_per_player,
+        news_days_back=news_days_back,
         selenium_timeout=selenium_timeout,
         login_wait_time=login_wait_time,
         browser_window_size=browser_window_size,

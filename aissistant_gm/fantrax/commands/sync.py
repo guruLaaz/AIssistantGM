@@ -6,17 +6,20 @@ from rich.console import Console
 from rich.table import Table
 from datetime import datetime
 
+from pathlib import Path
+
 from aissistant_gm.fantrax.config import load_config
 from aissistant_gm.fantrax.auth import get_authenticated_league
 from aissistant_gm.fantrax.database import DatabaseManager, get_cache_age_hours
 from aissistant_gm.fantrax.sync import SyncManager, get_sync_status
+from aissistant_gm.fantrax.scraper import FantraxScraper
 
 
 def sync_command(
     ctx: typer.Context,
     full: Annotated[bool, typer.Option(
         "--full",
-        help="Full sync: teams, standings, rosters, scores, trends, matchups, transactions, and news"
+        help="Full sync: teams, standings, rosters, scores, trends, matchups, transactions, news + web scrape"
     )] = False,
     teams: Annotated[bool, typer.Option(
         "--teams",
@@ -44,8 +47,16 @@ def sync_command(
     )] = False,
     news: Annotated[bool, typer.Option(
         "--news",
-        help="Sync player news for all rostered players"
+        help="Sync player news for all rostered players (API - current day only)"
     )] = False,
+    scrape_news: Annotated[bool, typer.Option(
+        "--scrape-news",
+        help="Scrape historical player news from website (goes back ~2 weeks)"
+    )] = False,
+    scrape_pages: Annotated[int, typer.Option(
+        "--scrape-pages",
+        help="Number of pages to scrape for news (default: 5)"
+    )] = 5,
     no_news: Annotated[bool, typer.Option(
         "--no-news",
         help="Skip player news sync during --full sync"
@@ -106,7 +117,7 @@ def sync_command(
             return
 
         # If no specific flags, show help
-        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents, news, transactions, matchups]):
+        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents, news, scrape_news, transactions, matchups]):
             console.print("[yellow]No sync option specified. Use --help for options.[/yellow]")
             console.print("\nQuick options:")
             console.print("  [bold]fantrax sync --full[/bold]          Full sync (includes all data)")
@@ -115,7 +126,8 @@ def sync_command(
             console.print("  [bold]fantrax sync --rosters[/bold]       Update just rosters")
             console.print("  [bold]fantrax sync --transactions[/bold]  Sync transaction history")
             console.print("  [bold]fantrax sync --matchups[/bold]      Sync matchup schedules")
-            console.print("  [bold]fantrax sync --news[/bold]          Update player news")
+            console.print("  [bold]fantrax sync --news[/bold]          Update player news (API)")
+            console.print("  [bold]fantrax sync --scrape-news[/bold]   Scrape historical news (website)")
             return
 
         # Authenticate with Fantrax
@@ -188,6 +200,39 @@ def sync_command(
                 include_news=not no_news
             )
             _show_sync_result(console, result)
+
+            # Also scrape historical news (unless --no-news)
+            if not no_news:
+                console.print("\n[bold blue]→[/bold blue] Scraping historical player news from website...")
+                scraper = FantraxScraper(
+                    league_id=config.league_id,
+                    username=config.username,
+                    password=config.password,
+                    cookie_file=Path(config.cookie_file),
+                    console=console,
+                    selenium_timeout=config.selenium_timeout,
+                    login_wait_time=config.login_wait_time,
+                    browser_window_size=config.browser_window_size,
+                    user_agent=config.user_agent
+                )
+                scraped_news = scraper.scrape_player_news(max_pages=5)
+                if scraped_news:
+                    scraped_news = scraper.match_players_with_database(scraped_news, db)
+                    saved_count = 0
+                    max_news = config.max_news_per_player
+                    for item in scraped_news:
+                        if item.get('player_id'):
+                            db.save_player_news(
+                                player_id=item['player_id'],
+                                news_items=[{
+                                    'news_date': item['news_date'],
+                                    'headline': item['headline'],
+                                    'analysis': item.get('analysis', '')
+                                }],
+                                max_news_per_player=max_news
+                            )
+                            saved_count += 1
+                    console.print(f"[green]✓[/green] Scraped and saved news for {saved_count} players")
             return
 
         # Handle individual sync options
@@ -242,7 +287,7 @@ def sync_command(
             api_calls += sync_manager.api_calls
 
         if news:
-            console.print("\n[bold blue]→[/bold blue] Syncing player news...")
+            console.print("\n[bold blue]→[/bold blue] Syncing player news (API)...")
             if not teams and not rosters:
                 sync_manager.sync_league_metadata()
                 sync_manager.sync_teams()
@@ -250,6 +295,47 @@ def sync_command(
             count = sync_manager.sync_player_news()
             console.print(f"[green]✓[/green] Synced news for {count} players")
             api_calls += sync_manager.api_calls
+
+        if scrape_news:
+            console.print("\n[bold blue]→[/bold blue] Scraping historical player news from website...")
+            scraper = FantraxScraper(
+                league_id=config.league_id,
+                username=config.username,
+                password=config.password,
+                cookie_file=Path(config.cookie_file),
+                console=console,
+                selenium_timeout=config.selenium_timeout,
+                login_wait_time=config.login_wait_time,
+                browser_window_size=config.browser_window_size,
+                user_agent=config.user_agent
+            )
+
+            # Scrape news from website
+            scraped_news = scraper.scrape_player_news(max_pages=scrape_pages)
+
+            if scraped_news:
+                # Match player names with database IDs
+                scraped_news = scraper.match_players_with_database(scraped_news, db)
+
+                # Save to database
+                saved_count = 0
+                max_news = config.max_news_per_player
+                for item in scraped_news:
+                    if item.get('player_id'):
+                        db.save_player_news(
+                            player_id=item['player_id'],
+                            news_items=[{
+                                'news_date': item['news_date'],
+                                'headline': item['headline'],
+                                'analysis': item.get('analysis', '')
+                            }],
+                            max_news_per_player=max_news
+                        )
+                        saved_count += 1
+
+                console.print(f"[green]✓[/green] Scraped and saved news for {saved_count} players")
+            else:
+                console.print("[yellow]No news items scraped[/yellow]")
 
         if transactions:
             console.print("\n[bold blue]→[/bold blue] Syncing transactions...")
