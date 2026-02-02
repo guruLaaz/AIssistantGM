@@ -455,7 +455,7 @@ class SyncManager:
     def sync_free_agents(
         self,
         sort_keys: Optional[list] = None,
-        limit: int = 100
+        limit: int = 5000
     ) -> int:
         """
         Sync free agent listings.
