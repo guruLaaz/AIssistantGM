@@ -1,10 +1,12 @@
 """Configuration management for Fantrax CLI."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import Optional
+
+import platformdirs
 
 
 @dataclass
@@ -16,11 +18,25 @@ class Config:
     league_id: str
     cookie_file: str = "fantraxloggedin.cookie"
     min_request_interval: float = 1.0  # Minimum seconds between API requests
+    # Database/cache settings
+    db_path: Optional[Path] = None  # None = use default location
+    cache_enabled: bool = True
+    cache_max_age_hours: float = 24.0
 
     @property
     def cookie_path(self) -> Path:
         """Get the full path to the cookie file."""
         return Path.cwd() / self.cookie_file
+
+    @property
+    def database_path(self) -> Path:
+        """Get the full path to the database file."""
+        if self.db_path:
+            return self.db_path
+        # Default: platform-specific data directory
+        data_dir = Path(platformdirs.user_data_dir("fantrax-cli"))
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "fantrax_cache.db"
 
 
 def load_config(league_id: Optional[str] = None) -> Config:
@@ -67,10 +83,19 @@ def load_config(league_id: Optional[str] = None) -> Config:
     cookie_file = os.getenv("FANTRAX_COOKIE_FILE", "fantraxloggedin.cookie")
     min_request_interval = float(os.getenv("FANTRAX_MIN_REQUEST_INTERVAL", "1.0"))
 
+    # Database/cache configuration
+    db_path_str = os.getenv("FANTRAX_DB_PATH")
+    db_path = Path(db_path_str) if db_path_str else None
+    cache_enabled = os.getenv("FANTRAX_CACHE_ENABLED", "true").lower() in ("true", "1", "yes")
+    cache_max_age_hours = float(os.getenv("FANTRAX_CACHE_MAX_AGE_HOURS", "24.0"))
+
     return Config(
         username=username,
         password=password,
         league_id=final_league_id,
         cookie_file=cookie_file,
-        min_request_interval=min_request_interval
+        min_request_interval=min_request_interval,
+        db_path=db_path,
+        cache_enabled=cache_enabled,
+        cache_max_age_hours=cache_max_age_hours
     )

@@ -51,6 +51,14 @@ def main(
         is_eager=True,
         help="Show version and exit"
     )] = None,
+    no_cache: Annotated[bool, typer.Option(
+        "--no-cache",
+        help="Bypass local cache and always fetch fresh data from API"
+    )] = False,
+    refresh: Annotated[bool, typer.Option(
+        "--refresh", "-r",
+        help="Force refresh cache before executing command"
+    )] = False,
 ):
     """
     Fantrax CLI - Interact with Fantrax Fantasy Sports API.
@@ -58,18 +66,22 @@ def main(
     Use environment variables or .env file for configuration.
     See .env.example for required variables.
     """
-    # Store league_id in context for subcommands
+    # Store options in context for subcommands
     ctx.ensure_object(dict)
     ctx.obj["league_id"] = league_id
+    ctx.obj["no_cache"] = no_cache
+    ctx.obj["refresh"] = refresh
 
 
 # Import and register commands
 from fantrax_cli.commands.teams import teams_command
 from fantrax_cli.commands.roster import roster_command
 from fantrax_cli.commands.players import players_command
+from fantrax_cli.commands.sync import sync_command
 app.command("teams")(teams_command)
 app.command("roster")(roster_command)
 app.command("players")(players_command)
+app.command("sync")(sync_command)
 
 
 if __name__ == "__main__":

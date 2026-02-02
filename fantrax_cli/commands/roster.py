@@ -11,6 +11,8 @@ from fantrax_cli.config import load_config
 from fantrax_cli.auth import get_authenticated_league
 from fantrax_cli.display import format_roster_table, format_roster_json, format_roster_simple
 from fantrax_cli.stats import calculate_recent_fpg, calculate_recent_trends
+from fantrax_cli.database import DatabaseManager
+from fantrax_cli.cache import CacheManager, format_cache_age
 
 
 def roster_command(
@@ -36,10 +38,55 @@ def roster_command(
 
     try:
         # Load configuration
-        league_id_override = ctx.obj.get("league_id")
+        league_id_override = ctx.obj.get("league_id") if ctx.obj else None
+        no_cache = ctx.obj.get("no_cache", False) if ctx.obj else False
+        refresh = ctx.obj.get("refresh", False) if ctx.obj else False
         config = load_config(league_id=league_id_override)
 
-        # Authenticate and get League instance
+        # Initialize database and cache manager
+        db = DatabaseManager(db_path=config.database_path)
+        cache = CacheManager(db, config)
+
+        # Try to get team from cache first (for team ID lookup)
+        team_from_cache = cache.get_team_by_identifier(team_identifier)
+        team_id = team_from_cache['id'] if team_from_cache else None
+
+        # Check if we can serve from cache (basic roster without last_n_days)
+        if config.cache_enabled and not no_cache and not refresh and not last_n_days:
+            if team_id:
+                # Check roster cache
+                roster_result = cache.get_roster(team_id)
+
+                if roster_result.from_cache and not roster_result.stale:
+                    # If trends requested, check trends cache
+                    if trends:
+                        trends_result = cache.get_player_trends(team_id)
+                        if trends_result.from_cache and not trends_result.stale:
+                            # Both roster and trends are cached
+                            age_str = format_cache_age(roster_result.cache_age_hours)
+                            console.print(f"[dim]Using cached data (synced {age_str})[/dim]\n")
+                            _display_cached_roster(
+                                roster_result.data,
+                                team_from_cache,
+                                trends_result.data,
+                                format,
+                                console
+                            )
+                            return
+                    else:
+                        # No trends requested, serve from cache
+                        age_str = format_cache_age(roster_result.cache_age_hours)
+                        console.print(f"[dim]Using cached data (synced {age_str})[/dim]\n")
+                        _display_cached_roster(
+                            roster_result.data,
+                            team_from_cache,
+                            None,
+                            format,
+                            console
+                        )
+                        return
+
+        # Cache miss or features not supported by cache - fetch from API
         with console.status("[bold green]Authenticating with Fantrax..."):
             # Monkey-patch the League class to handle missing scoringPeriodList
             from fantraxapi.objs.league import League
@@ -108,6 +155,13 @@ def roster_command(
             console.print(f"[yellow]No roster found for team {team.name}.[/yellow]")
             return
 
+        # Update cache with roster data
+        if config.cache_enabled and not no_cache:
+            try:
+                _cache_roster(db, config.league_id, team, roster)
+            except Exception:
+                pass  # Don't fail if caching fails
+
         # Calculate recent FP/G if requested
         recent_stats = None
         if last_n_days:
@@ -120,6 +174,26 @@ def roster_command(
         recent_trends = None
         if trends:
             recent_trends = calculate_recent_trends(league, team.id)
+            # Cache the trends
+            if config.cache_enabled and not no_cache and recent_trends:
+                try:
+                    for player_id, trend_data in recent_trends.items():
+                        # Convert to cache format
+                        cache_trends = {}
+                        for period, data in trend_data.items():
+                            cache_trends[period] = {
+                                'total': data.get('total_points', 0),
+                                'games': data.get('games', 0),
+                                'fpg': data.get('fpg', 0),
+                                'start': data.get('start', ''),
+                                'end': data.get('end', '')
+                            }
+                        db.save_player_trends(player_id, cache_trends)
+                    # Log trends sync
+                    sync_id = db.log_sync_start('trends', config.league_id)
+                    db.log_sync_complete(sync_id, 35)
+                except Exception:
+                    pass
 
         # Format and display based on selected format
         if format == OutputFormat.table:
@@ -146,3 +220,125 @@ def roster_command(
         console.print("\n[dim]Full traceback:[/dim]")
         console.print(traceback.format_exc())
         raise typer.Exit(code=1)
+
+
+def _cache_roster(db: DatabaseManager, league_id: str, team, roster) -> None:
+    """Cache roster data to database."""
+    players = []
+    roster_rows = []
+
+    for row in roster.rows:
+        if row.player:
+            player = row.player
+            player_team = getattr(player, 'team', None)
+            players.append({
+                'id': player.id,
+                'name': player.name,
+                'short_name': getattr(player, 'short_name', None),
+                'team_name': player_team.name if player_team else None,
+                'team_short_name': player_team.short if player_team else None,
+                'position_short_names': ','.join(p.short for p in player.positions) if player.positions else None,
+                'day_to_day': 1 if getattr(player, 'day_to_day', False) else 0,
+                'out': 1 if getattr(player, 'out', False) else 0,
+                'injured_reserve': 1 if getattr(player, 'injured_reserve', False) else 0,
+                'suspended': 1 if getattr(player, 'suspended', False) else 0
+            })
+
+        roster_rows.append({
+            'player_id': row.player.id if row.player else None,
+            'position_id': row.position.id if row.position else '',
+            'position_short': row.position.short if row.position else '',
+            'status_id': row.status_id,
+            'salary': float(row.salary) if row.salary else None,
+            'total_fantasy_points': row.fantasy_points,
+            'fantasy_points_per_game': row.fantasy_points_per_game
+        })
+
+    if players:
+        db.save_players(players)
+    db.save_roster(team.id, roster_rows)
+
+    # Log the sync
+    sync_id = db.log_sync_start('rosters', league_id)
+    db.log_sync_complete(sync_id, 1)
+
+
+def _display_cached_roster(
+    roster_data: list[dict],
+    team_data: dict,
+    trends_data: Optional[dict],
+    format: OutputFormat,
+    console: Console
+) -> None:
+    """Display roster from cached data."""
+    if not roster_data:
+        console.print("[yellow]No roster data in cache.[/yellow]")
+        return
+
+    # Create mock objects for display functions
+    class MockPosition:
+        def __init__(self, short):
+            self.short = short
+
+    class MockTeam:
+        def __init__(self, name, short):
+            self.name = name
+            self.short = short
+
+    class MockPlayer:
+        def __init__(self, data):
+            self.id = data.get('player_id') or data.get('id')
+            self.name = data.get('player_name') or data.get('name', '')
+            self.team = MockTeam(
+                data.get('team_name', ''),
+                data.get('team_short_name', '')
+            ) if data.get('team_name') else None
+            pos_str = data.get('position_short_names', '')
+            self.positions = [MockPosition(p) for p in pos_str.split(',')] if pos_str else []
+            self.day_to_day = bool(data.get('day_to_day', 0))
+            self.out = bool(data.get('out', 0))
+            self.injured_reserve = bool(data.get('injured_reserve', 0))
+            self.suspended = bool(data.get('suspended', 0))
+
+    class MockRosterRow:
+        def __init__(self, data):
+            self.position = MockPosition(data.get('position_short', ''))
+            self.player = MockPlayer(data) if data.get('player_id') else None
+            self.status_id = data.get('status_id')
+            self.salary = data.get('salary')
+            self.fantasy_points = data.get('total_fantasy_points')
+            self.fantasy_points_per_game = data.get('fantasy_points_per_game')
+
+    class MockRoster:
+        def __init__(self, rows_data):
+            self.rows = [MockRosterRow(r) for r in rows_data]
+
+    roster = MockRoster(roster_data)
+    team_name = team_data.get('name', 'Unknown Team')
+
+    # Convert trends data format if present
+    recent_trends = None
+    if trends_data:
+        recent_trends = {}
+        for player_id, periods in trends_data.items():
+            recent_trends[player_id] = {}
+            for period, data in periods.items():
+                recent_trends[player_id][period] = {
+                    'total_points': data.get('total', 0),
+                    'games_played': data.get('games', 0),
+                    'fpg': data.get('fpg', 0),
+                    'start': data.get('start', ''),
+                    'end': data.get('end', '')
+                }
+
+    if format == OutputFormat.table:
+        format_roster_table(roster, team_name=team_name, recent_trends=recent_trends)
+    elif format == OutputFormat.json:
+        format_roster_json(
+            roster,
+            team_id=team_data.get('id', ''),
+            team_name=team_name,
+            recent_trends=recent_trends
+        )
+    else:
+        format_roster_simple(roster, recent_trends=recent_trends)

@@ -9,6 +9,8 @@ from fantrax_cli.cli import OutputFormat
 from fantrax_cli.config import load_config
 from fantrax_cli.auth import get_authenticated_league
 from fantrax_cli.display import format_teams_table, format_teams_json, format_teams_simple
+from fantrax_cli.database import DatabaseManager
+from fantrax_cli.cache import CacheManager, format_cache_age
 
 
 def teams_command(
@@ -23,10 +25,31 @@ def teams_command(
 
     try:
         # Load configuration
-        league_id_override = ctx.obj.get("league_id")
+        league_id_override = ctx.obj.get("league_id") if ctx.obj else None
+        no_cache = ctx.obj.get("no_cache", False) if ctx.obj else False
+        refresh = ctx.obj.get("refresh", False) if ctx.obj else False
         config = load_config(league_id=league_id_override)
 
-        # Authenticate and get League instance
+        # Initialize database and cache manager
+        db = DatabaseManager(db_path=config.database_path)
+        cache = CacheManager(db, config)
+
+        # Check cache first (unless --no-cache or --refresh)
+        if config.cache_enabled and not no_cache and not refresh:
+            cache_result = cache.get_teams()
+            if cache_result.from_cache and not cache_result.stale:
+                league_name = cache.get_league_name() or "Unknown League"
+                teams_data = cache_result.data
+
+                # Show cache status
+                age_str = format_cache_age(cache_result.cache_age_hours)
+                console.print(f"[dim]Using cached data (synced {age_str})[/dim]\n")
+
+                # Format and display
+                _display_teams(teams_data, league_name, config.league_id, format, console)
+                return
+
+        # Cache miss or refresh requested - fetch from API
         with console.status("[bold green]Authenticating with Fantrax..."):
             # Monkey-patch the League class to handle missing scoringPeriodList
             from fantraxapi.objs.league import League
@@ -84,6 +107,29 @@ def teams_command(
             console.print("[yellow]No teams found in this league.[/yellow]")
             return
 
+        # Update cache with fresh data (unless --no-cache)
+        if config.cache_enabled and not no_cache:
+            try:
+                # Save league metadata
+                db.save_league_metadata(
+                    league_id=config.league_id,
+                    name=league.name,
+                    year=getattr(league, 'year', None),
+                    start_date=getattr(league, 'start_date', None),
+                    end_date=getattr(league, 'end_date', None)
+                )
+                # Save teams
+                teams_data = [
+                    {'id': t.id, 'name': t.name, 'short_name': t.short}
+                    for t in teams
+                ]
+                db.save_teams(config.league_id, teams_data)
+                # Log the sync
+                sync_id = db.log_sync_start('teams', config.league_id)
+                db.log_sync_complete(sync_id, 6)  # ~6 API calls for auth
+            except Exception:
+                pass  # Don't fail if caching fails
+
         # Format and display based on selected format
         if format == OutputFormat.table:
             format_teams_table(teams, league_name=league.name)
@@ -107,3 +153,30 @@ def teams_command(
         console.print("\n[dim]Full traceback:[/dim]")
         console.print(traceback.format_exc())
         raise typer.Exit(code=1)
+
+
+def _display_teams(teams_data: list[dict], league_name: str, league_id: str, format: OutputFormat, console: Console):
+    """Display teams from cached data."""
+    if not teams_data:
+        console.print("[yellow]No teams found in cache.[/yellow]")
+        return
+
+    # Convert cached dicts to mock Team objects for display functions
+    class MockTeam:
+        def __init__(self, data):
+            self.id = data['id']
+            self.name = data['name']
+            self.short = data.get('short_name', data.get('short', ''))
+
+    teams = [MockTeam(t) for t in teams_data]
+
+    if format == OutputFormat.table:
+        format_teams_table(teams, league_name=league_name)
+    elif format == OutputFormat.json:
+        format_teams_json(
+            teams,
+            league_id=league_id,
+            league_name=league_name
+        )
+    else:
+        format_teams_simple(teams)
