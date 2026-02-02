@@ -12,6 +12,7 @@ from fantrax_cli.config import Config
 CACHE_MAX_AGE = {
     'league_metadata': 168.0,   # 1 week (rarely changes)
     'teams': 168.0,             # 1 week (rarely changes)
+    'standings': 12.0,          # 12 hours (changes after games)
     'rosters': 12.0,            # 12 hours
     'daily_scores': 24.0,       # 1 day
     'trends': 24.0,             # 1 day
@@ -152,6 +153,81 @@ class CacheManager:
             Team dict or None if not found
         """
         return self.db.get_team_by_identifier(self.config.league_id, identifier)
+
+    # ==================== Standings ====================
+
+    def get_standings(self, force_refresh: bool = False) -> CacheResult:
+        """
+        Get standings from cache.
+
+        Args:
+            force_refresh: If True, indicates caller wants fresh data
+
+        Returns:
+            CacheResult with standings data and cache status
+        """
+        if not self._cache_enabled or force_refresh:
+            return CacheResult(data=None, from_cache=False)
+
+        standings = self.db.get_standings(self.config.league_id)
+        if not standings:
+            return CacheResult(data=None, from_cache=False)
+
+        # Check freshness
+        last_sync = self.db.get_last_sync(self.config.league_id, 'standings')
+        if not last_sync:
+            # Data exists but no sync record - use it but mark as potentially stale
+            return CacheResult(
+                data=standings,
+                from_cache=True,
+                stale=True
+            )
+
+        age = get_cache_age_hours(last_sync['completed_at'])
+        is_stale = not is_cache_fresh(last_sync['completed_at'], self.get_max_age('standings'))
+
+        return CacheResult(
+            data=standings,
+            from_cache=True,
+            cache_age_hours=age,
+            stale=is_stale
+        )
+
+    def get_teams_with_standings(self, force_refresh: bool = False) -> CacheResult:
+        """
+        Get teams with their standings info from cache.
+
+        Args:
+            force_refresh: If True, indicates caller wants fresh data
+
+        Returns:
+            CacheResult with teams+standings data ordered by rank
+        """
+        if not self._cache_enabled or force_refresh:
+            return CacheResult(data=None, from_cache=False)
+
+        teams = self.db.get_teams_with_standings(self.config.league_id)
+        if not teams:
+            return CacheResult(data=None, from_cache=False)
+
+        # Check freshness - use standings freshness
+        last_sync = self.db.get_last_sync(self.config.league_id, 'standings')
+        if not last_sync:
+            # Check teams sync instead
+            last_sync = self.db.get_last_sync(self.config.league_id, 'teams')
+
+        if not last_sync:
+            return CacheResult(data=teams, from_cache=True, stale=True)
+
+        age = get_cache_age_hours(last_sync['completed_at'])
+        is_stale = not is_cache_fresh(last_sync['completed_at'], self.get_max_age('standings'))
+
+        return CacheResult(
+            data=teams,
+            from_cache=True,
+            cache_age_hours=age,
+            stale=is_stale
+        )
 
     # ==================== Rosters ====================
 

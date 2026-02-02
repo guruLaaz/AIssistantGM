@@ -50,7 +50,7 @@ class TestDatabaseManager:
         expected_tables = [
             'daily_scores', 'free_agents', 'league_metadata',
             'player_trends', 'players', 'roster_slots',
-            'schema_version', 'sync_log', 'teams'
+            'schema_version', 'standings', 'sync_log', 'teams'
         ]
         assert sorted(tables) == sorted(expected_tables)
 

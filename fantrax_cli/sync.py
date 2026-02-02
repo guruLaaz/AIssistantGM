@@ -56,6 +56,7 @@ class SyncManager:
         try:
             stats = {
                 'teams': 0,
+                'standings': 0,
                 'players': 0,
                 'roster_slots': 0,
                 'daily_scores': 0,
@@ -70,6 +71,10 @@ class SyncManager:
             # Step 2: Sync teams
             self._log_step("Syncing teams...")
             stats['teams'] = self.sync_teams()
+
+            # Step 2.5: Sync standings
+            self._log_step("Syncing standings...")
+            stats['standings'] = self.sync_standings()
 
             # Step 3: Sync all rosters
             self._log_step("Syncing rosters...")
@@ -131,6 +136,97 @@ class SyncManager:
 
         self.db.save_teams(self.league.league_id, teams_data)
         return len(teams_data)
+
+    def sync_standings(self, debug: bool = False) -> int:
+        """
+        Sync standings to database.
+
+        Args:
+            debug: If True, print raw API field names for debugging
+
+        Returns:
+            Number of team standings synced
+        """
+        from fantraxapi import api as fantrax_api
+
+        try:
+            # Get raw API response to see available fields
+            response = fantrax_api.get_standings(self.league)
+            self.api_calls += 1
+
+            if not response or 'tableList' not in response or not response['tableList']:
+                self.console.print("[yellow]Warning: No standings data in API response[/yellow]")
+                return 0
+
+            table_data = response['tableList'][0]
+
+            # Extract field names from header
+            fields = {c["key"]: i for i, c in enumerate(table_data["header"]["cells"])}
+
+            if debug:
+                self.console.print(f"\n[bold cyan]Available standings fields:[/bold cyan] {list(fields.keys())}")
+
+            # Parse standings data directly from raw response
+            standings_data = []
+            for obj in table_data["rows"]:
+                team_id = obj["fixedCells"][1]["teamId"]
+                rank = int(obj["fixedCells"][0]["content"])
+                cells = obj["cells"]
+
+                # Helper to get cell value
+                def get_cell(field_name, default=0):
+                    if field_name not in fields:
+                        return default
+                    idx = fields[field_name]
+                    content = cells[idx].get("content", "")
+                    if content == "" or content == "-":
+                        return default
+                    try:
+                        # Handle comma-separated numbers
+                        return float(content.replace(",", ""))
+                    except (ValueError, TypeError):
+                        return default
+
+                # Try different field names for fantasy points (varies by league type)
+                # fantasyPoints, fPts, pointsFor are all possible field names
+                fpts = get_cell("fantasyPoints", 0) or get_cell("fPts", 0) or get_cell("pointsFor", 0)
+                # sc (scorer count), gp are possible field names for games played
+                gp = get_cell("sc", 0) or get_cell("gp", 0)
+                # FPtsPerGame, fpGp, fPtsPerGp are possible field names for FP/G
+                fpg = get_cell("FPtsPerGame", 0) or get_cell("fpGp", 0) or get_cell("fPtsPerGp", 0)
+
+                if debug and rank == 1:
+                    self.console.print(f"[dim]First team raw values: fantasyPoints={get_cell('fantasyPoints')}, sc={get_cell('sc')}, FPtsPerGame={get_cell('FPtsPerGame')}[/dim]")
+
+                standings_data.append({
+                    'team_id': team_id,
+                    'rank': rank,
+                    'wins': int(get_cell("win", 0)),
+                    'losses': int(get_cell("loss", 0)),
+                    'ties': int(get_cell("tie", 0)),
+                    'points': int(get_cell("points", 0)),
+                    'win_percentage': get_cell("winpc", 0),
+                    'games_back': get_cell("gamesback", 0),
+                    'waiver_order': int(get_cell("wwOrder", 0)) if get_cell("wwOrder", 0) else None,
+                    'points_for': fpts,
+                    'points_against': get_cell("pointsAgainst", 0),
+                    'streak': cells[fields["streak"]].get("content", "") if "streak" in fields else "",
+                    # Store GP separately for display
+                    'games_played': int(gp),
+                    'fpg': fpg
+                })
+
+        except Exception as e:
+            self.console.print(f"[yellow]Warning: Could not fetch standings: {e}[/yellow]")
+            return 0
+
+        self.db.save_standings(self.league.league_id, standings_data)
+
+        # Log the sync
+        sync_id = self.db.log_sync_start('standings', self.league.league_id)
+        self.db.log_sync_complete(sync_id, 1)
+
+        return len(standings_data)
 
     def sync_roster(self, team_id: str) -> dict:
         """

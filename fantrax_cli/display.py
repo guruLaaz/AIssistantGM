@@ -7,50 +7,110 @@ from rich.console import Console
 from rich.table import Table
 
 
-def format_teams_table(teams: List, league_name: str = None) -> None:
+def _get_team_attr(team, attr: str, default=''):
+    """Helper to get team attribute from object or dict."""
+    if isinstance(team, dict):
+        return team.get(attr, default)
+    return getattr(team, attr, default)
+
+
+def format_teams_table(teams: List, league_name: str = None, standings: List = None) -> None:
     """
     Display teams in a formatted table using Rich.
 
     Args:
-        teams: List of Team objects from FantraxAPI.
+        teams: List of Team objects from FantraxAPI or dicts with team data.
         league_name: Optional league name to display in title.
+        standings: Optional list of standings dicts with rank, wins, losses, etc.
     """
     console = Console()
 
+    # Build standings lookup by team_id if provided
+    standings_by_team = {}
+    if standings:
+        for s in standings:
+            standings_by_team[s.get('team_id') or s.get('id')] = s
+
     # Create table
-    table = Table(title=f"Teams - {league_name}" if league_name else "Teams", show_header=True, header_style="bold magenta")
+    title = f"Standings - {league_name}" if standings and league_name else (f"Teams - {league_name}" if league_name else "Teams")
+    table = Table(title=title, show_header=True, header_style="bold magenta")
 
     # Add columns
-    table.add_column("#", style="dim", width=4, justify="right")
-    table.add_column("Team ID", style="cyan", min_width=12)
-    table.add_column("Team Name", style="green", min_width=20)
-    table.add_column("Short", style="yellow", width=10)
+    if standings:
+        table.add_column("Rank", style="bold cyan", width=4, justify="right")
+        table.add_column("Team Name", style="green", min_width=20)
+        table.add_column("Short", style="yellow", width=8)
+        table.add_column("FPts", style="blue", width=10, justify="right")
+        table.add_column("FP/G", style="bold yellow", width=8, justify="right")
+        table.add_column("GP", style="cyan", width=4, justify="right")
+    else:
+        table.add_column("#", style="dim", width=4, justify="right")
+        table.add_column("Team ID", style="cyan", min_width=12)
+        table.add_column("Team Name", style="green", min_width=20)
+        table.add_column("Short", style="yellow", width=10)
+
+    # Sort by rank if we have standings
+    if standings:
+        sorted_teams = sorted(teams, key=lambda t: standings_by_team.get(_get_team_attr(t, 'id'), {}).get('rank', 999))
+    else:
+        sorted_teams = teams
 
     # Add rows
-    for idx, team in enumerate(teams, start=1):
-        table.add_row(
-            str(idx),
-            team.id,
-            team.name,
-            team.short
-        )
+    for idx, team in enumerate(sorted_teams, start=1):
+        team_id = _get_team_attr(team, 'id')
+        team_name = _get_team_attr(team, 'name')
+        team_short = _get_team_attr(team, 'short') or _get_team_attr(team, 'short_name', '')
+
+        if standings and team_id in standings_by_team:
+            s = standings_by_team[team_id]
+            fpts = s.get('points_for', 0)
+            # Use stored games_played and fpg if available, otherwise calculate
+            gp = s.get('games_played', 0)
+            fpg = s.get('fpg', 0)
+            # Fallback calculation if not stored
+            if gp == 0 and fpts > 0:
+                gp = s.get('wins', 0) + s.get('losses', 0) + s.get('ties', 0)
+                fpg = fpts / gp if gp > 0 else 0.0
+
+            table.add_row(
+                str(s.get('rank', idx)),
+                team_name,
+                team_short,
+                f"{fpts:,.1f}" if fpts else "0.0",
+                f"{fpg:.2f}",
+                str(gp)
+            )
+        else:
+            table.add_row(
+                str(idx),
+                team_id,
+                team_name,
+                team_short
+            )
 
     # Print table
     console.print(table)
     console.print(f"\n[bold]Total teams:[/bold] {len(teams)}")
 
 
-def format_teams_json(teams: List, league_id: str, league_name: str = None, year: int = None) -> None:
+def format_teams_json(teams: List, league_id: str, league_name: str = None, year: int = None, standings: List = None) -> None:
     """
     Display teams in JSON format.
 
     Args:
-        teams: List of Team objects from FantraxAPI.
+        teams: List of Team objects from FantraxAPI or dicts with team data.
         league_id: League ID.
         league_name: Optional league name.
         year: Optional league year.
+        standings: Optional list of standings dicts with rank, wins, losses, etc.
     """
     console = Console()
+
+    # Build standings lookup by team_id if provided
+    standings_by_team = {}
+    if standings:
+        for s in standings:
+            standings_by_team[s.get('team_id') or s.get('id')] = s
 
     # Build JSON structure
     output = {
@@ -62,28 +122,94 @@ def format_teams_json(teams: List, league_id: str, league_name: str = None, year
     if year:
         output["year"] = year
 
-    output["teams"] = [
-        {
-            "id": team.id,
-            "name": team.name,
-            "short": team.short
+    teams_list = []
+    for team in teams:
+        team_id = _get_team_attr(team, 'id')
+        team_name = _get_team_attr(team, 'name')
+        team_short = _get_team_attr(team, 'short') or _get_team_attr(team, 'short_name', '')
+
+        team_data = {
+            "id": team_id,
+            "name": team_name,
+            "short": team_short
         }
-        for team in teams
-    ]
+
+        # Add standings data if available
+        if team_id in standings_by_team:
+            s = standings_by_team[team_id]
+            fpts = s.get('points_for', 0)
+            # Use stored games_played and fpg if available
+            gp = s.get('games_played', 0)
+            fpg = s.get('fpg', 0)
+            # Fallback calculation if not stored
+            if gp == 0 and fpts > 0:
+                gp = s.get('wins', 0) + s.get('losses', 0) + s.get('ties', 0)
+                fpg = round(fpts / gp, 2) if gp > 0 else 0.0
+            team_data["standings"] = {
+                "rank": s.get('rank'),
+                "fpts": fpts,
+                "fpg": fpg,
+                "games_played": gp,
+                "wins": s.get('wins', 0),
+                "losses": s.get('losses', 0),
+                "ties": s.get('ties', 0),
+                "win_percentage": s.get('win_percentage', 0),
+                "games_back": s.get('games_back', 0),
+                "points_against": s.get('points_against', 0),
+                "streak": s.get('streak'),
+                "waiver_order": s.get('waiver_order')
+            }
+
+        teams_list.append(team_data)
+
+    # Sort by rank if standings available
+    if standings:
+        teams_list.sort(key=lambda t: t.get('standings', {}).get('rank', 999))
+
+    output["teams"] = teams_list
 
     # Print formatted JSON
     console.print_json(json.dumps(output, indent=2))
 
 
-def format_teams_simple(teams: List) -> None:
+def format_teams_simple(teams: List, standings: List = None) -> None:
     """
     Display teams in simple text format.
 
     Args:
-        teams: List of Team objects from FantraxAPI.
+        teams: List of Team objects from FantraxAPI or dicts with team data.
+        standings: Optional list of standings dicts with rank, wins, losses, etc.
     """
-    for team in teams:
-        print(f"{team.name} ({team.short})")
+    # Build standings lookup by team_id if provided
+    standings_by_team = {}
+    if standings:
+        for s in standings:
+            standings_by_team[s.get('team_id') or s.get('id')] = s
+
+    # Sort by rank if we have standings
+    if standings:
+        sorted_teams = sorted(teams, key=lambda t: standings_by_team.get(_get_team_attr(t, 'id'), {}).get('rank', 999))
+    else:
+        sorted_teams = teams
+
+    for team in sorted_teams:
+        team_id = _get_team_attr(team, 'id')
+        team_name = _get_team_attr(team, 'name')
+        team_short = _get_team_attr(team, 'short') or _get_team_attr(team, 'short_name', '')
+
+        if team_id in standings_by_team:
+            s = standings_by_team[team_id]
+            fpts = s.get('points_for', 0)
+            # Use stored games_played and fpg if available
+            gp = s.get('games_played', 0)
+            fpg = s.get('fpg', 0)
+            # Fallback calculation if not stored
+            if gp == 0 and fpts > 0:
+                gp = s.get('wins', 0) + s.get('losses', 0) + s.get('ties', 0)
+                fpg = fpts / gp if gp > 0 else 0.0
+            print(f"{s.get('rank', '?')}. {team_name} ({team_short}) - {fpts:,.1f} FPts, {fpg:.2f} FP/G, {gp} GP")
+        else:
+            print(f"{team_name} ({team_short})")
 
 
 def format_roster_table(roster, team_name: str = None, recent_stats: dict = None, last_n_days: int = None, recent_trends: dict = None) -> None:

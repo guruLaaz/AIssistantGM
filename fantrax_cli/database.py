@@ -11,7 +11,7 @@ import json
 class DatabaseManager:
     """Manages SQLite database connection and operations for Fantrax cache."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2  # Added games_played and fpg to standings table
 
     def __init__(self, db_path: Optional[Path] = None):
         """
@@ -68,6 +68,22 @@ class DatabaseManager:
                     version INTEGER PRIMARY KEY
                 )
             """)
+
+            # Check current schema version
+            cursor.execute("SELECT version FROM schema_version LIMIT 1")
+            row = cursor.fetchone()
+            current_version = row[0] if row else 0
+
+            # If schema version changed, drop all tables and recreate
+            if current_version != 0 and current_version < self.SCHEMA_VERSION:
+                # Drop all tables except schema_version
+                tables_to_drop = [
+                    'sync_log', 'free_agents', 'player_trends', 'daily_scores',
+                    'roster_slots', 'players', 'standings', 'teams', 'league_metadata'
+                ]
+                for table in tables_to_drop:
+                    cursor.execute(f"DROP TABLE IF EXISTS {table}")
+                conn.commit()
 
             # League metadata
             cursor.execute("""
@@ -178,6 +194,32 @@ class DatabaseManager:
                 )
             """)
 
+            # Standings
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS standings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    league_id TEXT NOT NULL,
+                    team_id TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    wins INTEGER DEFAULT 0,
+                    losses INTEGER DEFAULT 0,
+                    ties INTEGER DEFAULT 0,
+                    points INTEGER DEFAULT 0,
+                    win_percentage REAL DEFAULT 0,
+                    games_back REAL DEFAULT 0,
+                    waiver_order INTEGER,
+                    points_for REAL DEFAULT 0,
+                    points_against REAL DEFAULT 0,
+                    streak TEXT,
+                    games_played INTEGER DEFAULT 0,
+                    fpg REAL DEFAULT 0,
+                    last_sync_at TEXT NOT NULL,
+                    UNIQUE(league_id, team_id),
+                    FOREIGN KEY (league_id) REFERENCES league_metadata(league_id),
+                    FOREIGN KEY (team_id) REFERENCES teams(id)
+                )
+            """)
+
             # Sync log
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS sync_log (
@@ -218,10 +260,15 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_free_agents_sort
                 ON free_agents(sort_key, position_filter)
             """)
-
-            # Set schema version
             cursor.execute("""
-                INSERT OR REPLACE INTO schema_version (version) VALUES (?)
+                CREATE INDEX IF NOT EXISTS idx_standings_league_rank
+                ON standings(league_id, rank)
+            """)
+
+            # Set schema version (delete first to avoid multiple rows)
+            cursor.execute("DELETE FROM schema_version")
+            cursor.execute("""
+                INSERT INTO schema_version (version) VALUES (?)
             """, (self.SCHEMA_VERSION,))
 
     def clear_all(self) -> None:
@@ -230,7 +277,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             tables = [
                 'sync_log', 'free_agents', 'player_trends', 'daily_scores',
-                'roster_slots', 'players', 'teams', 'league_metadata'
+                'roster_slots', 'players', 'standings', 'teams', 'league_metadata'
             ]
             for table in tables:
                 cursor.execute(f"DELETE FROM {table}")
@@ -329,6 +376,73 @@ class DatabaseManager:
             """, (league_id, f"%{identifier}%", f"%{identifier}%"))
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    # ==================== Standings ====================
+
+    def save_standings(self, league_id: str, standings: list[dict]) -> None:
+        """Save or update standings for a league."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+
+            # Delete existing standings for this league
+            cursor.execute("DELETE FROM standings WHERE league_id = ?", (league_id,))
+
+            # Insert new standings
+            for record in standings:
+                cursor.execute("""
+                    INSERT INTO standings
+                    (league_id, team_id, rank, wins, losses, ties, points,
+                     win_percentage, games_back, waiver_order, points_for,
+                     points_against, streak, games_played, fpg, last_sync_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    league_id,
+                    record['team_id'],
+                    record['rank'],
+                    record.get('wins', 0),
+                    record.get('losses', 0),
+                    record.get('ties', 0),
+                    record.get('points', 0),
+                    record.get('win_percentage', 0),
+                    record.get('games_back', 0),
+                    record.get('waiver_order'),
+                    record.get('points_for', 0),
+                    record.get('points_against', 0),
+                    record.get('streak'),
+                    record.get('games_played', 0),
+                    record.get('fpg', 0),
+                    now
+                ))
+
+    def get_standings(self, league_id: str) -> list[dict]:
+        """Get standings for a league, ordered by rank."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT s.*, t.name as team_name, t.short_name as team_short_name
+                FROM standings s
+                JOIN teams t ON s.team_id = t.id
+                WHERE s.league_id = ?
+                ORDER BY s.rank
+            """, (league_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_teams_with_standings(self, league_id: str) -> list[dict]:
+        """Get all teams with their standings info, ordered by rank."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT t.*, s.rank, s.wins, s.losses, s.ties, s.points,
+                       s.win_percentage, s.games_back, s.waiver_order,
+                       s.points_for, s.points_against, s.streak,
+                       s.games_played, s.fpg
+                FROM teams t
+                LEFT JOIN standings s ON t.id = s.team_id AND t.league_id = s.league_id
+                WHERE t.league_id = ?
+                ORDER BY COALESCE(s.rank, 999), t.name
+            """, (league_id,))
+            return [dict(row) for row in cursor.fetchall()]
 
     # ==================== Players ====================
 
@@ -696,7 +810,7 @@ class DatabaseManager:
 
     def get_all_sync_status(self, league_id: str) -> dict[str, Optional[dict]]:
         """Get the most recent sync status for all sync types."""
-        sync_types = ['full', 'teams', 'rosters', 'daily_scores', 'trends', 'free_agents']
+        sync_types = ['full', 'teams', 'standings', 'rosters', 'daily_scores', 'trends', 'free_agents']
         result = {}
         for sync_type in sync_types:
             result[sync_type] = self.get_last_sync(league_id, sync_type)

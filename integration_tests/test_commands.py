@@ -46,7 +46,8 @@ class TestTeamsCommand:
         assert result.returncode == 0, f"Command failed: {result.stderr}"
 
         if format_name == "table":
-            assert "Teams" in result.stdout
+            # May show "Teams" or "Standings" depending on whether standings data is available
+            assert "Teams" in result.stdout or "Standings" in result.stdout
             assert "Total teams:" in result.stdout
         elif format_name == "json":
             data = json.loads(result.stdout)

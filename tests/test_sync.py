@@ -52,6 +52,37 @@ def mock_league():
 
     league.teams = [team1, team2]
 
+    # Create mock standings
+    mock_record1 = Mock()
+    mock_record1.team = team1
+    mock_record1.win = 10
+    mock_record1.loss = 5
+    mock_record1.tie = 2
+    mock_record1.points = 22
+    mock_record1.win_percentage = 0.647
+    mock_record1.games_back = 0
+    mock_record1.wavier_wire_order = 2
+    mock_record1.points_for = 1250.5
+    mock_record1.points_against = 1100.0
+    mock_record1.streak = "W3"
+
+    mock_record2 = Mock()
+    mock_record2.team = team2
+    mock_record2.win = 8
+    mock_record2.loss = 7
+    mock_record2.tie = 2
+    mock_record2.points = 18
+    mock_record2.win_percentage = 0.529
+    mock_record2.games_back = 2
+    mock_record2.wavier_wire_order = 1
+    mock_record2.points_for = 1100.0
+    mock_record2.points_against = 1150.0
+    mock_record2.streak = "L1"
+
+    mock_standings = Mock()
+    mock_standings.ranks = {1: mock_record1, 2: mock_record2}
+    league.standings.return_value = mock_standings
+
     return league
 
 

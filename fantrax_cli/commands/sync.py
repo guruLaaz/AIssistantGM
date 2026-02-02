@@ -16,11 +16,15 @@ def sync_command(
     ctx: typer.Context,
     full: Annotated[bool, typer.Option(
         "--full",
-        help="Full sync: teams, all rosters, 35 days of scores, and trends"
+        help="Full sync: teams, standings, all rosters, 35 days of scores, and trends"
     )] = False,
     teams: Annotated[bool, typer.Option(
         "--teams",
         help="Sync teams only"
+    )] = False,
+    standings: Annotated[bool, typer.Option(
+        "--standings",
+        help="Sync league standings"
     )] = False,
     rosters: Annotated[bool, typer.Option(
         "--rosters",
@@ -86,12 +90,13 @@ def sync_command(
             return
 
         # If no specific flags, show help
-        if not any([full, teams, rosters, scores > 0, trends, free_agents]):
+        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents]):
             console.print("[yellow]No sync option specified. Use --help for options.[/yellow]")
             console.print("\nQuick options:")
-            console.print("  [bold]fantrax sync --full[/bold]     Full sync (~55 seconds)")
-            console.print("  [bold]fantrax sync --status[/bold]   Check cache status")
-            console.print("  [bold]fantrax sync --rosters[/bold]  Update just rosters")
+            console.print("  [bold]fantrax sync --full[/bold]       Full sync (~55 seconds)")
+            console.print("  [bold]fantrax sync --status[/bold]     Check cache status")
+            console.print("  [bold]fantrax sync --standings[/bold]  Update standings")
+            console.print("  [bold]fantrax sync --rosters[/bold]    Update just rosters")
             return
 
         # Authenticate with Fantrax
@@ -157,7 +162,7 @@ def sync_command(
             result = sync_manager.sync_all(
                 include_trends=True,
                 days_of_scores=35,
-                include_free_agents=False
+                include_free_agents=True
             )
             _show_sync_result(console, result)
             return
@@ -170,6 +175,15 @@ def sync_command(
             sync_manager.sync_league_metadata()
             count = sync_manager.sync_teams()
             console.print(f"[green]✓[/green] Synced {count} teams")
+            api_calls += sync_manager.api_calls
+
+        if standings:
+            console.print("\n[bold blue]→[/bold blue] Syncing standings...")
+            if not teams:
+                sync_manager.sync_league_metadata()
+                sync_manager.sync_teams()
+            count = sync_manager.sync_standings()
+            console.print(f"[green]✓[/green] Synced standings for {count} teams")
             api_calls += sync_manager.api_calls
 
         if rosters:
@@ -290,6 +304,8 @@ def _show_sync_result(console: Console, result: dict) -> None:
     console.print("[bold green]✓ Sync completed successfully![/bold green]")
     console.print()
     console.print(f"  Teams synced: {result.get('teams', 0)}")
+    if result.get('standings', 0) > 0:
+        console.print(f"  Standings synced: {result.get('standings', 0)}")
     console.print(f"  Players synced: {result.get('players', 0)}")
     console.print(f"  Roster slots: {result.get('roster_slots', 0)}")
     console.print(f"  Daily scores: {result.get('daily_scores', 0)}")
