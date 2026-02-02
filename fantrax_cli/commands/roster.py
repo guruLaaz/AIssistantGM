@@ -17,9 +17,9 @@ from fantrax_cli.cache import CacheManager, format_cache_age
 
 def roster_command(
     ctx: typer.Context,
-    team_identifier: Annotated[str, typer.Argument(
-        help="Team name or ID to display roster for"
-    )],
+    team_identifier: Annotated[Optional[str], typer.Argument(
+        help="Team name or ID to display roster for (defaults to your team)"
+    )] = None,
     format: Annotated[OutputFormat, typer.Option(
         "--format", "-f",
         help="Output format"
@@ -47,12 +47,13 @@ def roster_command(
         db = DatabaseManager(db_path=config.database_path)
         cache = CacheManager(db, config)
 
-        # Try to get team from cache first (for team ID lookup)
-        team_from_cache = cache.get_team_by_identifier(team_identifier)
+        # Try to get team from cache first (for team ID lookup) - only if team_identifier provided
+        team_from_cache = cache.get_team_by_identifier(team_identifier) if team_identifier else None
         team_id = team_from_cache['id'] if team_from_cache else None
 
         # Check if we can serve from cache (basic roster without last_n_days)
-        if config.cache_enabled and not no_cache and not refresh and not last_n_days:
+        # Only use cache if team_identifier was explicitly provided
+        if team_identifier and config.cache_enabled and not no_cache and not refresh and not last_n_days:
             if team_id:
                 # Check roster cache
                 roster_result = cache.get_roster(team_id)
@@ -124,9 +125,23 @@ def roster_command(
                 else:
                     self.scoring_periods = {}
                 self._scoring_periods_lookup = None
-                self._update_teams(responses[3]["fantasyTeams"])
+                # Extract the user's team ID from the roster response (called without teamId, returns user's team)
+                fantasy_teams = responses[3]["fantasyTeams"]
+                if isinstance(fantasy_teams, dict) and fantasy_teams:
+                    self.my_team_id = next(iter(fantasy_teams.keys()))
+                elif isinstance(fantasy_teams, list) and fantasy_teams:
+                    self.my_team_id = fantasy_teams[0].get("id")
+                self._update_teams(fantasy_teams)
 
             League.reset_info = patched_reset_info
+
+            # Add my_team property if not present
+            if not hasattr(League, 'my_team') or not isinstance(getattr(League, 'my_team', None), property):
+                def _get_my_team(self):
+                    if hasattr(self, 'my_team_id') and self.my_team_id and self.my_team_id in self.team_lookup:
+                        return self.team_lookup[self.my_team_id]
+                    return None
+                League.my_team = property(_get_my_team)
 
             league = get_authenticated_league(
                 config.league_id,
@@ -138,14 +153,28 @@ def roster_command(
 
         # Find the team
         with console.status("[bold green]Finding team..."):
-            try:
-                team = league.team(team_identifier)
-            except Exception as e:
-                console.print(f"[bold red]Error:[/bold red] Could not find team '{team_identifier}'")
-                console.print("[yellow]Available teams:[/yellow]")
-                for t in league.teams:
-                    console.print(f"  - {t.name} ({t.short}) [ID: {t.id}]")
-                raise typer.Exit(code=1)
+            if team_identifier:
+                # Team specified - look it up
+                try:
+                    team = league.team(team_identifier)
+                except Exception as e:
+                    console.print(f"[bold red]Error:[/bold red] Could not find team '{team_identifier}'")
+                    console.print("[yellow]Available teams:[/yellow]")
+                    for t in league.teams:
+                        console.print(f"  - {t.name} ({t.short}) [ID: {t.id}]")
+                    raise typer.Exit(code=1)
+            else:
+                # No team specified - use logged-in user's team
+                team = league.my_team
+                if not team:
+                    console.print("[bold red]Error:[/bold red] Could not determine your team. Please specify a team name or ID.")
+                    console.print("[yellow]Available teams:[/yellow]")
+                    for t in league.teams:
+                        console.print(f"  - {t.name} ({t.short}) [ID: {t.id}]")
+                    raise typer.Exit(code=1)
+                # Only show message for non-JSON formats (JSON already includes team info)
+                if format != OutputFormat.json:
+                    console.print(f"[dim]Using your team: {team.name}[/dim]")
 
         # Retrieve roster
         with console.status(f"[bold green]Fetching roster for {team.name}..."):

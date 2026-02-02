@@ -67,6 +67,26 @@ class TestRosterCommand:
 
     TEAM_NAME = "Bois ton (dro)let"
 
+    def test_roster_default_team(self, cli_runner):
+        """Test roster command with no team argument uses logged-in user's team."""
+        result = cli_runner("--no-cache", "roster")
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+        # Should show "Using your team: <team_name>" message
+        assert "Using your team:" in result.stdout
+
+    def test_roster_default_team_json(self, cli_runner):
+        """Test roster command with no team argument returns valid JSON."""
+        result = cli_runner("--no-cache", "roster", "--format", "json")
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+        data = json.loads(result.stdout)
+        # Should have team info
+        assert "team_id" in data
+        assert "team_name" in data
+        assert data["team_id"] is not None
+        assert data["team_name"] is not None
+
     @pytest.mark.parametrize("format_arg,format_name", [
         ([], "table"),
         (["--format", "json"], "json"),
