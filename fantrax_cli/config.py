@@ -24,6 +24,15 @@ class Config:
     cache_max_age_hours: float = 24.0
     # News sync settings
     fa_news_limit: int = 500  # Max free agents to sync news for (0 = disabled)
+    # Sync settings
+    fa_fetch_limit: int = 5000  # Free agents to fetch
+    sync_days_scores: int = 35  # Days of daily scores to sync
+    max_news_per_player: int = 30  # Max news items kept per player
+    # Browser automation settings
+    selenium_timeout: int = 10  # Seconds to wait for page elements
+    login_wait_time: int = 5  # Seconds to wait after login
+    browser_window_size: str = "1920,1600"  # Chrome window dimensions
+    user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     @property
     def cookie_path(self) -> Path:
@@ -94,6 +103,20 @@ def load_config(league_id: Optional[str] = None) -> Config:
     # News sync configuration
     fa_news_limit = int(os.getenv("FANTRAX_FA_NEWS_LIMIT", "500"))
 
+    # Sync settings
+    fa_fetch_limit = int(os.getenv("FANTRAX_FA_FETCH_LIMIT", "5000"))
+    sync_days_scores = int(os.getenv("FANTRAX_SYNC_DAYS_SCORES", "35"))
+    max_news_per_player = int(os.getenv("FANTRAX_MAX_NEWS_PER_PLAYER", "30"))
+
+    # Browser automation settings
+    selenium_timeout = int(os.getenv("FANTRAX_SELENIUM_TIMEOUT", "10"))
+    login_wait_time = int(os.getenv("FANTRAX_LOGIN_WAIT_TIME", "5"))
+    browser_window_size = os.getenv("FANTRAX_BROWSER_WINDOW_SIZE", "1920,1600")
+    user_agent = os.getenv(
+        "FANTRAX_USER_AGENT",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+
     return Config(
         username=username,
         password=password,
@@ -103,5 +126,12 @@ def load_config(league_id: Optional[str] = None) -> Config:
         db_path=db_path,
         cache_enabled=cache_enabled,
         cache_max_age_hours=cache_max_age_hours,
-        fa_news_limit=fa_news_limit
+        fa_news_limit=fa_news_limit,
+        fa_fetch_limit=fa_fetch_limit,
+        sync_days_scores=sync_days_scores,
+        max_news_per_player=max_news_per_player,
+        selenium_timeout=selenium_timeout,
+        login_wait_time=login_wait_time,
+        browser_window_size=browser_window_size,
+        user_agent=user_agent
     )

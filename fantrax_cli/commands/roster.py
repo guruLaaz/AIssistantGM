@@ -148,7 +148,11 @@ def roster_command(
                 config.username,
                 config.password,
                 config.cookie_path,
-                config.min_request_interval
+                config.min_request_interval,
+                config.selenium_timeout,
+                config.login_wait_time,
+                config.browser_window_size,
+                config.user_agent
             )
 
         # Find the team
@@ -202,7 +206,7 @@ def roster_command(
         # Calculate recent trends if requested
         recent_trends = None
         if trends:
-            recent_trends = calculate_recent_trends(league, team.id)
+            recent_trends = calculate_recent_trends(league, team.id, days=config.sync_days_scores)
             # Cache the trends
             if config.cache_enabled and not no_cache and recent_trends:
                 try:

@@ -62,6 +62,14 @@ Minimum 1 second between API requests (configurable via `FANTRAX_MIN_REQUEST_INT
 | FANTRAX_CACHE_ENABLED | No | Enable/disable caching |
 | FANTRAX_CACHE_MAX_AGE_HOURS | No | Default cache duration |
 | FANTRAX_MIN_REQUEST_INTERVAL | No | Seconds between API calls |
+| FANTRAX_FA_NEWS_LIMIT | No | Max FA players to sync news for (default: 500) |
+| FANTRAX_FA_FETCH_LIMIT | No | Max free agents to fetch (default: 5000) |
+| FANTRAX_SYNC_DAYS_SCORES | No | Days of daily scores to sync (default: 35) |
+| FANTRAX_MAX_NEWS_PER_PLAYER | No | Max news items per player (default: 30) |
+| FANTRAX_SELENIUM_TIMEOUT | No | Selenium wait timeout in seconds (default: 10) |
+| FANTRAX_LOGIN_WAIT_TIME | No | Wait time after login in seconds (default: 5) |
+| FANTRAX_BROWSER_WINDOW_SIZE | No | Chrome window size (default: 1920,1600) |
+| FANTRAX_USER_AGENT | No | Browser user-agent string |
 
 ## Coding
 

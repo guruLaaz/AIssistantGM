@@ -803,13 +803,19 @@ class DatabaseManager:
 
     # ==================== Player News ====================
 
-    def save_player_news(self, player_id: str, news_items: list[dict]) -> int:
+    def save_player_news(
+        self,
+        player_id: str,
+        news_items: list[dict],
+        max_news_per_player: int = 30
+    ) -> int:
         """
-        Save news items for a player, keeping only the most recent 30.
+        Save news items for a player, keeping only the most recent N items.
 
         Args:
             player_id: The player ID
             news_items: List of news dicts with keys: news_date, headline, analysis
+            max_news_per_player: Maximum news items to keep per player (default: 30)
 
         Returns:
             Number of news items saved
@@ -840,7 +846,7 @@ class DatabaseManager:
                     # Skip duplicates or invalid entries
                     pass
 
-            # Keep only the most recent 30 news items per player
+            # Keep only the most recent N news items per player
             cursor.execute("""
                 DELETE FROM player_news
                 WHERE player_id = ?
@@ -848,9 +854,9 @@ class DatabaseManager:
                     SELECT id FROM player_news
                     WHERE player_id = ?
                     ORDER BY news_date DESC
-                    LIMIT 30
+                    LIMIT ?
                 )
-            """, (player_id, player_id))
+            """, (player_id, player_id, max_news_per_player))
 
             return saved_count
 

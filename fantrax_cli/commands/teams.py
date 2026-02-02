@@ -104,7 +104,11 @@ def teams_command(
                 config.username,
                 config.password,
                 config.cookie_path,
-                config.min_request_interval
+                config.min_request_interval,
+                config.selenium_timeout,
+                config.login_wait_time,
+                config.browser_window_size,
+                config.user_agent
             )
 
         # Retrieve teams

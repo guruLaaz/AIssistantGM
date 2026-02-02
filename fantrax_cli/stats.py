@@ -80,7 +80,7 @@ def _get_fantrax_week_boundaries(reference_date: date) -> list:
     return weeks
 
 
-def calculate_recent_trends(league, team_id: str) -> dict:
+def calculate_recent_trends(league, team_id: str, days: int = 35) -> dict:
     """
     Calculate fantasy points per game for players using Fantrax week boundaries.
 
@@ -92,6 +92,7 @@ def calculate_recent_trends(league, team_id: str) -> dict:
     Args:
         league: League instance
         team_id: Team ID to calculate stats for
+        days: Number of days to fetch (default: 35, provides buffer for week boundaries)
 
     Returns:
         Dictionary mapping player IDs to their recent trends:
@@ -107,14 +108,14 @@ def calculate_recent_trends(league, team_id: str) -> dict:
     """
     console = Console(stderr=True)
     today = date.today()
-    start_date = today - timedelta(days=35)  # Extra buffer for week boundaries
+    start_date = today - timedelta(days=days)  # Extra buffer for week boundaries
 
     # Track daily points for each player
     # player_daily[player_id] = [(date, points), ...]
     player_daily = defaultdict(list)
 
     console.print(f"\n[yellow]Fetching scores from {start_date} to {today}...[/yellow]")
-    console.print("[yellow]This will take approximately 35 seconds due to rate limiting...[/yellow]\n")
+    console.print(f"[yellow]This will take approximately {days} seconds due to rate limiting...[/yellow]\n")
 
     # Fetch live scores for each day
     with console.status("[bold green]Fetching daily scores...") as status:

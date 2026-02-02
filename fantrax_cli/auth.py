@@ -28,6 +28,12 @@ _override_installed = False
 _last_request_time: Optional[float] = None
 _min_request_interval: float = 1.0  # Default minimum seconds between requests
 
+# Browser automation settings
+_selenium_timeout: int = 10  # Seconds to wait for page elements
+_login_wait_time: int = 5  # Seconds to wait after login
+_browser_window_size: str = "1920,1600"  # Chrome window dimensions
+_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
 
 def add_cookie_to_session(session: Session, ignore_cookie: bool = False) -> None:
     """
@@ -40,6 +46,7 @@ def add_cookie_to_session(session: Session, ignore_cookie: bool = False) -> None
         ignore_cookie: If True, force a new login even if cached cookies exist.
     """
     global _cookie_file_path, _username, _password
+    global _selenium_timeout, _login_wait_time, _browser_window_size, _user_agent
 
     if not ignore_cookie and _cookie_file_path.exists():
         # Load cached cookies
@@ -51,27 +58,27 @@ def add_cookie_to_session(session: Session, ignore_cookie: bool = False) -> None
         service = Service(ChromeDriverManager().install())
         options = Options()
         options.add_argument("--headless")
-        options.add_argument("--window-size=1920,1600")
-        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        options.add_argument(f"--window-size={_browser_window_size}")
+        options.add_argument(f"user-agent={_user_agent}")
 
         with webdriver.Chrome(service=service, options=options) as driver:
             driver.get("https://www.fantrax.com/login")
 
             # Wait for and fill in username
-            username_box = WebDriverWait(driver, 10).until(
+            username_box = WebDriverWait(driver, _selenium_timeout).until(
                 EC.presence_of_element_located((By.XPATH, "//input[@formcontrolname='email']"))
             )
             username_box.send_keys(_username)
 
             # Wait for and fill in password
-            password_box = WebDriverWait(driver, 10).until(
+            password_box = WebDriverWait(driver, _selenium_timeout).until(
                 EC.presence_of_element_located((By.XPATH, "//input[@formcontrolname='password']"))
             )
             password_box.send_keys(_password)
             password_box.send_keys(Keys.ENTER)
 
             # Wait for login to complete
-            time.sleep(5)
+            time.sleep(_login_wait_time)
 
             # Save cookies
             cookies = driver.get_cookies()
@@ -156,7 +163,11 @@ def get_authenticated_league(
     username: str,
     password: str,
     cookie_file: Path,
-    min_request_interval: float = 1.0
+    min_request_interval: float = 1.0,
+    selenium_timeout: int = 10,
+    login_wait_time: int = 5,
+    browser_window_size: str = "1920,1600",
+    user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 ) -> League:
     """
     Get an authenticated League instance for a private league.
@@ -170,6 +181,10 @@ def get_authenticated_league(
         password: Fantrax password.
         cookie_file: Path to the cookie cache file.
         min_request_interval: Minimum seconds between API requests (default: 1.0).
+        selenium_timeout: Seconds to wait for page elements (default: 10).
+        login_wait_time: Seconds to wait after login (default: 5).
+        browser_window_size: Chrome window dimensions (default: "1920,1600").
+        user_agent: Browser user-agent string.
 
     Returns:
         Authenticated League instance.
@@ -178,12 +193,17 @@ def get_authenticated_league(
         Exception: If authentication fails.
     """
     global _cookie_file_path, _username, _password, _override_installed, _min_request_interval
+    global _selenium_timeout, _login_wait_time, _browser_window_size, _user_agent
 
     # Set global variables for the authentication functions
     _cookie_file_path = cookie_file
     _username = username
     _password = password
     _min_request_interval = min_request_interval
+    _selenium_timeout = selenium_timeout
+    _login_wait_time = login_wait_time
+    _browser_window_size = browser_window_size
+    _user_agent = user_agent
 
     # Install the request override if not already installed
     if not _override_installed:

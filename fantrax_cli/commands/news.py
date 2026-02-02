@@ -75,8 +75,8 @@ def news_command(
 
         # Determine what news to show
         if all_news:
-            # Show all recent news
-            news_items = db.get_all_player_news(limit=limit * 10)  # More for all
+            # Show all recent news (up to max_news_per_player total)
+            news_items = db.get_all_player_news(limit=config.max_news_per_player)
             _display_news(news_items, format, console, "All Recent News")
 
         elif player:

@@ -40,7 +40,7 @@ class SyncManager:
     def sync_all(
         self,
         include_trends: bool = True,
-        days_of_scores: int = 35,
+        days_of_scores: Optional[int] = None,
         include_free_agents: bool = False,
         include_news: bool = True,
         progress_callback: Optional[Callable[[str, int, int], None]] = None
@@ -50,7 +50,7 @@ class SyncManager:
 
         Args:
             include_trends: Whether to sync daily scores and calculate trends
-            days_of_scores: Number of days of daily scores to fetch
+            days_of_scores: Number of days of daily scores to fetch (default: config.sync_days_scores)
             include_free_agents: Whether to sync free agent listings
             include_news: Whether to sync player news
             progress_callback: Optional callback for progress updates (message, current, total)
@@ -58,6 +58,10 @@ class SyncManager:
         Returns:
             Dictionary with sync statistics
         """
+        # Resolve defaults from config
+        if days_of_scores is None:
+            days_of_scores = self.config.sync_days_scores if self.config else 35
+
         sync_id = self.db.log_sync_start('full', self.league.league_id)
         self.api_calls = 0
 
@@ -340,16 +344,20 @@ class SyncManager:
             'roster_slots': total_slots
         }
 
-    def sync_daily_scores(self, days: int = 35) -> int:
+    def sync_daily_scores(self, days: Optional[int] = None) -> int:
         """
         Sync daily scores for all teams over the past N days.
 
         Args:
-            days: Number of days to fetch
+            days: Number of days to fetch (default: config.sync_days_scores)
 
         Returns:
             Total number of score records saved
         """
+        # Resolve defaults from config
+        if days is None:
+            days = self.config.sync_days_scores if self.config else 35
+
         today = date.today()
         start_date = today - timedelta(days=days)
         total_scores = 0
@@ -469,19 +477,23 @@ class SyncManager:
     def sync_free_agents(
         self,
         sort_keys: Optional[list] = None,
-        limit: int = 5000
+        limit: Optional[int] = None
     ) -> int:
         """
         Sync free agent listings.
 
         Args:
             sort_keys: List of sort keys to fetch (default: ['SCORE'])
-            limit: Maximum number of players to fetch per sort/position combo
+            limit: Maximum number of players to fetch per sort/position combo (default: config.fa_fetch_limit)
 
         Returns:
             Number of free agents synced
         """
         from fantrax_cli.stats import fetch_fa_player_trends
+
+        # Resolve defaults from config
+        if limit is None:
+            limit = self.config.fa_fetch_limit if self.config else 5000
 
         if sort_keys is None:
             sort_keys = ['SCORE']
@@ -667,8 +679,9 @@ class SyncManager:
                     })
 
             # Save news to database
+            max_news = self.config.max_news_per_player if self.config else 30
             for player_id, news_items in news_by_player.items():
-                self.db.save_player_news(player_id, news_items)
+                self.db.save_player_news(player_id, news_items, max_news_per_player=max_news)
                 players_synced += 1
 
             self.console.print(f"[dim]Saved news for {players_synced} players[/dim]")

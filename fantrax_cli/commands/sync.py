@@ -16,7 +16,7 @@ def sync_command(
     ctx: typer.Context,
     full: Annotated[bool, typer.Option(
         "--full",
-        help="Full sync: teams, standings, all rosters, 35 days of scores, and trends"
+        help="Full sync: teams, standings, all rosters, daily scores (per config), and trends"
     )] = False,
     teams: Annotated[bool, typer.Option(
         "--teams",
@@ -157,7 +157,11 @@ def sync_command(
                 config.username,
                 config.password,
                 config.cookie_path,
-                config.min_request_interval
+                config.min_request_interval,
+                config.selenium_timeout,
+                config.login_wait_time,
+                config.browser_window_size,
+                config.user_agent
             )
 
         console.print(f"[green]✓[/green] Authenticated to league: {league.name}")
@@ -170,7 +174,6 @@ def sync_command(
             console.print("\n[bold]Starting full sync...[/bold]")
             result = sync_manager.sync_all(
                 include_trends=True,
-                days_of_scores=35,
                 include_free_agents=True,
                 include_news=not no_news
             )
