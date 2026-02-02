@@ -5,11 +5,11 @@ from typing import Optional
 from typing_extensions import Annotated
 from rich.console import Console
 
-from fantrax_cli.cli import OutputFormat
-from fantrax_cli.config import load_config
-from fantrax_cli.database import DatabaseManager
-from fantrax_cli.cache import CacheManager, format_cache_age
-from fantrax_cli.display import (
+from aissistant_gm.fantrax.cli import OutputFormat
+from aissistant_gm.fantrax.config import load_config
+from aissistant_gm.fantrax.database import DatabaseManager
+from aissistant_gm.fantrax.cache import CacheManager, format_cache_age
+from aissistant_gm.fantrax.display import (
     format_news_table,
     format_news_detail,
     format_news_json,

@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
 import tempfile
 
-from fantrax_cli.database import DatabaseManager
-from fantrax_cli.sync import SyncManager, get_sync_status
+from aissistant_gm.fantrax.database import DatabaseManager
+from aissistant_gm.fantrax.sync import SyncManager, get_sync_status
 
 
 @pytest.fixture
@@ -202,7 +202,7 @@ class TestSyncManager:
         assert result['roster_slots'] == 4  # 2 slots per team
         assert manager.api_calls == 2  # 1 call per team
 
-    @patch('fantrax_cli.sync._get_daily_scores_for_team')
+    @patch('aissistant_gm.fantrax.sync._get_daily_scores_for_team')
     def test_sync_daily_scores(self, mock_get_scores, db_manager, mock_league):
         """Test syncing daily scores."""
         # Mock daily scores
@@ -247,7 +247,7 @@ class TestSyncManager:
 class TestSyncManagerFullSync:
     """Tests for full sync operation."""
 
-    @patch('fantrax_cli.sync._get_daily_scores_for_team')
+    @patch('aissistant_gm.fantrax.sync._get_daily_scores_for_team')
     def test_sync_all(self, mock_get_scores, db_manager, mock_league, mock_roster):
         """Test full sync operation."""
         # Configure mocks
@@ -273,7 +273,7 @@ class TestSyncManagerFullSync:
         assert last_sync is not None
         assert last_sync['status'] == 'completed'
 
-    @patch('fantrax_cli.sync._get_daily_scores_for_team')
+    @patch('aissistant_gm.fantrax.sync._get_daily_scores_for_team')
     def test_sync_all_logs_failure(self, mock_get_scores, db_manager, mock_league):
         """Test that failed syncs are logged."""
         # Make the roster call fail
@@ -415,7 +415,7 @@ class TestSyncRosterWithVariousPlayers:
 class TestSyncFreeAgents:
     """Tests for free agent syncing."""
 
-    @patch('fantrax_cli.sync.SyncManager._fetch_free_agents')
+    @patch('aissistant_gm.fantrax.sync.SyncManager._fetch_free_agents')
     def test_sync_free_agents(self, mock_fetch, db_manager, mock_league):
         """Test syncing free agents."""
         mock_fetch.return_value = {
@@ -439,7 +439,7 @@ class TestSyncFreeAgents:
         assert player is not None
         assert player['name'] == 'Free Agent 1'
 
-    @patch('fantrax_cli.sync.SyncManager._fetch_free_agents')
+    @patch('aissistant_gm.fantrax.sync.SyncManager._fetch_free_agents')
     def test_sync_free_agents_error(self, mock_fetch, db_manager, mock_league):
         """Test handling of free agent fetch error."""
         mock_fetch.return_value = None
@@ -453,7 +453,7 @@ class TestSyncFreeAgents:
 class TestSyncPlayerNews:
     """Tests for player news syncing."""
 
-    @patch('fantraxapi.api.request')
+    @patch('aissistant_gm.fantrax.fantraxapi.api.request')
     def test_sync_player_news(self, mock_request, db_manager, mock_league):
         """Test syncing player news."""
         # Set up roster with players
@@ -491,7 +491,7 @@ class TestSyncPlayerNews:
         assert len(news) == 1
         assert news[0]['headline'] == 'Player scores hat trick'
 
-    @patch('fantraxapi.api.request')
+    @patch('aissistant_gm.fantrax.fantraxapi.api.request')
     def test_sync_player_news_api_error(self, mock_request, db_manager, mock_league):
         """Test handling of API error during news sync."""
         db_manager.save_players([{'id': 'player1', 'name': 'Test Player'}])
@@ -507,7 +507,7 @@ class TestSyncPlayerNews:
         # Should handle error gracefully and return 0
         assert count == 0
 
-    @patch('fantraxapi.api.request')
+    @patch('aissistant_gm.fantrax.fantraxapi.api.request')
     def test_sync_player_news_no_news(self, mock_request, db_manager, mock_league):
         """Test syncing player with no news."""
         db_manager.save_players([{'id': 'player1', 'name': 'Test Player'}])
@@ -520,7 +520,7 @@ class TestSyncPlayerNews:
 
         assert count == 0
 
-    @patch('fantraxapi.api.request')
+    @patch('aissistant_gm.fantrax.fantraxapi.api.request')
     def test_sync_player_news_empty_player_list(self, mock_request, db_manager, mock_league):
         """Test syncing with empty player list still calls API but filters results."""
         # Even with empty filter, API is called but nothing is stored
@@ -532,10 +532,10 @@ class TestSyncPlayerNews:
         # With empty player list, nothing should be stored
         assert count == 0
 
-    @patch('fantraxapi.api.request')
+    @patch('aissistant_gm.fantrax.fantraxapi.api.request')
     def test_sync_player_news_filters_by_player_ids(self, mock_request, db_manager, mock_league):
         """Test that sync_player_news filters news to specified player IDs."""
-        from fantrax_cli.config import Config
+        from aissistant_gm.fantrax.config import Config
 
         # Set up roster with one player
         db_manager.save_league_metadata('test_league', 'Test League')
@@ -600,10 +600,10 @@ class TestSyncPlayerNews:
         assert len(db_manager.get_player_news('fa1')) == 1
         assert len(db_manager.get_player_news('other')) == 0
 
-    @patch('fantraxapi.api.request')
+    @patch('aissistant_gm.fantrax.fantraxapi.api.request')
     def test_sync_player_news_fa_disabled(self, mock_request, db_manager, mock_league):
         """Test that free agents are not included in filter when fa_news_limit=0."""
-        from fantrax_cli.config import Config
+        from aissistant_gm.fantrax.config import Config
 
         # Set up roster and free agents
         db_manager.save_league_metadata('test_league', 'Test League')

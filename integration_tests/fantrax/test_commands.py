@@ -656,7 +656,7 @@ class TestNewsApiAndStorage:
     def test_sync_news_stores_data_for_rostered_player(self, cli_runner):
         """Test that sync --news actually stores news in database for rostered players."""
         import sqlite3
-        from fantrax_cli.config import load_config
+        from aissistant_gm.fantrax.config import load_config
 
         config = load_config()
 
@@ -699,7 +699,7 @@ class TestNewsApiAndStorage:
     def test_sync_news_stores_data_for_free_agent(self, cli_runner):
         """Test that sync --news stores news for free agents too."""
         import sqlite3
-        from fantrax_cli.config import load_config
+        from aissistant_gm.fantrax.config import load_config
 
         config = load_config()
 

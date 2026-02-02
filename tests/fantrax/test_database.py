@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import os
 
-from fantrax_cli.database import (
+from aissistant_gm.fantrax.database import (
     DatabaseManager,
     is_cache_fresh,
     get_cache_age_hours

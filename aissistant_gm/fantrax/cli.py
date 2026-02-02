@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Optional
 from typing_extensions import Annotated
 
-from fantrax_cli import __version__
+from aissistant_gm.fantrax import __version__
 
 # Configure UTF-8 encoding for stdout/stderr to handle Unicode characters on Windows
 # This fixes issues with team names containing special characters like "Udûn"
@@ -74,11 +74,11 @@ def main(
 
 
 # Import and register commands
-from fantrax_cli.commands.teams import teams_command
-from fantrax_cli.commands.roster import roster_command
-from fantrax_cli.commands.players import players_command
-from fantrax_cli.commands.sync import sync_command
-from fantrax_cli.commands.news import news_command
+from aissistant_gm.fantrax.commands.teams import teams_command
+from aissistant_gm.fantrax.commands.roster import roster_command
+from aissistant_gm.fantrax.commands.players import players_command
+from aissistant_gm.fantrax.commands.sync import sync_command
+from aissistant_gm.fantrax.commands.news import news_command
 app.command("teams")(teams_command)
 app.command("roster")(roster_command)
 app.command("players")(players_command)

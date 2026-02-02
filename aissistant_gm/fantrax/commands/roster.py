@@ -6,13 +6,13 @@ from typing import Optional
 from typing_extensions import Annotated
 from rich.console import Console
 
-from fantrax_cli.cli import OutputFormat
-from fantrax_cli.config import load_config
-from fantrax_cli.auth import get_authenticated_league
-from fantrax_cli.display import format_roster_table, format_roster_json, format_roster_simple
-from fantrax_cli.stats import calculate_recent_fpg, calculate_recent_trends
-from fantrax_cli.database import DatabaseManager
-from fantrax_cli.cache import CacheManager, format_cache_age
+from aissistant_gm.fantrax.cli import OutputFormat
+from aissistant_gm.fantrax.config import load_config
+from aissistant_gm.fantrax.auth import get_authenticated_league
+from aissistant_gm.fantrax.display import format_roster_table, format_roster_json, format_roster_simple
+from aissistant_gm.fantrax.stats import calculate_recent_fpg, calculate_recent_trends
+from aissistant_gm.fantrax.database import DatabaseManager
+from aissistant_gm.fantrax.cache import CacheManager, format_cache_age
 
 
 def roster_command(
@@ -90,9 +90,9 @@ def roster_command(
         # Cache miss or features not supported by cache - fetch from API
         with console.status("[bold green]Authenticating with Fantrax..."):
             # Monkey-patch the League class to handle missing scoringPeriodList
-            from fantraxapi.objs.league import League
-            from fantraxapi.objs.scoring_period import ScoringPeriod
-            from fantraxapi import api
+            from aissistant_gm.fantrax.fantraxapi.objs.league import League
+            from aissistant_gm.fantrax.fantraxapi.objs.scoring_period import ScoringPeriod
+            from aissistant_gm.fantrax.fantraxapi import api
             from datetime import datetime
 
             original_reset_info = League.reset_info
@@ -103,8 +103,8 @@ def roster_command(
                 self.year = responses[0]["fantasySettings"]["subtitle"]
                 self.start_date = datetime.fromtimestamp(responses[0]["fantasySettings"]["season"]["startDate"] / 1e3)
                 self.end_date = datetime.fromtimestamp(responses[0]["fantasySettings"]["season"]["endDate"] / 1e3)
-                from fantraxapi.objs.position import Position
-                from fantraxapi.objs.status import Status
+                from aissistant_gm.fantrax.fantraxapi.objs.position import Position
+                from aissistant_gm.fantrax.fantraxapi.objs.status import Status
                 self.positions = {k: Position(self, v) for k, v in responses[0]["positionMap"].items()}
                 self.status = {k: Status(self, v) for k, v in responses[1]["allObjs"].items() if "name" in v}
                 period_to_day_list = {}

@@ -4,8 +4,8 @@ from datetime import date, timedelta
 from typing import Optional, Any
 from dataclasses import dataclass
 
-from fantrax_cli.database import DatabaseManager, is_cache_fresh, get_cache_age_hours
-from fantrax_cli.config import Config
+from aissistant_gm.fantrax.database import DatabaseManager, is_cache_fresh, get_cache_age_hours
+from aissistant_gm.fantrax.config import Config
 
 
 # Default cache freshness thresholds (in hours)

@@ -6,9 +6,9 @@ from pathlib import Path
 from unittest.mock import Mock
 import tempfile
 
-from fantrax_cli.database import DatabaseManager
-from fantrax_cli.cache import CacheManager, CacheResult, format_cache_age, CACHE_MAX_AGE
-from fantrax_cli.config import Config
+from aissistant_gm.fantrax.database import DatabaseManager
+from aissistant_gm.fantrax.cache import CacheManager, CacheResult, format_cache_age, CACHE_MAX_AGE
+from aissistant_gm.fantrax.config import Config
 
 
 @pytest.fixture

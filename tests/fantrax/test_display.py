@@ -4,7 +4,7 @@ import json
 from io import StringIO
 from unittest.mock import Mock, patch
 import pytest
-from fantrax_cli.display import (
+from aissistant_gm.fantrax.display import (
     format_teams_table,
     format_teams_json,
     format_teams_simple,
@@ -36,7 +36,7 @@ def sample_teams():
 class TestFormatTeamsTable:
     """Test format_teams_table function."""
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_teams_table_without_league_name(self, mock_console, sample_teams):
         """Test table formatting without league name."""
         format_teams_table(sample_teams)
@@ -44,7 +44,7 @@ class TestFormatTeamsTable:
         # Verify Console was instantiated
         mock_console.assert_called_once()
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_teams_table_with_league_name(self, mock_console, sample_teams):
         """Test table formatting with league name."""
         format_teams_table(sample_teams, league_name="Test League")
@@ -52,7 +52,7 @@ class TestFormatTeamsTable:
         # Verify Console was instantiated
         mock_console.assert_called_once()
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_teams_table_empty_list(self, mock_console):
         """Test table formatting with empty teams list."""
         format_teams_table([])
@@ -64,7 +64,7 @@ class TestFormatTeamsTable:
 class TestFormatTeamsJson:
     """Test format_teams_json function."""
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_teams_json_basic(self, mock_console, sample_teams):
         """Test JSON formatting with just teams and league_id."""
         mock_console_instance = Mock()
@@ -85,7 +85,7 @@ class TestFormatTeamsJson:
         assert output_data["teams"][0]["name"] == "The Warriors"
         assert output_data["teams"][0]["short"] == "WAR"
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_teams_json_with_league_name(self, mock_console, sample_teams):
         """Test JSON formatting with league name."""
         mock_console_instance = Mock()
@@ -102,7 +102,7 @@ class TestFormatTeamsJson:
 
         assert output_data["league_name"] == "Test League"
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_teams_json_with_year(self, mock_console, sample_teams):
         """Test JSON formatting with year."""
         mock_console_instance = Mock()
@@ -119,7 +119,7 @@ class TestFormatTeamsJson:
 
         assert output_data["year"] == "2025-2026"
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_teams_json_empty_list(self, mock_console):
         """Test JSON formatting with empty teams list."""
         mock_console_instance = Mock()
@@ -224,7 +224,7 @@ def sample_roster():
 class TestFormatRosterTable:
     """Test format_roster_table function."""
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_roster_table_without_team_name(self, mock_console, sample_roster):
         """Test roster table formatting without team name."""
         format_roster_table(sample_roster)
@@ -232,7 +232,7 @@ class TestFormatRosterTable:
         # Verify Console was instantiated
         mock_console.assert_called_once()
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_roster_table_with_team_name(self, mock_console, sample_roster):
         """Test roster table formatting with team name."""
         format_roster_table(sample_roster, team_name="Test Team")
@@ -240,7 +240,7 @@ class TestFormatRosterTable:
         # Verify Console was instantiated
         mock_console.assert_called_once()
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_roster_table_empty_roster(self, mock_console):
         """Test roster table formatting with empty roster."""
         empty_roster = MockRoster([])
@@ -253,7 +253,7 @@ class TestFormatRosterTable:
 class TestFormatRosterJson:
     """Test format_roster_json function."""
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_roster_json_basic(self, mock_console, sample_roster):
         """Test JSON formatting with just roster and team_id."""
         mock_console_instance = Mock()
@@ -275,7 +275,7 @@ class TestFormatRosterJson:
         assert output_data["roster_stats"]["injured"] == "0/2"
         assert len(output_data["players"]) == 6
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_roster_json_with_team_name(self, mock_console, sample_roster):
         """Test JSON formatting with team name."""
         mock_console_instance = Mock()
@@ -288,7 +288,7 @@ class TestFormatRosterJson:
 
         assert output_data["team_name"] == "Test Team"
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_roster_json_empty_slots(self, mock_console):
         """Test JSON formatting with empty roster slots."""
         mock_console_instance = Mock()
@@ -344,7 +344,7 @@ class TestFormatRosterSimple:
 
 # ==================== Player News Display Tests ====================
 
-from fantrax_cli.display import (
+from aissistant_gm.fantrax.display import (
     format_news_table,
     format_news_detail,
     format_news_json,
@@ -383,19 +383,19 @@ def sample_news_items():
 class TestFormatNewsTable:
     """Test format_news_table function."""
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_table_basic(self, mock_console, sample_news_items):
         """Test news table formatting."""
         format_news_table(sample_news_items)
         mock_console.assert_called_once()
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_table_with_title(self, mock_console, sample_news_items):
         """Test news table formatting with custom title."""
         format_news_table(sample_news_items, title="Team News")
         mock_console.assert_called_once()
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_table_empty(self, mock_console):
         """Test news table formatting with empty list."""
         mock_instance = Mock()
@@ -410,19 +410,19 @@ class TestFormatNewsTable:
 class TestFormatNewsDetail:
     """Test format_news_detail function."""
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_detail_basic(self, mock_console, sample_news_items):
         """Test detailed news formatting."""
         format_news_detail(sample_news_items)
         mock_console.assert_called_once()
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_detail_with_player_name(self, mock_console, sample_news_items):
         """Test detailed news with player name header."""
         format_news_detail(sample_news_items, player_name="Connor McDavid")
         mock_console.assert_called_once()
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_detail_empty(self, mock_console):
         """Test detailed news formatting with empty list."""
         mock_instance = Mock()
@@ -437,7 +437,7 @@ class TestFormatNewsDetail:
 class TestFormatNewsJson:
     """Test format_news_json function."""
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_json_basic(self, mock_console, sample_news_items):
         """Test JSON news formatting."""
         mock_instance = Mock()
@@ -453,7 +453,7 @@ class TestFormatNewsJson:
         assert output_data['count'] == 3
         assert len(output_data['news_items']) == 3
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_json_with_player_name(self, mock_console, sample_news_items):
         """Test JSON news formatting with player name."""
         mock_instance = Mock()
@@ -466,7 +466,7 @@ class TestFormatNewsJson:
 
         assert output_data['player_name'] == "Connor McDavid"
 
-    @patch('fantrax_cli.display.Console')
+    @patch('aissistant_gm.fantrax.display.Console')
     def test_format_news_json_empty(self, mock_console):
         """Test JSON news formatting with empty list."""
         mock_instance = Mock()

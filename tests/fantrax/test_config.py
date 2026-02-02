@@ -3,7 +3,7 @@
 import os
 import pytest
 from pathlib import Path
-from fantrax_cli.config import Config, load_config
+from aissistant_gm.fantrax.config import Config, load_config
 
 
 # Test constants
@@ -98,7 +98,7 @@ class TestLoadConfig:
     def test_load_config_missing_username(self, monkeypatch):
         """Test that missing username raises ValueError."""
         # Mock load_dotenv to prevent loading from .env file
-        monkeypatch.setattr("fantrax_cli.config.load_dotenv", lambda: None)
+        monkeypatch.setattr("aissistant_gm.fantrax.config.load_dotenv", lambda: None)
         # Clear and set environment variables
         monkeypatch.delenv("FANTRAX_USERNAME", raising=False)
         monkeypatch.setenv("FANTRAX_PASSWORD", TEST_PASSWORD)
@@ -112,7 +112,7 @@ class TestLoadConfig:
     def test_load_config_missing_password(self, monkeypatch):
         """Test that missing password raises ValueError."""
         # Mock load_dotenv to prevent loading from .env file
-        monkeypatch.setattr("fantrax_cli.config.load_dotenv", lambda: None)
+        monkeypatch.setattr("aissistant_gm.fantrax.config.load_dotenv", lambda: None)
         monkeypatch.setenv("FANTRAX_USERNAME", TEST_USERNAME)
         monkeypatch.delenv("FANTRAX_PASSWORD", raising=False)
         monkeypatch.setenv("FANTRAX_LEAGUE_ID", TEST_LEAGUE_ID)
@@ -125,7 +125,7 @@ class TestLoadConfig:
     def test_load_config_missing_league_id(self, monkeypatch):
         """Test that missing league_id raises ValueError."""
         # Mock load_dotenv to prevent loading from .env file
-        monkeypatch.setattr("fantrax_cli.config.load_dotenv", lambda: None)
+        monkeypatch.setattr("aissistant_gm.fantrax.config.load_dotenv", lambda: None)
         monkeypatch.setenv("FANTRAX_USERNAME", TEST_USERNAME)
         monkeypatch.setenv("FANTRAX_PASSWORD", TEST_PASSWORD)
         monkeypatch.delenv("FANTRAX_LEAGUE_ID", raising=False)
@@ -138,7 +138,7 @@ class TestLoadConfig:
     def test_load_config_missing_multiple_vars(self, monkeypatch):
         """Test error message lists all missing variables."""
         # Mock load_dotenv to prevent loading from .env file
-        monkeypatch.setattr("fantrax_cli.config.load_dotenv", lambda: None)
+        monkeypatch.setattr("aissistant_gm.fantrax.config.load_dotenv", lambda: None)
         # Clear all environment variables
         monkeypatch.delenv("FANTRAX_USERNAME", raising=False)
         monkeypatch.delenv("FANTRAX_PASSWORD", raising=False)

@@ -13,7 +13,7 @@ import sqlite3
 
 import pytest
 
-from fantrax_cli.config import load_config
+from aissistant_gm.fantrax.config import load_config
 
 
 def parse_json_output(output: str) -> dict | list:

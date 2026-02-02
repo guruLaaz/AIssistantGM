@@ -5,11 +5,11 @@ from typing import Optional, Callable, TYPE_CHECKING
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
-from fantrax_cli.database import DatabaseManager
-from fantrax_cli.stats import _get_daily_scores_for_team, _get_fantrax_week_boundaries
+from aissistant_gm.fantrax.database import DatabaseManager
+from aissistant_gm.fantrax.stats import _get_daily_scores_for_team, _get_fantrax_week_boundaries
 
 if TYPE_CHECKING:
-    from fantrax_cli.config import Config
+    from aissistant_gm.fantrax.config import Config
 
 
 class SyncManager:
@@ -165,7 +165,7 @@ class SyncManager:
         Returns:
             Number of team standings synced
         """
-        from fantraxapi import api as fantrax_api
+        from aissistant_gm.fantrax.fantraxapi import api as fantrax_api
 
         try:
             # Get raw API response to see available fields
@@ -489,7 +489,7 @@ class SyncManager:
         Returns:
             Number of free agents synced
         """
-        from fantrax_cli.stats import fetch_fa_player_trends
+        from aissistant_gm.fantrax.stats import fetch_fa_player_trends
 
         # Resolve defaults from config
         if limit is None:
@@ -523,7 +523,7 @@ class SyncManager:
         Returns:
             Dictionary with 'players' and 'listings' lists, or None on error
         """
-        from fantraxapi.api import Method, _request
+        from aissistant_gm.fantrax.fantraxapi.api import Method, _request
 
         try:
             method_kwargs = {
@@ -604,7 +604,7 @@ class SyncManager:
         Returns:
             Number of players with news synced
         """
-        from fantraxapi.api import Method, request
+        from aissistant_gm.fantrax.fantraxapi.api import Method, request
         from datetime import datetime
 
         # Build set of player IDs to store news for (if not specified)
@@ -713,7 +713,7 @@ def get_sync_status(db: DatabaseManager, league_id: str) -> dict:
     Returns:
         Dictionary with sync status information
     """
-    from fantrax_cli.database import get_cache_age_hours
+    from aissistant_gm.fantrax.database import get_cache_age_hours
 
     status = {
         'league_id': league_id,

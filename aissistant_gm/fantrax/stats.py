@@ -3,7 +3,7 @@
 from datetime import date, timedelta
 from collections import defaultdict
 from rich.console import Console
-from fantraxapi import api
+from aissistant_gm.fantrax.fantraxapi import api
 
 
 def _get_daily_scores_for_team(league, team_id: str, scoring_date: date) -> dict:
@@ -292,7 +292,7 @@ def fetch_fa_player_trends(league, player_ids: list, limit: int = 25, sort_key: 
     Returns:
         Dictionary mapping player IDs to their trends data
     """
-    from fantraxapi.api import Method, _request
+    from aissistant_gm.fantrax.fantraxapi.api import Method, _request
     console = Console(stderr=True)
     today = date.today()
 

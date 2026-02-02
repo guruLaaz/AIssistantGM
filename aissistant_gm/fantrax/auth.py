@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 from requests import Session
-from fantraxapi import League, NotLoggedIn, FantraxException, api
-from fantraxapi.api import Method
+from aissistant_gm.fantrax.fantraxapi import League, NotLoggedIn, FantraxException, api
+from aissistant_gm.fantrax.fantraxapi.api import Method
 from selenium import webdriver
 from selenium.webdriver import Keys
 from selenium.webdriver.common.by import By

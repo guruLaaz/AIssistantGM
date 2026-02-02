@@ -6,10 +6,10 @@ from rich.console import Console
 from rich.table import Table
 from datetime import datetime
 
-from fantrax_cli.config import load_config
-from fantrax_cli.auth import get_authenticated_league
-from fantrax_cli.database import DatabaseManager, get_cache_age_hours
-from fantrax_cli.sync import SyncManager, get_sync_status
+from aissistant_gm.fantrax.config import load_config
+from aissistant_gm.fantrax.auth import get_authenticated_league
+from aissistant_gm.fantrax.database import DatabaseManager, get_cache_age_hours
+from aissistant_gm.fantrax.sync import SyncManager, get_sync_status
 
 
 def sync_command(
@@ -114,9 +114,9 @@ def sync_command(
 
         with console.status("[bold green]Authenticating with Fantrax..."):
             # Apply the same monkey-patch as roster command
-            from fantraxapi.objs.league import League
-            from fantraxapi.objs.scoring_period import ScoringPeriod
-            from fantraxapi import api
+            from aissistant_gm.fantrax.fantraxapi.objs.league import League
+            from aissistant_gm.fantrax.fantraxapi.objs.scoring_period import ScoringPeriod
+            from aissistant_gm.fantrax.fantraxapi import api
             from datetime import datetime as dt
 
             original_reset_info = League.reset_info
@@ -127,8 +127,8 @@ def sync_command(
                 self.year = responses[0]["fantasySettings"]["subtitle"]
                 self.start_date = dt.fromtimestamp(responses[0]["fantasySettings"]["season"]["startDate"] / 1e3)
                 self.end_date = dt.fromtimestamp(responses[0]["fantasySettings"]["season"]["endDate"] / 1e3)
-                from fantraxapi.objs.position import Position
-                from fantraxapi.objs.status import Status
+                from aissistant_gm.fantrax.fantraxapi.objs.position import Position
+                from aissistant_gm.fantrax.fantraxapi.objs.status import Status
                 self.positions = {k: Position(self, v) for k, v in responses[0]["positionMap"].items()}
                 self.status = {k: Status(self, v) for k, v in responses[1]["allObjs"].items() if "name" in v}
                 period_to_day_list = {}

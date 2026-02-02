@@ -4,12 +4,42 @@ This file provides context for Claude Code when working on this project.
 
 > **Note:** See [README.md](README.md) for project overview, installation, usage examples, and troubleshooting.
 
+## Project Structure
+
+```
+AIssistantGM/
+├── aissistant_gm/                  # Main package
+│   ├── __init__.py
+│   └── fantrax/                    # Fantrax CLI module
+│       ├── __init__.py
+│       ├── __main__.py
+│       ├── cli.py
+│       ├── config.py
+│       ├── auth.py
+│       ├── cache.py
+│       ├── database.py
+│       ├── display.py
+│       ├── stats.py
+│       ├── sync.py
+│       ├── commands/
+│       │   └── (teams.py, roster.py, players.py, sync.py, news.py)
+│       └── fantraxapi/             # Embedded API wrapper
+│           ├── api.py
+│           ├── exceptions.py
+│           └── objs/
+├── tests/
+│   └── fantrax/                    # Unit tests
+├── integration_tests/
+│   └── fantrax/                    # Integration tests
+└── pyproject.toml
+```
+
 ## Tech Stack
 
 - **Python 3.8+** (3.11+ recommended for fantraxapi compatibility)
 - **typer** - CLI framework
 - **rich** - Terminal formatting and tables
-- **fantraxapi** - Fantrax API wrapper
+- **fantraxapi** - Embedded Fantrax API wrapper
 - **selenium** + **webdriver-manager** - Browser authentication
 - **sqlite3** - Local database caching
 - **pytest** - Testing framework
@@ -45,7 +75,7 @@ Three formats supported consistently: `table` (Rich), `json`, `simple` (plain te
 4. Monkey-patch `api.request` to inject cookies automatically
 
 ### API Monkey-Patching
-The `fantraxapi` library has a bug with `scoringPeriodList`. See [teams.py:62-99](fantrax_cli/commands/teams.py#L62-L99) for the monkey-patch that handles this.
+The embedded `fantraxapi` library has a bug with `scoringPeriodList`. See [teams.py:62-99](aissistant_gm/fantrax/commands/teams.py#L62-L99) for the monkey-patch that handles this.
 
 ### Rate Limiting
 Minimum 1 second between API requests (configurable via `FANTRAX_MIN_REQUEST_INTERVAL`).
