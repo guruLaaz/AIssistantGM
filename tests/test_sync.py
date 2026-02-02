@@ -448,3 +448,206 @@ class TestSyncFreeAgents:
         count = manager.sync_free_agents()
 
         assert count == 0
+
+
+class TestSyncPlayerNews:
+    """Tests for player news syncing."""
+
+    @patch('fantraxapi.api.request')
+    def test_sync_player_news(self, mock_request, db_manager, mock_league):
+        """Test syncing player news."""
+        # Set up roster with players
+        db_manager.save_league_metadata('test_league', 'Test League')
+        db_manager.save_teams('test_league', [{'id': 'team1', 'name': 'Team 1', 'short': 'T1'}])
+        db_manager.save_players([{'id': 'player1', 'name': 'Test Player'}])
+        db_manager.save_roster('team1', [
+            {'player_id': 'player1', 'position_id': '1', 'position_short': 'C'}
+        ])
+
+        # Mock the API response (new getPlayerNews format)
+        mock_request.return_value = {
+            'stories': [
+                {
+                    'scorerFantasy': {
+                        'scorerId': 'player1',
+                        'name': 'Test Player'
+                    },
+                    'playerNews': {
+                        'newsDate': 1737795600000,  # Timestamp in ms
+                        'headlineNoBrief': 'Player scores hat trick',
+                        'analysis': 'Amazing performance.'
+                    }
+                }
+            ]
+        }
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_player_news(player_ids=['player1'])
+
+        assert count == 1
+
+        # Verify news was saved
+        news = db_manager.get_player_news('player1')
+        assert len(news) == 1
+        assert news[0]['headline'] == 'Player scores hat trick'
+
+    @patch('fantraxapi.api.request')
+    def test_sync_player_news_api_error(self, mock_request, db_manager, mock_league):
+        """Test handling of API error during news sync."""
+        db_manager.save_players([{'id': 'player1', 'name': 'Test Player'}])
+        db_manager.save_roster('team1', [
+            {'player_id': 'player1', 'position_id': '1', 'position_short': 'C'}
+        ])
+
+        mock_request.side_effect = Exception("API Error")
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_player_news(player_ids=['player1'])
+
+        # Should handle error gracefully and return 0
+        assert count == 0
+
+    @patch('fantraxapi.api.request')
+    def test_sync_player_news_no_news(self, mock_request, db_manager, mock_league):
+        """Test syncing player with no news."""
+        db_manager.save_players([{'id': 'player1', 'name': 'Test Player'}])
+
+        # API response with no stories
+        mock_request.return_value = {'stories': []}
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_player_news(player_ids=['player1'])
+
+        assert count == 0
+
+    @patch('fantraxapi.api.request')
+    def test_sync_player_news_empty_player_list(self, mock_request, db_manager, mock_league):
+        """Test syncing with empty player list still calls API but filters results."""
+        # Even with empty filter, API is called but nothing is stored
+        mock_request.return_value = {'stories': []}
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_player_news(player_ids=[])
+
+        # With empty player list, nothing should be stored
+        assert count == 0
+
+    @patch('fantraxapi.api.request')
+    def test_sync_player_news_filters_by_player_ids(self, mock_request, db_manager, mock_league):
+        """Test that sync_player_news filters news to specified player IDs."""
+        from fantrax_cli.config import Config
+
+        # Set up roster with one player
+        db_manager.save_league_metadata('test_league', 'Test League')
+        db_manager.save_teams('test_league', [{'id': 'team1', 'name': 'Team 1', 'short': 'T1'}])
+        db_manager.save_players([
+            {'id': 'rostered1', 'name': 'Rostered Player'},
+            {'id': 'fa1', 'name': 'Free Agent 1'},
+            {'id': 'other', 'name': 'Other Player'},
+        ])
+        db_manager.save_roster('team1', [
+            {'player_id': 'rostered1', 'position_id': '1', 'position_short': 'C'}
+        ])
+
+        # Set up free agents
+        db_manager.save_free_agents([
+            {'id': 'fa1', 'fpg': 3.0},
+        ], 'SCORE', None)
+
+        # Mock the API response with news for multiple players
+        mock_request.return_value = {
+            'stories': [
+                {
+                    'scorerFantasy': {'scorerId': 'rostered1', 'name': 'Rostered Player'},
+                    'playerNews': {
+                        'newsDate': 1737795600000,
+                        'headlineNoBrief': 'Rostered player news',
+                        'analysis': 'Analysis'
+                    }
+                },
+                {
+                    'scorerFantasy': {'scorerId': 'fa1', 'name': 'Free Agent 1'},
+                    'playerNews': {
+                        'newsDate': 1737795600000,
+                        'headlineNoBrief': 'FA news',
+                        'analysis': 'FA Analysis'
+                    }
+                },
+                {
+                    'scorerFantasy': {'scorerId': 'other', 'name': 'Other Player'},
+                    'playerNews': {
+                        'newsDate': 1737795600000,
+                        'headlineNoBrief': 'Other player news',
+                        'analysis': 'Other'
+                    }
+                },
+            ]
+        }
+
+        # Create config with fa_news_limit=1 (only top 1 FA)
+        config = Config(
+            username='test', password='test', league_id='test_league',
+            fa_news_limit=1
+        )
+
+        manager = SyncManager(mock_league, db_manager, config=config)
+        count = manager.sync_player_news()  # No explicit player_ids - should auto-detect
+
+        # Should sync for rostered player (1) + top FA (1) = 2 players (not 'other')
+        assert count == 2
+        # Verify only rostered1 and fa1 have news
+        assert len(db_manager.get_player_news('rostered1')) == 1
+        assert len(db_manager.get_player_news('fa1')) == 1
+        assert len(db_manager.get_player_news('other')) == 0
+
+    @patch('fantraxapi.api.request')
+    def test_sync_player_news_fa_disabled(self, mock_request, db_manager, mock_league):
+        """Test that free agents are not included in filter when fa_news_limit=0."""
+        from fantrax_cli.config import Config
+
+        # Set up roster and free agents
+        db_manager.save_league_metadata('test_league', 'Test League')
+        db_manager.save_teams('test_league', [{'id': 'team1', 'name': 'Team 1', 'short': 'T1'}])
+        db_manager.save_players([
+            {'id': 'rostered1', 'name': 'Rostered Player'},
+            {'id': 'fa1', 'name': 'Free Agent 1'},
+        ])
+        db_manager.save_roster('team1', [
+            {'player_id': 'rostered1', 'position_id': '1', 'position_short': 'C'}
+        ])
+        db_manager.save_free_agents([{'id': 'fa1', 'fpg': 3.0}], 'SCORE', None)
+
+        mock_request.return_value = {
+            'stories': [
+                {
+                    'scorerFantasy': {'scorerId': 'rostered1', 'name': 'Rostered Player'},
+                    'playerNews': {
+                        'newsDate': 1737795600000,
+                        'headlineNoBrief': 'Rostered news',
+                        'analysis': 'Analysis'
+                    }
+                },
+                {
+                    'scorerFantasy': {'scorerId': 'fa1', 'name': 'Free Agent 1'},
+                    'playerNews': {
+                        'newsDate': 1737795600000,
+                        'headlineNoBrief': 'FA news',
+                        'analysis': 'FA Analysis'
+                    }
+                },
+            ]
+        }
+
+        # Config with fa_news_limit=0 (disabled)
+        config = Config(
+            username='test', password='test', league_id='test_league',
+            fa_news_limit=0
+        )
+
+        manager = SyncManager(mock_league, db_manager, config=config)
+        count = manager.sync_player_news()
+
+        # Should only sync rostered player, not FA (fa1 filtered out)
+        assert count == 1
+        assert len(db_manager.get_player_news('rostered1')) == 1
+        assert len(db_manager.get_player_news('fa1')) == 0

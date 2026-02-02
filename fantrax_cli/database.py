@@ -11,7 +11,7 @@ import json
 class DatabaseManager:
     """Manages SQLite database connection and operations for Fantrax cache."""
 
-    SCHEMA_VERSION = 2  # Added games_played and fpg to standings table
+    SCHEMA_VERSION = 3  # Added player_news table
 
     def __init__(self, db_path: Optional[Path] = None):
         """
@@ -79,7 +79,7 @@ class DatabaseManager:
                 # Drop all tables except schema_version
                 tables_to_drop = [
                     'sync_log', 'free_agents', 'player_trends', 'daily_scores',
-                    'roster_slots', 'players', 'standings', 'teams', 'league_metadata'
+                    'roster_slots', 'player_news', 'players', 'standings', 'teams', 'league_metadata'
                 ]
                 for table in tables_to_drop:
                     cursor.execute(f"DROP TABLE IF EXISTS {table}")
@@ -124,6 +124,20 @@ class DatabaseManager:
                     injured_reserve INTEGER DEFAULT 0,
                     suspended INTEGER DEFAULT 0,
                     last_sync_at TEXT NOT NULL
+                )
+            """)
+
+            # Player news
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS player_news (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id TEXT NOT NULL,
+                    news_date TEXT NOT NULL,
+                    headline TEXT NOT NULL,
+                    analysis TEXT,
+                    last_sync_at TEXT NOT NULL,
+                    UNIQUE(player_id, news_date, headline),
+                    FOREIGN KEY (player_id) REFERENCES players(id)
                 )
             """)
 
@@ -264,6 +278,10 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_standings_league_rank
                 ON standings(league_id, rank)
             """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_player_news_player_date
+                ON player_news(player_id, news_date DESC)
+            """)
 
             # Set schema version (delete first to avoid multiple rows)
             cursor.execute("DELETE FROM schema_version")
@@ -277,7 +295,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             tables = [
                 'sync_log', 'free_agents', 'player_trends', 'daily_scores',
-                'roster_slots', 'players', 'standings', 'teams', 'league_metadata'
+                'roster_slots', 'player_news', 'players', 'standings', 'teams', 'league_metadata'
             ]
             for table in tables:
                 cursor.execute(f"DELETE FROM {table}")
@@ -763,6 +781,160 @@ class DatabaseManager:
             """, (sort_key, position_filter, position_filter, limit))
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_top_free_agent_ids(self, limit: int = 500) -> list[str]:
+        """
+        Get player IDs for top N free agents by rank.
+
+        Args:
+            limit: Maximum number of player IDs to return
+
+        Returns:
+            List of player IDs ordered by rank
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT player_id
+                FROM free_agents
+                ORDER BY rank
+                LIMIT ?
+            """, (limit,))
+            return [row['player_id'] for row in cursor.fetchall()]
+
+    # ==================== Player News ====================
+
+    def save_player_news(self, player_id: str, news_items: list[dict]) -> int:
+        """
+        Save news items for a player, keeping only the most recent 30.
+
+        Args:
+            player_id: The player ID
+            news_items: List of news dicts with keys: news_date, headline, analysis
+
+        Returns:
+            Number of news items saved
+        """
+        if not news_items:
+            return 0
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            saved_count = 0
+
+            for item in news_items:
+                try:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO player_news
+                        (player_id, news_date, headline, analysis, last_sync_at)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        player_id,
+                        item['news_date'],
+                        item['headline'],
+                        item.get('analysis'),
+                        now
+                    ))
+                    saved_count += 1
+                except Exception:
+                    # Skip duplicates or invalid entries
+                    pass
+
+            # Keep only the most recent 30 news items per player
+            cursor.execute("""
+                DELETE FROM player_news
+                WHERE player_id = ?
+                AND id NOT IN (
+                    SELECT id FROM player_news
+                    WHERE player_id = ?
+                    ORDER BY news_date DESC
+                    LIMIT 30
+                )
+            """, (player_id, player_id))
+
+            return saved_count
+
+    def get_player_news(self, player_id: str, limit: int = 30) -> list[dict]:
+        """
+        Get news items for a player.
+
+        Args:
+            player_id: The player ID
+            limit: Maximum number of news items to return
+
+        Returns:
+            List of news dicts ordered by date descending
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT pn.*, p.name as player_name
+                FROM player_news pn
+                JOIN players p ON pn.player_id = p.id
+                WHERE pn.player_id = ?
+                ORDER BY pn.news_date DESC
+                LIMIT ?
+            """, (player_id, limit))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_news_for_players(
+        self,
+        player_ids: list[str],
+        limit_per_player: int = 5
+    ) -> dict[str, list[dict]]:
+        """
+        Get news items for multiple players.
+
+        Args:
+            player_ids: List of player IDs
+            limit_per_player: Maximum news items per player
+
+        Returns:
+            Dict mapping player_id to list of news items
+        """
+        if not player_ids:
+            return {}
+
+        result = {}
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            for player_id in player_ids:
+                cursor.execute("""
+                    SELECT pn.*, p.name as player_name
+                    FROM player_news pn
+                    JOIN players p ON pn.player_id = p.id
+                    WHERE pn.player_id = ?
+                    ORDER BY pn.news_date DESC
+                    LIMIT ?
+                """, (player_id, limit_per_player))
+                news = [dict(row) for row in cursor.fetchall()]
+                if news:
+                    result[player_id] = news
+
+        return result
+
+    def get_all_player_news(self, limit: int = 100) -> list[dict]:
+        """
+        Get all recent player news across all players.
+
+        Args:
+            limit: Maximum total news items to return
+
+        Returns:
+            List of news dicts ordered by date descending
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT pn.*, p.name as player_name
+                FROM player_news pn
+                JOIN players p ON pn.player_id = p.id
+                ORDER BY pn.news_date DESC
+                LIMIT ?
+            """, (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+
     # ==================== Sync Log ====================
 
     def log_sync_start(self, sync_type: str, league_id: str) -> int:
@@ -810,7 +982,7 @@ class DatabaseManager:
 
     def get_all_sync_status(self, league_id: str) -> dict[str, Optional[dict]]:
         """Get the most recent sync status for all sync types."""
-        sync_types = ['full', 'teams', 'standings', 'rosters', 'daily_scores', 'trends', 'free_agents']
+        sync_types = ['full', 'teams', 'standings', 'rosters', 'daily_scores', 'trends', 'free_agents', 'player_news']
         result = {}
         for sync_type in sync_types:
             result[sync_type] = self.get_last_sync(league_id, sync_type)

@@ -22,6 +22,8 @@ class Config:
     db_path: Optional[Path] = None  # None = use default location
     cache_enabled: bool = True
     cache_max_age_hours: float = 24.0
+    # News sync settings
+    fa_news_limit: int = 500  # Max free agents to sync news for (0 = disabled)
 
     @property
     def cookie_path(self) -> Path:
@@ -89,6 +91,9 @@ def load_config(league_id: Optional[str] = None) -> Config:
     cache_enabled = os.getenv("FANTRAX_CACHE_ENABLED", "true").lower() in ("true", "1", "yes")
     cache_max_age_hours = float(os.getenv("FANTRAX_CACHE_MAX_AGE_HOURS", "24.0"))
 
+    # News sync configuration
+    fa_news_limit = int(os.getenv("FANTRAX_FA_NEWS_LIMIT", "500"))
+
     return Config(
         username=username,
         password=password,
@@ -97,5 +102,6 @@ def load_config(league_id: Optional[str] = None) -> Config:
         min_request_interval=min_request_interval,
         db_path=db_path,
         cache_enabled=cache_enabled,
-        cache_max_age_hours=cache_max_age_hours
+        cache_max_age_hours=cache_max_age_hours,
+        fa_news_limit=fa_news_limit
     )

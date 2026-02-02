@@ -1,12 +1,15 @@
 """Sync manager for fetching and storing Fantrax data."""
 
 from datetime import date, timedelta
-from typing import Optional, Callable
+from typing import Optional, Callable, TYPE_CHECKING
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from fantrax_cli.database import DatabaseManager
 from fantrax_cli.stats import _get_daily_scores_for_team, _get_fantrax_week_boundaries
+
+if TYPE_CHECKING:
+    from fantrax_cli.config import Config
 
 
 class SyncManager:
@@ -16,7 +19,8 @@ class SyncManager:
         self,
         league,
         db: DatabaseManager,
-        console: Optional[Console] = None
+        console: Optional[Console] = None,
+        config: Optional["Config"] = None
     ):
         """
         Initialize sync manager.
@@ -25,10 +29,12 @@ class SyncManager:
             league: Authenticated fantraxapi League instance
             db: DatabaseManager instance
             console: Optional Rich console for output
+            config: Optional Config instance for settings like fa_news_limit
         """
         self.league = league
         self.db = db
         self.console = console or Console()
+        self.config = config
         self.api_calls = 0
 
     def sync_all(
@@ -36,6 +42,7 @@ class SyncManager:
         include_trends: bool = True,
         days_of_scores: int = 35,
         include_free_agents: bool = False,
+        include_news: bool = True,
         progress_callback: Optional[Callable[[str, int, int], None]] = None
     ) -> dict:
         """
@@ -45,6 +52,7 @@ class SyncManager:
             include_trends: Whether to sync daily scores and calculate trends
             days_of_scores: Number of days of daily scores to fetch
             include_free_agents: Whether to sync free agent listings
+            include_news: Whether to sync player news
             progress_callback: Optional callback for progress updates (message, current, total)
 
         Returns:
@@ -61,7 +69,8 @@ class SyncManager:
                 'roster_slots': 0,
                 'daily_scores': 0,
                 'trends': 0,
-                'free_agents': 0
+                'free_agents': 0,
+                'player_news': 0
             }
 
             # Step 1: Sync league metadata
@@ -95,6 +104,11 @@ class SyncManager:
             if include_free_agents:
                 self._log_step("Syncing free agents...")
                 stats['free_agents'] = self.sync_free_agents()
+
+            # Step 7: Sync player news (if requested)
+            if include_news:
+                self._log_step("Syncing player news...")
+                stats['player_news'] = self.sync_player_news()
 
             self.db.log_sync_complete(sync_id, self.api_calls)
             return {
@@ -563,6 +577,112 @@ class SyncManager:
         except Exception as e:
             self.console.print(f"[red]Error fetching free agents: {e}[/red]")
             return None
+
+    def sync_player_news(self, player_ids: Optional[list[str]] = None) -> int:
+        """
+        Sync player news using the getPlayerNews API.
+
+        The Fantrax API returns news for all players in one call, so player_ids
+        is only used for filtering which news to store (not for individual API calls).
+
+        Args:
+            player_ids: Optional list of specific player IDs to store news for.
+                        If None, stores news for all rostered players + top FAs.
+
+        Returns:
+            Number of players with news synced
+        """
+        from fantraxapi.api import Method, request
+        from datetime import datetime
+
+        # Build set of player IDs to store news for (if not specified)
+        if player_ids is None:
+            player_ids = set()
+
+            # Add rostered players
+            for team in self.league.teams:
+                roster = self.db.get_roster(team.id)
+                for slot in roster:
+                    if slot.get('player_id'):
+                        player_ids.add(slot['player_id'])
+
+            # Add top N free agents if configured
+            fa_news_limit = self.config.fa_news_limit if self.config else 500
+            if fa_news_limit > 0:
+                fa_player_ids = self.db.get_top_free_agent_ids(limit=fa_news_limit)
+                player_ids.update(fa_player_ids)
+
+        player_ids_set = set(player_ids) if player_ids else set()
+
+        # Fetch news using getPlayerNews API (returns all news in one call)
+        self.console.print("[dim]Fetching player news from API...[/dim]")
+
+        players_synced = 0
+        news_by_player: dict[str, list] = {}
+
+        try:
+            # Call getPlayerNews with poolType='ALL' to get news for all players
+            response = request(self.league, Method("getPlayerNews", poolType="ALL"))
+            self.api_calls += 1
+
+            if not response or 'stories' not in response:
+                self.console.print("[yellow]No news data returned from API[/yellow]")
+                return 0
+
+            stories = response['stories']
+            self.console.print(f"[dim]Received {len(stories)} news stories[/dim]")
+
+            # Parse stories and group by player
+            for story in stories:
+                scorer = story.get('scorerFantasy', {})
+                player_id = scorer.get('scorerId')
+                player_news = story.get('playerNews', {})
+
+                if not player_id or not player_news:
+                    continue
+
+                # Skip if we have a filter and this player isn't in it
+                if player_ids_set and player_id not in player_ids_set:
+                    continue
+
+                # Parse news date (timestamp in milliseconds)
+                news_date_ms = player_news.get('newsDate')
+                if news_date_ms:
+                    news_date = datetime.fromtimestamp(news_date_ms / 1000).isoformat()
+                else:
+                    news_date = datetime.now().isoformat()
+
+                # Extract headline and analysis
+                headline = player_news.get('headlineNoBrief') or player_news.get('content', '')
+                analysis = player_news.get('analysis', '')
+
+                if headline:
+                    if player_id not in news_by_player:
+                        news_by_player[player_id] = []
+
+                    news_by_player[player_id].append({
+                        'news_date': news_date,
+                        'headline': headline,
+                        'analysis': analysis
+                    })
+
+            # Save news to database
+            for player_id, news_items in news_by_player.items():
+                self.db.save_player_news(player_id, news_items)
+                players_synced += 1
+
+            self.console.print(f"[dim]Saved news for {players_synced} players[/dim]")
+
+        except Exception as e:
+            self.console.print(f"[yellow]Warning: Error fetching news: {e}[/yellow]")
+            import traceback
+            self.console.print(f"[dim]{traceback.format_exc()}[/dim]")
+
+        # Log the sync
+        sync_id = self.db.log_sync_start('player_news', self.league.league_id)
+        self.db.log_sync_complete(sync_id, self.api_calls)
+
+        return players_synced
 
     def _log_step(self, message: str) -> None:
         """Log a sync step."""

@@ -554,3 +554,140 @@ def format_roster_simple(roster, recent_stats: dict = None, recent_trends: dict 
             print(f"{row.position.short_name} ({roster_status}): {player_name}{injury_report} - {salary_str} ({stats['games_played']}G, {stats['fpg']:.2f} FP/G)")
         else:
             print(f"{row.position.short_name} ({roster_status}): {player_name}{injury_report} - {salary_str}")
+
+
+# ==================== Player News Formatting ====================
+
+
+def format_news_table(news_items: List[dict], title: str = None) -> None:
+    """
+    Display player news in a formatted table using Rich.
+
+    Args:
+        news_items: List of news dicts with keys: player_name, news_date, headline, analysis
+        title: Optional title for the table
+    """
+    console = Console()
+
+    if not news_items:
+        console.print("[yellow]No news items found.[/yellow]")
+        return
+
+    table = Table(title=title or "Player News", show_header=True, header_style="bold magenta")
+    table.add_column("Date", style="cyan", width=12)
+    table.add_column("Player", style="green", min_width=15)
+    table.add_column("News", style="white", min_width=50)
+
+    for item in news_items:
+        # Format date nicely
+        news_date = item.get('news_date', '')
+        if news_date:
+            # Try to format the date more readably
+            try:
+                from datetime import datetime
+                if 'T' in news_date:
+                    dt = datetime.fromisoformat(news_date.replace('Z', '+00:00'))
+                    news_date = dt.strftime("%b %d, %Y")
+                elif len(news_date) == 10:  # YYYY-MM-DD
+                    dt = datetime.strptime(news_date, "%Y-%m-%d")
+                    news_date = dt.strftime("%b %d, %Y")
+            except (ValueError, TypeError):
+                pass  # Keep original format
+
+        player_name = item.get('player_name', 'Unknown')
+        headline = item.get('headline', '')
+
+        # Truncate long headlines for table view
+        if len(headline) > 80:
+            headline = headline[:77] + "..."
+
+        table.add_row(news_date, player_name, headline)
+
+    console.print(table)
+    console.print(f"\n[bold]Total news items:[/bold] {len(news_items)}")
+
+
+def format_news_detail(news_items: List[dict], player_name: str = None) -> None:
+    """
+    Display player news with full details using Rich.
+
+    Args:
+        news_items: List of news dicts with keys: news_date, headline, analysis
+        player_name: Optional player name for the header
+    """
+    console = Console()
+
+    if not news_items:
+        console.print("[yellow]No news items found.[/yellow]")
+        return
+
+    if player_name:
+        console.print(f"\n[bold]News for {player_name}[/bold]")
+        console.print("=" * 60)
+
+    for item in news_items:
+        # Format date
+        news_date = item.get('news_date', '')
+        if news_date:
+            try:
+                from datetime import datetime
+                if 'T' in news_date:
+                    dt = datetime.fromisoformat(news_date.replace('Z', '+00:00'))
+                    news_date = dt.strftime("%b %d, %Y %I:%M %p")
+                elif len(news_date) == 10:
+                    dt = datetime.strptime(news_date, "%Y-%m-%d")
+                    news_date = dt.strftime("%b %d, %Y")
+            except (ValueError, TypeError):
+                pass
+
+        console.print(f"\n[cyan]{news_date}[/cyan]")
+        console.print(f"[bold]{item.get('headline', '')}[/bold]")
+
+        analysis = item.get('analysis')
+        if analysis:
+            console.print(f"[dim]{analysis}[/dim]")
+
+        console.print("-" * 40)
+
+
+def format_news_json(news_items: List[dict], player_name: str = None) -> None:
+    """
+    Display player news in JSON format.
+
+    Args:
+        news_items: List of news dicts
+        player_name: Optional player name for context
+    """
+    console = Console()
+
+    output = {
+        "news_items": news_items,
+        "count": len(news_items)
+    }
+    if player_name:
+        output["player_name"] = player_name
+
+    console.print_json(json.dumps(output, indent=2))
+
+
+def format_news_simple(news_items: List[dict]) -> None:
+    """
+    Display player news in simple text format.
+
+    Args:
+        news_items: List of news dicts
+    """
+    if not news_items:
+        print("No news items found.")
+        return
+
+    for item in news_items:
+        news_date = item.get('news_date', '')
+        player_name = item.get('player_name', 'Unknown')
+        headline = item.get('headline', '')
+        analysis = item.get('analysis', '')
+
+        print(f"[{news_date}] {player_name}: {headline}")
+        if analysis:
+            print(f"  Analysis: {analysis}")
+        print()

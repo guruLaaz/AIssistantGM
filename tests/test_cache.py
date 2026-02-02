@@ -421,3 +421,121 @@ class TestCacheMaxAgeDefaults:
     def test_free_agents_max_age(self):
         """Free agents should have medium cache time (12 hours)."""
         assert CACHE_MAX_AGE['free_agents'] == 12.0
+
+    def test_player_news_max_age(self):
+        """Player news should have medium cache time (12 hours)."""
+        assert CACHE_MAX_AGE['player_news'] == 12.0
+
+
+class TestCacheManagerPlayerNews:
+    """Tests for player news caching."""
+
+    def test_get_player_news_empty_cache(self, cache_manager):
+        """Test getting player news when cache is empty."""
+        result = cache_manager.get_player_news('player1')
+        assert result.from_cache is False
+
+    def test_get_player_news_with_data(self, cache_manager, db_manager, config):
+        """Test getting player news when data is cached."""
+        # Add a player and news
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+        db_manager.save_player_news('player1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Test news', 'analysis': 'Analysis text'}
+        ])
+
+        # Log a sync
+        sync_id = db_manager.log_sync_start('player_news', config.league_id)
+        db_manager.log_sync_complete(sync_id, 10)
+
+        result = cache_manager.get_player_news('player1')
+        assert result.from_cache is True
+        assert len(result.data) == 1
+        assert result.data[0]['headline'] == 'Test news'
+
+    def test_get_player_news_stale_without_sync(self, cache_manager, db_manager):
+        """Test that news is marked stale if no sync log exists."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+        db_manager.save_player_news('player1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Test news'}
+        ])
+
+        result = cache_manager.get_player_news('player1')
+        assert result.from_cache is True
+        assert result.stale is True
+
+    def test_get_player_news_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+        db_manager.save_player_news('player1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Test news'}
+        ])
+
+        sync_id = db_manager.log_sync_start('player_news', config.league_id)
+        db_manager.log_sync_complete(sync_id, 10)
+
+        result = cache_manager.get_player_news('player1', force_refresh=True)
+        assert result.from_cache is False
+
+    def test_get_news_for_roster_empty_cache(self, cache_manager):
+        """Test getting roster news when cache is empty."""
+        result = cache_manager.get_news_for_roster('team1')
+        assert result.from_cache is False
+
+    def test_get_news_for_roster_with_data(self, cache_manager, db_manager, config):
+        """Test getting news for all players on a roster."""
+        # Add team and players
+        db_manager.save_league_metadata(config.league_id, 'Test League')
+        db_manager.save_teams(config.league_id, [{'id': 'team1', 'name': 'Team 1', 'short': 'T1'}])
+        db_manager.save_players([
+            {'id': 'p1', 'name': 'Player 1'},
+            {'id': 'p2', 'name': 'Player 2'},
+        ])
+        db_manager.save_roster('team1', [
+            {'player_id': 'p1', 'position_id': '1', 'position_short': 'C'},
+            {'player_id': 'p2', 'position_id': '2', 'position_short': 'LW'},
+        ])
+
+        # Add news for players
+        db_manager.save_player_news('p1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'P1 news'}
+        ])
+        db_manager.save_player_news('p2', [
+            {'news_date': '2025-01-24T10:00:00', 'headline': 'P2 news'}
+        ])
+
+        # Log sync
+        sync_id = db_manager.log_sync_start('player_news', config.league_id)
+        db_manager.log_sync_complete(sync_id, 10)
+
+        result = cache_manager.get_news_for_roster('team1', limit_per_player=5)
+        assert result.from_cache is True
+        assert len(result.data) == 2
+        assert 'p1' in result.data
+        assert 'p2' in result.data
+
+    def test_get_all_player_news_empty_cache(self, cache_manager):
+        """Test getting all player news when cache is empty."""
+        result = cache_manager.get_all_player_news()
+        assert result.from_cache is False
+
+    def test_get_all_player_news_with_data(self, cache_manager, db_manager, config):
+        """Test getting all player news."""
+        db_manager.save_players([
+            {'id': 'p1', 'name': 'Player 1'},
+            {'id': 'p2', 'name': 'Player 2'},
+        ])
+        db_manager.save_player_news('p1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Latest news'}
+        ])
+        db_manager.save_player_news('p2', [
+            {'news_date': '2025-01-24T10:00:00', 'headline': 'Older news'}
+        ])
+
+        sync_id = db_manager.log_sync_start('player_news', config.league_id)
+        db_manager.log_sync_complete(sync_id, 10)
+
+        result = cache_manager.get_all_player_news(limit=10)
+        assert result.from_cache is True
+        assert len(result.data) == 2
+        # Should be sorted by date descending
+        assert result.data[0]['headline'] == 'Latest news'

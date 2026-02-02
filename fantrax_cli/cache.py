@@ -17,6 +17,7 @@ CACHE_MAX_AGE = {
     'daily_scores': 24.0,       # 1 day
     'trends': 24.0,             # 1 day
     'free_agents': 12.0,        # 12 hours
+    'player_news': 12.0,        # 12 hours
 }
 
 
@@ -405,6 +406,131 @@ class CacheManager:
 
         return CacheResult(
             data=trends,
+            from_cache=True,
+            cache_age_hours=age,
+            stale=is_stale
+        )
+
+    # ==================== Player News ====================
+
+    def get_player_news(
+        self,
+        player_id: str,
+        limit: int = 30,
+        force_refresh: bool = False
+    ) -> CacheResult:
+        """
+        Get news for a player from cache.
+
+        Args:
+            player_id: Player ID
+            limit: Maximum news items to return
+            force_refresh: If True, indicates caller wants fresh data
+
+        Returns:
+            CacheResult with news data and cache status
+        """
+        if not self._cache_enabled or force_refresh:
+            return CacheResult(data=None, from_cache=False)
+
+        news = self.db.get_player_news(player_id, limit)
+        if not news:
+            return CacheResult(data=None, from_cache=False)
+
+        # Check freshness
+        last_sync = self.db.get_last_sync(self.config.league_id, 'player_news')
+        if not last_sync:
+            return CacheResult(data=news, from_cache=True, stale=True)
+
+        age = get_cache_age_hours(last_sync['completed_at'])
+        is_stale = not is_cache_fresh(last_sync['completed_at'], self.get_max_age('player_news'))
+
+        return CacheResult(
+            data=news,
+            from_cache=True,
+            cache_age_hours=age,
+            stale=is_stale
+        )
+
+    def get_news_for_roster(
+        self,
+        team_id: str,
+        limit_per_player: int = 5,
+        force_refresh: bool = False
+    ) -> CacheResult:
+        """
+        Get news for all players on a team's roster.
+
+        Args:
+            team_id: Team ID
+            limit_per_player: Maximum news items per player
+            force_refresh: If True, indicates caller wants fresh data
+
+        Returns:
+            CacheResult with dict mapping player_id to news list
+        """
+        if not self._cache_enabled or force_refresh:
+            return CacheResult(data=None, from_cache=False)
+
+        # Get roster to find player IDs
+        roster = self.db.get_roster(team_id)
+        if not roster:
+            return CacheResult(data=None, from_cache=False)
+
+        player_ids = [r['player_id'] for r in roster if r.get('player_id')]
+        if not player_ids:
+            return CacheResult(data={}, from_cache=True)
+
+        # Get news for all players
+        news = self.db.get_news_for_players(player_ids, limit_per_player)
+
+        # Check freshness
+        last_sync = self.db.get_last_sync(self.config.league_id, 'player_news')
+        if not last_sync:
+            return CacheResult(data=news, from_cache=True, stale=True) if news else CacheResult(data=None, from_cache=False)
+
+        age = get_cache_age_hours(last_sync['completed_at'])
+        is_stale = not is_cache_fresh(last_sync['completed_at'], self.get_max_age('player_news'))
+
+        return CacheResult(
+            data=news,
+            from_cache=True,
+            cache_age_hours=age,
+            stale=is_stale
+        )
+
+    def get_all_player_news(
+        self,
+        limit: int = 100,
+        force_refresh: bool = False
+    ) -> CacheResult:
+        """
+        Get all recent player news.
+
+        Args:
+            limit: Maximum total news items
+            force_refresh: If True, indicates caller wants fresh data
+
+        Returns:
+            CacheResult with list of news items
+        """
+        if not self._cache_enabled or force_refresh:
+            return CacheResult(data=None, from_cache=False)
+
+        news = self.db.get_all_player_news(limit)
+        if not news:
+            return CacheResult(data=None, from_cache=False)
+
+        # Check freshness
+        last_sync = self.db.get_last_sync(self.config.league_id, 'player_news')
+        if not last_sync:
+            return CacheResult(data=news, from_cache=True, stale=True)
+
+        age = get_cache_age_hours(last_sync['completed_at'])
+        is_stale = not is_cache_fresh(last_sync['completed_at'], self.get_max_age('player_news'))
+
+        return CacheResult(
+            data=news,
             from_cache=True,
             cache_age_hours=age,
             stale=is_stale

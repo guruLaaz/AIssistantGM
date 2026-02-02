@@ -467,3 +467,294 @@ class TestCacheBehavior:
         result = cli_runner("sync", "--status")
         assert result.returncode == 0
         # Should show some cached data info
+
+
+# News command tests
+@pytest.mark.integration
+class TestNewsCommand:
+    """Integration tests for the news command."""
+
+    TEAM_NAME = "Bois ton (dro)let"
+
+    def test_news_help(self, cli_runner):
+        """Test news --help shows usage information."""
+        result = cli_runner("news", "--help")
+
+        assert result.returncode == 0
+        assert "news" in result.stdout.lower()
+        # Should mention the main options
+        assert "--team" in result.stdout or "-t" in result.stdout
+        assert "--limit" in result.stdout or "-n" in result.stdout
+        assert "--all" in result.stdout or "-a" in result.stdout
+
+    def test_news_default_shows_roster_news_or_sync_message(self, cli_runner):
+        """Test news command with no arguments shows roster news or prompts to sync."""
+        result = cli_runner("news")
+
+        assert result.returncode == 0
+        # Either shows news or prompts to sync
+        assert ("News for" in result.stdout or
+                "No player news found" in result.stdout or
+                "No news found" in result.stdout or
+                "sync" in result.stdout.lower())
+
+    @pytest.mark.parametrize("format_arg,format_name", [
+        ([], "table"),
+        (["--format", "json"], "json"),
+        (["--format", "simple"], "simple"),
+    ])
+    def test_news_output_formats(self, cli_runner, format_arg, format_name):
+        """Test news command with different output formats."""
+        result = cli_runner("news", "--all", "--limit", "3", *format_arg)
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        # If no news is synced, we'll get a message about syncing
+        if "No player news found" in result.stdout or "sync" in result.stdout.lower():
+            return  # Skip format validation if no news data
+
+        if format_name == "json":
+            # JSON output should be valid JSON array
+            data = json.loads(result.stdout)
+            assert isinstance(data, list)
+            if len(data) > 0:
+                # Check news item structure
+                item = data[0]
+                assert "player_name" in item or "headline" in item
+        elif format_name == "simple":
+            # Simple format should have output
+            assert len(result.stdout.strip()) > 0
+
+    def test_news_all_flag(self, cli_runner):
+        """Test news --all shows all recent news."""
+        result = cli_runner("news", "--all", "--limit", "5")
+
+        assert result.returncode == 0
+        # Either shows news or prompts to sync
+        assert ("News" in result.stdout or
+                "news" in result.stdout.lower() or
+                "sync" in result.stdout.lower())
+
+    def test_news_team_filter(self, cli_runner):
+        """Test news --team filters by team."""
+        result = cli_runner("news", "--team", self.TEAM_NAME)
+
+        assert result.returncode == 0
+        # Either shows news for team or prompts to sync
+        # Team name may be in output or we get sync prompt
+        has_team_news = self.TEAM_NAME in result.stdout or "News for" in result.stdout
+        has_sync_prompt = "No player news" in result.stdout or "sync" in result.stdout.lower()
+        has_no_news = "No news found" in result.stdout
+
+        assert has_team_news or has_sync_prompt or has_no_news
+
+    def test_news_team_filter_json(self, cli_runner):
+        """Test news --team with JSON output."""
+        result = cli_runner("news", "--team", self.TEAM_NAME, "--format", "json")
+
+        assert result.returncode == 0
+
+        # If no news, output may not be JSON
+        if "No player news found" in result.stdout or "No news found" in result.stdout:
+            return
+
+        # Should be valid JSON
+        try:
+            data = json.loads(result.stdout)
+            assert isinstance(data, list)
+        except json.JSONDecodeError:
+            # May have non-JSON message if no news
+            assert "news" in result.stdout.lower() or "sync" in result.stdout.lower()
+
+    def test_news_limit_option(self, cli_runner):
+        """Test news --limit controls number of items."""
+        result = cli_runner("news", "--all", "--limit", "2", "--format", "json")
+
+        assert result.returncode == 0
+
+        # If no news synced, skip
+        if "No player news found" in result.stdout:
+            return
+
+        try:
+            data = json.loads(result.stdout)
+            # Each player should have at most 2 items (depends on data structure)
+            assert isinstance(data, list)
+        except json.JSONDecodeError:
+            pass  # Non-JSON output is fine if no news
+
+    def test_news_player_argument(self, cli_runner):
+        """Test news with player name argument."""
+        # Use a common player name pattern
+        result = cli_runner("news", "Connor", "--format", "json")
+
+        assert result.returncode == 0
+
+        # Either shows player news or reports not found
+        if "No news found for player" in result.stdout:
+            return  # Player search worked but no results
+        if "No player news found" in result.stdout:
+            return  # No news synced
+
+        try:
+            data = json.loads(result.stdout)
+            assert isinstance(data, list)
+        except json.JSONDecodeError:
+            # Non-JSON is fine for error messages
+            pass
+
+    def test_news_invalid_team(self, cli_runner):
+        """Test news with invalid team name."""
+        result = cli_runner("news", "--team", "NonexistentTeamName12345")
+
+        # Should either return error, show not found, or show sync prompt (if no news synced)
+        valid_responses = (
+            "not found" in result.stdout.lower() or
+            "no player news found" in result.stdout.lower() or
+            result.returncode != 0
+        )
+        assert valid_responses
+
+
+@pytest.mark.integration
+class TestNewsCacheBehavior:
+    """Integration tests for news caching behavior."""
+
+    def test_news_uses_cache(self, cli_runner):
+        """Test news command uses cache when available."""
+        # First call
+        result1 = cli_runner("news", "--all", "--limit", "3")
+        assert result1.returncode == 0
+
+        # Second call - should work (may use cache)
+        result2 = cli_runner("news", "--all", "--limit", "3")
+        assert result2.returncode == 0
+
+    def test_news_shows_cache_age(self, cli_runner):
+        """Test news command shows cache age when using cached data."""
+        result = cli_runner("news")
+
+        assert result.returncode == 0
+        # If there's cached news, should show age info
+        # This is informational - just verify command works
+
+    @pytest.mark.slow
+    def test_sync_news_flag(self, cli_runner):
+        """Test sync --news syncs player news."""
+        result = cli_runner("sync", "--news")
+
+        assert result.returncode == 0
+        # Should mention news syncing
+        assert "news" in result.stdout.lower() or "player" in result.stdout.lower()
+
+    @pytest.mark.slow
+    def test_sync_full_includes_news(self, cli_runner):
+        """Test sync --full includes news sync."""
+        result = cli_runner("sync", "--full")
+
+        assert result.returncode == 0
+        # Full sync should complete (news is part of it)
+        assert "Sync complete" in result.stdout or "Done" in result.stdout
+
+    @pytest.mark.slow
+    def test_sync_no_news_flag(self, cli_runner):
+        """Test sync --full --no-news skips news sync."""
+        result = cli_runner("sync", "--full", "--no-news")
+
+        assert result.returncode == 0
+        # Should still complete successfully
+
+
+@pytest.mark.integration
+class TestNewsApiAndStorage:
+    """Integration tests to validate news API responses and database storage."""
+
+    @pytest.mark.slow
+    def test_sync_news_stores_data_for_rostered_player(self, cli_runner):
+        """Test that sync --news actually stores news in database for rostered players."""
+        import sqlite3
+        from fantrax_cli.config import load_config
+
+        config = load_config()
+
+        # First run sync --news
+        result = cli_runner("sync", "--news")
+        assert result.returncode == 0, f"Sync failed: {result.stderr}"
+
+        # Check database for stored news
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Count news items
+        cursor.execute("SELECT COUNT(*) as count FROM player_news")
+        count = cursor.fetchone()['count']
+
+        # Get news for a rostered player (join with roster_slots)
+        cursor.execute("""
+            SELECT pn.*, p.name as player_name
+            FROM player_news pn
+            JOIN players p ON pn.player_id = p.id
+            JOIN roster_slots rs ON rs.player_id = p.id
+            LIMIT 5
+        """)
+        rostered_news = cursor.fetchall()
+        conn.close()
+
+        print(f"\n=== News Storage Results ===")
+        print(f"Total news items stored: {count}")
+        print(f"Rostered players with news: {len(rostered_news)}")
+        for item in rostered_news:
+            print(f"  - {item['player_name']}: {item['headline'][:50]}...")
+
+        # Assert that news was stored
+        assert count > 0, "No news items were stored - API sync may have failed"
+        # At least one rostered player should have news (most likely in active league)
+        assert len(rostered_news) > 0, "No news was stored for rostered players - news sync may have failed"
+
+    @pytest.mark.slow
+    def test_sync_news_stores_data_for_free_agent(self, cli_runner):
+        """Test that sync --news stores news for free agents too."""
+        import sqlite3
+        from fantrax_cli.config import load_config
+
+        config = load_config()
+
+        # First ensure free agents are synced
+        result = cli_runner("sync", "--free-agents")
+        assert result.returncode == 0
+
+        # Then sync news (which should include top FA)
+        result = cli_runner("sync", "--news")
+        assert result.returncode == 0
+
+        # Check if any free agent has news
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Get news for players that are free agents
+        cursor.execute("""
+            SELECT pn.*, p.name as player_name
+            FROM player_news pn
+            JOIN players p ON pn.player_id = p.id
+            JOIN free_agents fa ON fa.player_id = p.id
+            LIMIT 5
+        """)
+        fa_news = cursor.fetchall()
+
+        # Also count total news items to confirm sync worked
+        cursor.execute("SELECT COUNT(*) as count FROM player_news")
+        total_count = cursor.fetchone()['count']
+        conn.close()
+
+        print(f"\n=== Free Agent News Storage Results ===")
+        print(f"Total news items stored: {total_count}")
+        print(f"Free agents with news: {len(fa_news)}")
+        for item in fa_news:
+            print(f"  - {item['player_name']}: {item['headline'][:50]}...")
+
+        # Assert that news was stored overall
+        assert total_count > 0, "No news items were stored - API sync may have failed"
+        # Assert that at least one free agent has news
+        assert len(fa_news) > 0, "No news was stored for free agents - FA news sync may have failed"

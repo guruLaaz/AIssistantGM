@@ -42,6 +42,14 @@ def sync_command(
         "--free-agents", "--fa",
         help="Sync free agent listings"
     )] = False,
+    news: Annotated[bool, typer.Option(
+        "--news",
+        help="Sync player news for all rostered players"
+    )] = False,
+    no_news: Annotated[bool, typer.Option(
+        "--no-news",
+        help="Skip player news sync during --full sync"
+    )] = False,
     status: Annotated[bool, typer.Option(
         "--status", "-s",
         help="Show cache status and last sync times"
@@ -90,13 +98,14 @@ def sync_command(
             return
 
         # If no specific flags, show help
-        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents]):
+        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents, news]):
             console.print("[yellow]No sync option specified. Use --help for options.[/yellow]")
             console.print("\nQuick options:")
-            console.print("  [bold]fantrax sync --full[/bold]       Full sync (~55 seconds)")
+            console.print("  [bold]fantrax sync --full[/bold]       Full sync (includes news)")
             console.print("  [bold]fantrax sync --status[/bold]     Check cache status")
             console.print("  [bold]fantrax sync --standings[/bold]  Update standings")
             console.print("  [bold]fantrax sync --rosters[/bold]    Update just rosters")
+            console.print("  [bold]fantrax sync --news[/bold]       Update player news")
             return
 
         # Authenticate with Fantrax
@@ -154,7 +163,7 @@ def sync_command(
         console.print(f"[green]✓[/green] Authenticated to league: {league.name}")
 
         # Create sync manager
-        sync_manager = SyncManager(league, db, console)
+        sync_manager = SyncManager(league, db, console, config)
 
         # Handle --full
         if full:
@@ -162,7 +171,8 @@ def sync_command(
             result = sync_manager.sync_all(
                 include_trends=True,
                 days_of_scores=35,
-                include_free_agents=True
+                include_free_agents=True,
+                include_news=not no_news
             )
             _show_sync_result(console, result)
             return
@@ -216,6 +226,16 @@ def sync_command(
                 sync_manager.sync_teams()
             count = sync_manager.sync_free_agents()
             console.print(f"[green]✓[/green] Synced {count} free agents")
+            api_calls += sync_manager.api_calls
+
+        if news:
+            console.print("\n[bold blue]→[/bold blue] Syncing player news...")
+            if not teams and not rosters:
+                sync_manager.sync_league_metadata()
+                sync_manager.sync_teams()
+                sync_manager.sync_all_rosters()
+            count = sync_manager.sync_player_news()
+            console.print(f"[green]✓[/green] Synced news for {count} players")
             api_calls += sync_manager.api_calls
 
         console.print(f"\n[bold]Sync complete![/bold] Total API calls: {api_calls}")
@@ -312,5 +332,7 @@ def _show_sync_result(console: Console, result: dict) -> None:
     console.print(f"  Player trends: {result.get('trends', 0)}")
     if result.get('free_agents', 0) > 0:
         console.print(f"  Free agents: {result.get('free_agents', 0)}")
+    if result.get('player_news', 0) > 0:
+        console.print(f"  Player news: {result.get('player_news', 0)}")
     console.print()
     console.print(f"  Total API calls: {result.get('api_calls', 0)}")

@@ -151,3 +151,35 @@ class TestLoadConfig:
         assert "FANTRAX_USERNAME" in error_msg
         assert "FANTRAX_PASSWORD" in error_msg
         assert "FANTRAX_LEAGUE_ID" in error_msg
+
+    def test_load_config_fa_news_limit_default(self, monkeypatch):
+        """Test fa_news_limit has correct default value."""
+        monkeypatch.setenv("FANTRAX_USERNAME", TEST_USERNAME)
+        monkeypatch.setenv("FANTRAX_PASSWORD", TEST_PASSWORD)
+        monkeypatch.setenv("FANTRAX_LEAGUE_ID", TEST_LEAGUE_ID)
+
+        config = load_config()
+
+        assert config.fa_news_limit == 500
+
+    def test_load_config_fa_news_limit_custom(self, monkeypatch):
+        """Test fa_news_limit can be set via environment variable."""
+        monkeypatch.setenv("FANTRAX_USERNAME", TEST_USERNAME)
+        monkeypatch.setenv("FANTRAX_PASSWORD", TEST_PASSWORD)
+        monkeypatch.setenv("FANTRAX_LEAGUE_ID", TEST_LEAGUE_ID)
+        monkeypatch.setenv("FANTRAX_FA_NEWS_LIMIT", "100")
+
+        config = load_config()
+
+        assert config.fa_news_limit == 100
+
+    def test_load_config_fa_news_limit_disabled(self, monkeypatch):
+        """Test fa_news_limit can be disabled with 0."""
+        monkeypatch.setenv("FANTRAX_USERNAME", TEST_USERNAME)
+        monkeypatch.setenv("FANTRAX_PASSWORD", TEST_PASSWORD)
+        monkeypatch.setenv("FANTRAX_LEAGUE_ID", TEST_LEAGUE_ID)
+        monkeypatch.setenv("FANTRAX_FA_NEWS_LIMIT", "0")
+
+        config = load_config()
+
+        assert config.fa_news_limit == 0

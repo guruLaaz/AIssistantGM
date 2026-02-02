@@ -340,3 +340,178 @@ class TestFormatRosterSimple:
         assert len(output_lines) == 2
         assert "C (Unknown): (Empty)" in output_lines[0]
         assert "LW (Unknown): (Empty)" in output_lines[1]
+
+
+# ==================== Player News Display Tests ====================
+
+from fantrax_cli.display import (
+    format_news_table,
+    format_news_detail,
+    format_news_json,
+    format_news_simple
+)
+
+
+@pytest.fixture
+def sample_news_items():
+    """Create sample news items for testing."""
+    return [
+        {
+            'player_id': 'p1',
+            'player_name': 'Connor McDavid',
+            'news_date': '2025-01-25T14:13:00',
+            'headline': 'McDavid scores two goals in victory',
+            'analysis': 'McDavid continues his dominant play with two goals.'
+        },
+        {
+            'player_id': 'p2',
+            'player_name': 'Leon Draisaitl',
+            'news_date': '2025-01-24T10:00:00',
+            'headline': 'Draisaitl adds assist in overtime win',
+            'analysis': None
+        },
+        {
+            'player_id': 'p1',
+            'player_name': 'Connor McDavid',
+            'news_date': '2025-01-20T09:00:00',
+            'headline': 'McDavid listed day-to-day with minor injury',
+            'analysis': 'Expected to return within a week.'
+        }
+    ]
+
+
+class TestFormatNewsTable:
+    """Test format_news_table function."""
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_table_basic(self, mock_console, sample_news_items):
+        """Test news table formatting."""
+        format_news_table(sample_news_items)
+        mock_console.assert_called_once()
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_table_with_title(self, mock_console, sample_news_items):
+        """Test news table formatting with custom title."""
+        format_news_table(sample_news_items, title="Team News")
+        mock_console.assert_called_once()
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_table_empty(self, mock_console):
+        """Test news table formatting with empty list."""
+        mock_instance = Mock()
+        mock_console.return_value = mock_instance
+
+        format_news_table([])
+
+        # Should print "No news items found" message
+        mock_instance.print.assert_called()
+
+
+class TestFormatNewsDetail:
+    """Test format_news_detail function."""
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_detail_basic(self, mock_console, sample_news_items):
+        """Test detailed news formatting."""
+        format_news_detail(sample_news_items)
+        mock_console.assert_called_once()
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_detail_with_player_name(self, mock_console, sample_news_items):
+        """Test detailed news with player name header."""
+        format_news_detail(sample_news_items, player_name="Connor McDavid")
+        mock_console.assert_called_once()
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_detail_empty(self, mock_console):
+        """Test detailed news formatting with empty list."""
+        mock_instance = Mock()
+        mock_console.return_value = mock_instance
+
+        format_news_detail([])
+
+        # Should print "No news items found" message
+        mock_instance.print.assert_called()
+
+
+class TestFormatNewsJson:
+    """Test format_news_json function."""
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_json_basic(self, mock_console, sample_news_items):
+        """Test JSON news formatting."""
+        mock_instance = Mock()
+        mock_console.return_value = mock_instance
+
+        format_news_json(sample_news_items)
+
+        call_args = mock_instance.print_json.call_args[0][0]
+        output_data = json.loads(call_args)
+
+        assert 'news_items' in output_data
+        assert 'count' in output_data
+        assert output_data['count'] == 3
+        assert len(output_data['news_items']) == 3
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_json_with_player_name(self, mock_console, sample_news_items):
+        """Test JSON news formatting with player name."""
+        mock_instance = Mock()
+        mock_console.return_value = mock_instance
+
+        format_news_json(sample_news_items, player_name="Connor McDavid")
+
+        call_args = mock_instance.print_json.call_args[0][0]
+        output_data = json.loads(call_args)
+
+        assert output_data['player_name'] == "Connor McDavid"
+
+    @patch('fantrax_cli.display.Console')
+    def test_format_news_json_empty(self, mock_console):
+        """Test JSON news formatting with empty list."""
+        mock_instance = Mock()
+        mock_console.return_value = mock_instance
+
+        format_news_json([])
+
+        call_args = mock_instance.print_json.call_args[0][0]
+        output_data = json.loads(call_args)
+
+        assert output_data['count'] == 0
+        assert output_data['news_items'] == []
+
+
+class TestFormatNewsSimple:
+    """Test format_news_simple function."""
+
+    def test_format_news_simple(self, sample_news_items, capsys):
+        """Test simple news formatting."""
+        format_news_simple(sample_news_items)
+
+        captured = capsys.readouterr()
+        output = captured.out
+
+        assert 'Connor McDavid' in output
+        assert 'Leon Draisaitl' in output
+        assert 'McDavid scores two goals' in output
+        assert 'Draisaitl adds assist' in output
+
+    def test_format_news_simple_with_analysis(self, capsys):
+        """Test simple news formatting includes analysis."""
+        news_items = [{
+            'player_name': 'Test Player',
+            'news_date': '2025-01-25',
+            'headline': 'Test headline',
+            'analysis': 'Test analysis text'
+        }]
+        format_news_simple(news_items)
+
+        captured = capsys.readouterr()
+        assert 'Analysis: Test analysis text' in captured.out
+
+    def test_format_news_simple_empty(self, capsys):
+        """Test simple news formatting with empty list."""
+        format_news_simple([])
+
+        captured = capsys.readouterr()
+        assert 'No news items found' in captured.out

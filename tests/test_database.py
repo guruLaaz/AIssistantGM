@@ -49,7 +49,7 @@ class TestDatabaseManager:
 
         expected_tables = [
             'daily_scores', 'free_agents', 'league_metadata',
-            'player_trends', 'players', 'roster_slots',
+            'player_news', 'player_trends', 'players', 'roster_slots',
             'schema_version', 'standings', 'sync_log', 'teams'
         ]
         assert sorted(tables) == sorted(expected_tables)
@@ -68,6 +68,7 @@ class TestDatabaseManager:
         assert 'idx_daily_scores_player_date' in indexes
         assert 'idx_daily_scores_date' in indexes
         assert 'idx_player_trends_player' in indexes
+        assert 'idx_player_news_player_date' in indexes
 
     def test_clear_all(self, db_manager):
         """Test clearing all data from database."""
@@ -384,6 +385,38 @@ class TestFreeAgents:
         result = db_manager.get_free_agents('SCORE', '2020', limit=10)
         assert len(result) == 0
 
+    def test_get_top_free_agent_ids(self, db_manager):
+        """Test getting top N free agent player IDs by rank."""
+        # Save players first
+        db_manager.save_players([
+            {'id': 'fa1', 'name': 'Top FA', 'position_short_names': 'C'},
+            {'id': 'fa2', 'name': 'Second FA', 'position_short_names': 'LW'},
+            {'id': 'fa3', 'name': 'Third FA', 'position_short_names': 'RW'},
+        ])
+
+        # Save free agents (rank is assigned in order)
+        fa_list = [
+            {'id': 'fa1', 'fpg': 3.0},
+            {'id': 'fa2', 'fpg': 2.5},
+            {'id': 'fa3', 'fpg': 2.0},
+        ]
+        db_manager.save_free_agents(fa_list, 'SCORE', None)
+
+        # Get top 2
+        result = db_manager.get_top_free_agent_ids(limit=2)
+        assert len(result) == 2
+        assert result[0] == 'fa1'  # Rank 1
+        assert result[1] == 'fa2'  # Rank 2
+
+        # Get all
+        result = db_manager.get_top_free_agent_ids(limit=10)
+        assert len(result) == 3
+
+    def test_get_top_free_agent_ids_empty(self, db_manager):
+        """Test getting top free agent IDs when none exist."""
+        result = db_manager.get_top_free_agent_ids(limit=10)
+        assert result == []
+
 
 class TestSyncLog:
     """Tests for sync log operations."""
@@ -486,3 +519,165 @@ class TestDatabasePath:
             assert not nested_path.parent.exists()
             db = DatabaseManager(db_path=nested_path)
             assert nested_path.parent.exists()
+
+
+class TestPlayerNews:
+    """Tests for player news operations."""
+
+    def test_save_and_get_player_news(self, db_manager):
+        """Test saving and retrieving player news."""
+        # First save a player
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+
+        news_items = [
+            {
+                'news_date': '2025-01-25T14:13:00',
+                'headline': 'Player scored two goals',
+                'analysis': 'Great performance in the game.'
+            },
+            {
+                'news_date': '2025-01-20T10:00:00',
+                'headline': 'Player returns from injury',
+                'analysis': 'Back in the lineup after a week.'
+            }
+        ]
+        saved = db_manager.save_player_news('player1', news_items)
+        assert saved == 2
+
+        result = db_manager.get_player_news('player1')
+        assert len(result) == 2
+        # Should be ordered by date descending
+        assert result[0]['headline'] == 'Player scored two goals'
+        assert result[1]['headline'] == 'Player returns from injury'
+        assert result[0]['player_name'] == 'Test Player'
+
+    def test_save_player_news_keeps_only_30(self, db_manager):
+        """Test that only the most recent 30 news items are kept."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+
+        # Save 35 news items
+        news_items = [
+            {
+                'news_date': f'2025-01-{str(i).zfill(2)}T10:00:00',
+                'headline': f'News item {i}',
+                'analysis': None
+            }
+            for i in range(1, 36)
+        ]
+        db_manager.save_player_news('player1', news_items)
+
+        result = db_manager.get_player_news('player1', limit=50)
+        assert len(result) == 30
+        # Most recent should be kept (days 6-35)
+        assert result[0]['headline'] == 'News item 35'
+
+    def test_save_player_news_empty_list(self, db_manager):
+        """Test saving empty news list."""
+        saved = db_manager.save_player_news('player1', [])
+        assert saved == 0
+
+    def test_get_player_news_with_limit(self, db_manager):
+        """Test getting news with a limit."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+
+        news_items = [
+            {'news_date': f'2025-01-{str(i).zfill(2)}T10:00:00', 'headline': f'News {i}'}
+            for i in range(1, 11)
+        ]
+        db_manager.save_player_news('player1', news_items)
+
+        result = db_manager.get_player_news('player1', limit=5)
+        assert len(result) == 5
+
+    def test_get_news_for_multiple_players(self, db_manager):
+        """Test getting news for multiple players."""
+        db_manager.save_players([
+            {'id': 'p1', 'name': 'Player One'},
+            {'id': 'p2', 'name': 'Player Two'},
+            {'id': 'p3', 'name': 'Player Three'}
+        ])
+
+        db_manager.save_player_news('p1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'P1 News 1'},
+            {'news_date': '2025-01-24T10:00:00', 'headline': 'P1 News 2'},
+        ])
+        db_manager.save_player_news('p2', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'P2 News 1'},
+        ])
+        # p3 has no news
+
+        result = db_manager.get_news_for_players(['p1', 'p2', 'p3'], limit_per_player=5)
+        assert len(result) == 2  # p3 not included (no news)
+        assert 'p1' in result
+        assert 'p2' in result
+        assert 'p3' not in result
+        assert len(result['p1']) == 2
+        assert len(result['p2']) == 1
+
+    def test_get_news_for_players_empty_list(self, db_manager):
+        """Test getting news for empty player list."""
+        result = db_manager.get_news_for_players([])
+        assert result == {}
+
+    def test_get_all_player_news(self, db_manager):
+        """Test getting all player news across all players."""
+        db_manager.save_players([
+            {'id': 'p1', 'name': 'Player One'},
+            {'id': 'p2', 'name': 'Player Two'},
+        ])
+
+        db_manager.save_player_news('p1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Latest news'},
+        ])
+        db_manager.save_player_news('p2', [
+            {'news_date': '2025-01-24T10:00:00', 'headline': 'Older news'},
+        ])
+
+        result = db_manager.get_all_player_news(limit=10)
+        assert len(result) == 2
+        # Should be sorted by date descending
+        assert result[0]['headline'] == 'Latest news'
+        assert result[1]['headline'] == 'Older news'
+
+    def test_save_player_news_with_analysis(self, db_manager):
+        """Test saving news with analysis field."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+
+        news_items = [
+            {
+                'news_date': '2025-01-25T10:00:00',
+                'headline': 'Player traded',
+                'analysis': 'This trade improves the team significantly.'
+            }
+        ]
+        db_manager.save_player_news('player1', news_items)
+
+        result = db_manager.get_player_news('player1')
+        assert result[0]['analysis'] == 'This trade improves the team significantly.'
+
+    def test_save_player_news_without_analysis(self, db_manager):
+        """Test saving news without analysis field."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+
+        news_items = [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Short update'}
+        ]
+        db_manager.save_player_news('player1', news_items)
+
+        result = db_manager.get_player_news('player1')
+        assert result[0]['analysis'] is None
+
+    def test_save_player_news_duplicate_prevention(self, db_manager):
+        """Test that duplicate news items are not duplicated."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+
+        news_item = {
+            'news_date': '2025-01-25T10:00:00',
+            'headline': 'Same news'
+        }
+        # Save the same news twice
+        db_manager.save_player_news('player1', [news_item])
+        db_manager.save_player_news('player1', [news_item])
+
+        result = db_manager.get_player_news('player1')
+        assert len(result) == 1
