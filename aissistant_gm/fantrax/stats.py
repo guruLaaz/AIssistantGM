@@ -367,37 +367,39 @@ def fetch_fa_player_trends(league, player_ids: list, limit: int = 25, sort_key: 
                         else:
                             games = 0
 
-                        # Store the data
+                        # Store the data (use 'total'/'games' to match save_player_trends format)
                         if period_name.startswith('week'):
                             player_trends[player_id][period_name] = {
-                                'total_points': round(fpts, 1),
-                                'games_played': games,
+                                'total': round(fpts, 1),
+                                'games': games,
                                 'fpg': round(fpg, 2),
-                                'start': start_date.strftime('%b %d'),
-                                'end': end_date.strftime('%b %d')
+                                'start': start_date.isoformat(),
+                                'end': end_date.isoformat()
                             }
                         else:
                             player_trends[player_id][period_name] = {
-                                'total_points': round(fpts, 1),
-                                'games_played': games,
-                                'fpg': round(fpg, 2)
+                                'total': round(fpts, 1),
+                                'games': games,
+                                'fpg': round(fpg, 2),
+                                'start': start_date.isoformat(),
+                                'end': end_date.isoformat()
                             }
 
             except Exception as e:
                 console.print(f"[red]Error fetching {period_name}: {e}[/red]")
 
     # Fill in missing periods with zeros for players that didn't appear in some periods
-    empty_week = {'total_points': 0.0, 'games_played': 0, 'fpg': 0.0, 'start': '', 'end': ''}
-    empty_period = {'total_points': 0.0, 'games_played': 0, 'fpg': 0.0}
+    empty_week = {'total': 0.0, 'games': 0, 'fpg': 0.0, 'start': '', 'end': ''}
+    empty_period = {'total': 0.0, 'games': 0, 'fpg': 0.0, 'start': '', 'end': ''}
 
     result = {}
     for player_id, trends in player_trends.items():
         result[player_id] = {
-            'week1': trends.get('week1', {**empty_week, 'start': week1_start.strftime('%b %d'), 'end': week1_end.strftime('%b %d')}),
-            'week2': trends.get('week2', {**empty_week, 'start': week2_start.strftime('%b %d'), 'end': week2_end.strftime('%b %d')}),
-            'week3': trends.get('week3', {**empty_week, 'start': week3_start.strftime('%b %d'), 'end': week3_end.strftime('%b %d')}),
-            '14': trends.get('14', empty_period),
-            '30': trends.get('30', empty_period)
+            'week1': trends.get('week1', {**empty_week, 'start': week1_start.isoformat(), 'end': week1_end.isoformat()}),
+            'week2': trends.get('week2', {**empty_week, 'start': week2_start.isoformat(), 'end': week2_end.isoformat()}),
+            'week3': trends.get('week3', {**empty_week, 'start': week3_start.isoformat(), 'end': week3_end.isoformat()}),
+            '14': trends.get('14', {**empty_period, 'start': week2_start.isoformat(), 'end': week1_end.isoformat()}),
+            '30': trends.get('30', {**empty_period, 'start': cutoff_30.isoformat(), 'end': week1_end.isoformat()})
         }
 
     console.print(f"\n[green]✓[/green] Fetched trends for {len(result)} players\n")

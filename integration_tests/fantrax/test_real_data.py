@@ -420,3 +420,157 @@ class TestRealSyncOperations:
         conn.close()
 
         assert count > 0, "Should have roster slots after sync"
+
+    def test_sync_transactions_populates_table(self, cli_runner):
+        """Test that sync --transactions populates transactions table."""
+        config = load_config()
+
+        result = cli_runner("sync", "--transactions")
+        assert result.returncode == 0
+        assert "Synced" in result.stdout, "Expected sync confirmation message"
+
+        conn = sqlite3.connect(config.database_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM transactions")
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        # Note: count may be 0 if no transactions in the league yet
+        # Just verify the command succeeded
+        assert count >= 0, "transactions table should exist"
+
+    def test_sync_matchups_populates_tables(self, cli_runner):
+        """Test that sync --matchups populates matchups and scoring_periods tables."""
+        config = load_config()
+
+        result = cli_runner("sync", "--matchups")
+        assert result.returncode == 0
+        assert "Synced" in result.stdout, "Expected sync confirmation message"
+
+        conn = sqlite3.connect(config.database_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) FROM scoring_periods")
+        period_count = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM matchups")
+        matchup_count = cursor.fetchone()[0]
+
+        conn.close()
+
+        # Should have some periods and matchups after sync
+        assert period_count > 0, "Should have scoring periods after sync"
+        assert matchup_count > 0, "Should have matchups after sync"
+
+
+@pytest.mark.integration
+class TestRealTransactionData:
+    """Tests using real transaction data."""
+
+    def test_transactions_table_has_valid_structure(self, cli_runner):
+        """Test that transactions table has valid data structure."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM transactions LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+
+        if row is None:
+            pytest.skip("No transactions in database")
+
+        # Verify expected columns exist
+        columns = row.keys()
+        assert 'id' in columns
+        assert 'league_id' in columns
+        assert 'team_id' in columns
+        assert 'transaction_date' in columns
+
+    def test_transaction_players_linked_to_transactions(self, cli_runner):
+        """Test that transaction_players are properly linked to transactions."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Check for orphaned transaction_players
+        cursor.execute("""
+            SELECT COUNT(*) as count FROM transaction_players tp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM transactions t WHERE t.id = tp.transaction_id
+            )
+        """)
+        orphan_count = cursor.fetchone()['count']
+        conn.close()
+
+        assert orphan_count == 0, "Should have no orphaned transaction_players"
+
+
+@pytest.mark.integration
+class TestRealMatchupData:
+    """Tests using real matchup data."""
+
+    def test_matchups_table_has_valid_structure(self, cli_runner):
+        """Test that matchups table has valid data structure."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM matchups LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+
+        if row is None:
+            pytest.skip("No matchups in database")
+
+        # Verify expected columns exist
+        columns = row.keys()
+        assert 'league_id' in columns
+        assert 'period_number' in columns
+        assert 'matchup_key' in columns
+        assert 'away_score' in columns
+        assert 'home_score' in columns
+
+    def test_scoring_periods_are_ordered(self, cli_runner):
+        """Test that scoring periods are ordered by period number."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT period_number FROM scoring_periods
+            ORDER BY period_number
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+
+        if len(rows) < 2:
+            pytest.skip("Not enough scoring periods to test ordering")
+
+        # Verify periods are sequential (may have gaps for playoffs)
+        period_numbers = [row['period_number'] for row in rows]
+        for i in range(1, len(period_numbers)):
+            assert period_numbers[i] > period_numbers[i-1], "Periods should be ordered"
+
+    def test_matchups_have_valid_scores(self, cli_runner):
+        """Test that matchup scores are valid numbers."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT away_score, home_score FROM matchups LIMIT 10")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            pytest.skip("No matchups in database")
+
+        for row in rows:
+            # Scores should be non-negative (can be 0 for future matchups)
+            assert row['away_score'] >= 0, "Away score should be non-negative"
+            assert row['home_score'] >= 0, "Home score should be non-negative"

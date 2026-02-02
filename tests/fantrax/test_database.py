@@ -49,8 +49,9 @@ class TestDatabaseManager:
 
         expected_tables = [
             'daily_scores', 'free_agents', 'league_metadata',
-            'player_news', 'player_trends', 'players', 'roster_slots',
-            'schema_version', 'standings', 'sync_log', 'teams'
+            'matchups', 'player_news', 'player_trends', 'players', 'roster_slots',
+            'schema_version', 'scoring_periods', 'standings', 'sync_log', 'teams',
+            'transaction_players', 'transactions'
         ]
         assert sorted(tables) == sorted(expected_tables)
 
@@ -69,6 +70,10 @@ class TestDatabaseManager:
         assert 'idx_daily_scores_date' in indexes
         assert 'idx_player_trends_player' in indexes
         assert 'idx_player_news_player_date' in indexes
+        assert 'idx_transactions_league_date' in indexes
+        assert 'idx_transaction_players_tx' in indexes
+        assert 'idx_matchups_league_period' in indexes
+        assert 'idx_scoring_periods_league' in indexes
 
     def test_clear_all(self, db_manager):
         """Test clearing all data from database."""
@@ -681,3 +686,267 @@ class TestPlayerNews:
 
         result = db_manager.get_player_news('player1')
         assert len(result) == 1
+
+
+class TestTransactions:
+    """Tests for transaction operations."""
+
+    def test_save_and_get_transactions(self, db_manager):
+        """Test saving and retrieving transactions."""
+        # First save team and players
+        db_manager.save_teams('league1', [{'id': 'team1', 'name': 'Team One', 'short': 'T1'}])
+        db_manager.save_players([
+            {'id': 'player1', 'name': 'Player One'},
+            {'id': 'player2', 'name': 'Player Two'},
+        ])
+
+        transactions = [
+            {
+                'id': 'tx1',
+                'team_id': 'team1',
+                'transaction_date': '2025-01-25T14:00:00',
+                'players': [
+                    {'player_id': 'player1', 'transaction_type': 'ADD'},
+                    {'player_id': 'player2', 'transaction_type': 'DROP'},
+                ]
+            }
+        ]
+        saved = db_manager.save_transactions('league1', transactions)
+        assert saved == 1
+
+        result = db_manager.get_transactions('league1')
+        assert len(result) == 1
+        assert result[0]['id'] == 'tx1'
+        assert result[0]['team_name'] == 'Team One'
+        assert len(result[0]['players']) == 2
+        assert result[0]['players'][0]['transaction_type'] == 'ADD'
+
+    def test_save_transactions_empty_list(self, db_manager):
+        """Test saving empty transaction list."""
+        saved = db_manager.save_transactions('league1', [])
+        assert saved == 0
+
+    def test_get_transactions_with_limit(self, db_manager):
+        """Test getting transactions with a limit."""
+        db_manager.save_teams('league1', [{'id': 'team1', 'name': 'Team One', 'short': 'T1'}])
+        db_manager.save_players([{'id': 'player1', 'name': 'Player One'}])
+
+        # Save multiple transactions
+        transactions = [
+            {
+                'id': f'tx{i}',
+                'team_id': 'team1',
+                'transaction_date': f'2025-01-{str(i).zfill(2)}T10:00:00',
+                'players': [{'player_id': 'player1', 'transaction_type': 'ADD'}]
+            }
+            for i in range(1, 11)
+        ]
+        db_manager.save_transactions('league1', transactions)
+
+        result = db_manager.get_transactions('league1', limit=5)
+        assert len(result) == 5
+        # Should be ordered by date descending
+        assert result[0]['id'] == 'tx10'
+
+    def test_get_transaction_count(self, db_manager):
+        """Test getting transaction count."""
+        db_manager.save_teams('league1', [{'id': 'team1', 'name': 'Team One', 'short': 'T1'}])
+        db_manager.save_players([{'id': 'player1', 'name': 'Player One'}])
+
+        assert db_manager.get_transaction_count('league1') == 0
+
+        transactions = [
+            {'id': 'tx1', 'team_id': 'team1', 'transaction_date': '2025-01-25T10:00:00', 'players': []},
+            {'id': 'tx2', 'team_id': 'team1', 'transaction_date': '2025-01-24T10:00:00', 'players': []},
+        ]
+        db_manager.save_transactions('league1', transactions)
+
+        assert db_manager.get_transaction_count('league1') == 2
+
+    def test_save_transactions_replaces_players(self, db_manager):
+        """Test that saving a transaction replaces its player list."""
+        db_manager.save_teams('league1', [{'id': 'team1', 'name': 'Team One', 'short': 'T1'}])
+        db_manager.save_players([
+            {'id': 'player1', 'name': 'Player One'},
+            {'id': 'player2', 'name': 'Player Two'},
+        ])
+
+        # Save transaction with one player
+        tx = {
+            'id': 'tx1',
+            'team_id': 'team1',
+            'transaction_date': '2025-01-25T10:00:00',
+            'players': [{'player_id': 'player1', 'transaction_type': 'ADD'}]
+        }
+        db_manager.save_transactions('league1', [tx])
+
+        # Update with different player
+        tx['players'] = [{'player_id': 'player2', 'transaction_type': 'DROP'}]
+        db_manager.save_transactions('league1', [tx])
+
+        result = db_manager.get_transactions('league1')
+        assert len(result[0]['players']) == 1
+        assert result[0]['players'][0]['player_id'] == 'player2'
+
+
+class TestScoringPeriods:
+    """Tests for scoring period operations."""
+
+    def test_save_and_get_scoring_periods(self, db_manager):
+        """Test saving and retrieving scoring periods."""
+        periods = [
+            {'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False},
+            {'period_number': 2, 'start_date': '2025-01-13', 'end_date': '2025-01-19', 'is_playoffs': False},
+            {'period_number': 3, 'start_date': '2025-01-20', 'end_date': '2025-01-26', 'is_playoffs': True},
+        ]
+        saved = db_manager.save_scoring_periods('league1', periods)
+        assert saved == 3
+
+        result = db_manager.get_scoring_periods('league1')
+        assert len(result) == 3
+        assert result[0]['period_number'] == 1
+        assert result[0]['start_date'] == '2025-01-06'
+        assert result[0]['is_playoffs'] == 0
+        assert result[2]['is_playoffs'] == 1
+
+    def test_save_scoring_periods_empty_list(self, db_manager):
+        """Test saving empty periods list."""
+        saved = db_manager.save_scoring_periods('league1', [])
+        assert saved == 0
+
+    def test_get_scoring_period_count(self, db_manager):
+        """Test getting scoring period count."""
+        assert db_manager.get_scoring_period_count('league1') == 0
+
+        periods = [
+            {'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False},
+            {'period_number': 2, 'start_date': '2025-01-13', 'end_date': '2025-01-19', 'is_playoffs': False},
+        ]
+        db_manager.save_scoring_periods('league1', periods)
+
+        assert db_manager.get_scoring_period_count('league1') == 2
+
+    def test_save_scoring_periods_updates_existing(self, db_manager):
+        """Test that saving periods updates existing ones."""
+        # Save initial period
+        periods = [{'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False}]
+        db_manager.save_scoring_periods('league1', periods)
+
+        # Update with new end date
+        periods = [{'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-13', 'is_playoffs': False}]
+        db_manager.save_scoring_periods('league1', periods)
+
+        result = db_manager.get_scoring_periods('league1')
+        assert len(result) == 1
+        assert result[0]['end_date'] == '2025-01-13'
+
+
+class TestMatchups:
+    """Tests for matchup operations."""
+
+    def test_save_and_get_matchups(self, db_manager):
+        """Test saving and retrieving matchups."""
+        # First save scoring periods
+        db_manager.save_scoring_periods('league1', [
+            {'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False}
+        ])
+
+        matchups = [
+            {
+                'period_number': 1,
+                'matchup_key': 1,
+                'away_team_id': 'team1',
+                'away_team_name': 'Team One',
+                'away_score': 105.5,
+                'home_team_id': 'team2',
+                'home_team_name': 'Team Two',
+                'home_score': 98.2
+            },
+            {
+                'period_number': 1,
+                'matchup_key': 2,
+                'away_team_id': 'team3',
+                'away_team_name': 'Team Three',
+                'away_score': 88.0,
+                'home_team_id': 'team4',
+                'home_team_name': 'Team Four',
+                'home_score': 92.5
+            }
+        ]
+        saved = db_manager.save_matchups('league1', matchups)
+        assert saved == 2
+
+        result = db_manager.get_matchups('league1')
+        assert len(result) == 2
+        assert result[0]['away_team_name'] == 'Team One'
+        assert result[0]['away_score'] == 105.5
+        assert result[0]['period_start'] == '2025-01-06'
+
+    def test_get_matchups_by_period(self, db_manager):
+        """Test getting matchups filtered by period."""
+        db_manager.save_scoring_periods('league1', [
+            {'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False},
+            {'period_number': 2, 'start_date': '2025-01-13', 'end_date': '2025-01-19', 'is_playoffs': False},
+        ])
+
+        matchups = [
+            {'period_number': 1, 'matchup_key': 1, 'away_team_name': 'A', 'home_team_name': 'B'},
+            {'period_number': 2, 'matchup_key': 1, 'away_team_name': 'C', 'home_team_name': 'D'},
+        ]
+        db_manager.save_matchups('league1', matchups)
+
+        result = db_manager.get_matchups('league1', period_number=1)
+        assert len(result) == 1
+        assert result[0]['away_team_name'] == 'A'
+
+    def test_save_matchups_empty_list(self, db_manager):
+        """Test saving empty matchups list."""
+        saved = db_manager.save_matchups('league1', [])
+        assert saved == 0
+
+    def test_get_matchup_count(self, db_manager):
+        """Test getting matchup count."""
+        assert db_manager.get_matchup_count('league1') == 0
+
+        matchups = [
+            {'period_number': 1, 'matchup_key': 1, 'away_team_name': 'A', 'home_team_name': 'B'},
+            {'period_number': 1, 'matchup_key': 2, 'away_team_name': 'C', 'home_team_name': 'D'},
+            {'period_number': 2, 'matchup_key': 1, 'away_team_name': 'E', 'home_team_name': 'F'},
+        ]
+        db_manager.save_matchups('league1', matchups)
+
+        assert db_manager.get_matchup_count('league1') == 3
+
+    def test_save_matchups_updates_existing(self, db_manager):
+        """Test that saving matchups updates existing ones."""
+        matchup = {'period_number': 1, 'matchup_key': 1, 'away_team_name': 'A', 'away_score': 50.0, 'home_team_name': 'B', 'home_score': 45.0}
+        db_manager.save_matchups('league1', [matchup])
+
+        # Update with new scores
+        matchup['away_score'] = 100.0
+        matchup['home_score'] = 95.0
+        db_manager.save_matchups('league1', [matchup])
+
+        result = db_manager.get_matchups('league1')
+        assert len(result) == 1
+        assert result[0]['away_score'] == 100.0
+        assert result[0]['home_score'] == 95.0
+
+    def test_matchup_with_no_team_id(self, db_manager):
+        """Test matchup where team_id is None (e.g., bye week)."""
+        matchup = {
+            'period_number': 1,
+            'matchup_key': 1,
+            'away_team_id': None,
+            'away_team_name': 'BYE',
+            'away_score': 0,
+            'home_team_id': 'team1',
+            'home_team_name': 'Team One',
+            'home_score': 0
+        }
+        db_manager.save_matchups('league1', [matchup])
+
+        result = db_manager.get_matchups('league1')
+        assert len(result) == 1
+        assert result[0]['away_team_id'] is None
+        assert result[0]['away_team_name'] == 'BYE'

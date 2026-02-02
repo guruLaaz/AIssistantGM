@@ -16,7 +16,7 @@ def sync_command(
     ctx: typer.Context,
     full: Annotated[bool, typer.Option(
         "--full",
-        help="Full sync: teams, standings, all rosters, daily scores (per config), and trends"
+        help="Full sync: teams, standings, rosters, scores, trends, matchups, transactions, and news"
     )] = False,
     teams: Annotated[bool, typer.Option(
         "--teams",
@@ -49,6 +49,14 @@ def sync_command(
     no_news: Annotated[bool, typer.Option(
         "--no-news",
         help="Skip player news sync during --full sync"
+    )] = False,
+    transactions: Annotated[bool, typer.Option(
+        "--transactions", "--tx",
+        help="Sync transaction history"
+    )] = False,
+    matchups: Annotated[bool, typer.Option(
+        "--matchups",
+        help="Sync scoring periods and matchups"
     )] = False,
     status: Annotated[bool, typer.Option(
         "--status", "-s",
@@ -98,14 +106,16 @@ def sync_command(
             return
 
         # If no specific flags, show help
-        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents, news]):
+        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents, news, transactions, matchups]):
             console.print("[yellow]No sync option specified. Use --help for options.[/yellow]")
             console.print("\nQuick options:")
-            console.print("  [bold]fantrax sync --full[/bold]       Full sync (includes news)")
-            console.print("  [bold]fantrax sync --status[/bold]     Check cache status")
-            console.print("  [bold]fantrax sync --standings[/bold]  Update standings")
-            console.print("  [bold]fantrax sync --rosters[/bold]    Update just rosters")
-            console.print("  [bold]fantrax sync --news[/bold]       Update player news")
+            console.print("  [bold]fantrax sync --full[/bold]          Full sync (includes all data)")
+            console.print("  [bold]fantrax sync --status[/bold]        Check cache status")
+            console.print("  [bold]fantrax sync --standings[/bold]     Update standings")
+            console.print("  [bold]fantrax sync --rosters[/bold]       Update just rosters")
+            console.print("  [bold]fantrax sync --transactions[/bold]  Sync transaction history")
+            console.print("  [bold]fantrax sync --matchups[/bold]      Sync matchup schedules")
+            console.print("  [bold]fantrax sync --news[/bold]          Update player news")
             return
 
         # Authenticate with Fantrax
@@ -227,8 +237,8 @@ def sync_command(
             if not teams:
                 sync_manager.sync_league_metadata()
                 sync_manager.sync_teams()
-            count = sync_manager.sync_free_agents()
-            console.print(f"[green]✓[/green] Synced {count} free agents")
+            fa_stats = sync_manager.sync_free_agents()
+            console.print(f"[green]✓[/green] Synced {fa_stats['players']} free agents, {fa_stats['trends']} with trends")
             api_calls += sync_manager.api_calls
 
         if news:
@@ -239,6 +249,24 @@ def sync_command(
                 sync_manager.sync_all_rosters()
             count = sync_manager.sync_player_news()
             console.print(f"[green]✓[/green] Synced news for {count} players")
+            api_calls += sync_manager.api_calls
+
+        if transactions:
+            console.print("\n[bold blue]→[/bold blue] Syncing transactions...")
+            if not teams:
+                sync_manager.sync_league_metadata()
+                sync_manager.sync_teams()
+            count = sync_manager.sync_transactions()
+            console.print(f"[green]✓[/green] Synced {count} transactions")
+            api_calls += sync_manager.api_calls
+
+        if matchups:
+            console.print("\n[bold blue]→[/bold blue] Syncing matchups...")
+            if not teams:
+                sync_manager.sync_league_metadata()
+                sync_manager.sync_teams()
+            result = sync_manager.sync_matchups()
+            console.print(f"[green]✓[/green] Synced {result['periods']} periods, {result['matchups']} matchups")
             api_calls += sync_manager.api_calls
 
         console.print(f"\n[bold]Sync complete![/bold] Total API calls: {api_calls}")
@@ -278,6 +306,12 @@ def _show_status(console: Console, db: DatabaseManager, league_id: str) -> None:
     if 'daily_scores_range' in counts:
         dr = counts['daily_scores_range']
         console.print(f"  Daily Scores: {dr['start']} to {dr['end']}")
+    if counts.get('transactions', 0) > 0:
+        console.print(f"  Transactions: {counts.get('transactions', 0)}")
+    if counts.get('scoring_periods', 0) > 0:
+        console.print(f"  Scoring Periods: {counts.get('scoring_periods', 0)}")
+    if counts.get('matchups', 0) > 0:
+        console.print(f"  Matchups: {counts.get('matchups', 0)}")
 
     # Sync history
     console.print("\n[bold]Last Syncs:[/bold]")
@@ -333,6 +367,12 @@ def _show_sync_result(console: Console, result: dict) -> None:
     console.print(f"  Roster slots: {result.get('roster_slots', 0)}")
     console.print(f"  Daily scores: {result.get('daily_scores', 0)}")
     console.print(f"  Player trends: {result.get('trends', 0)}")
+    if result.get('scoring_periods', 0) > 0:
+        console.print(f"  Scoring periods: {result.get('scoring_periods', 0)}")
+    if result.get('matchups', 0) > 0:
+        console.print(f"  Matchups: {result.get('matchups', 0)}")
+    if result.get('transactions', 0) > 0:
+        console.print(f"  Transactions: {result.get('transactions', 0)}")
     if result.get('free_agents', 0) > 0:
         console.print(f"  Free agents: {result.get('free_agents', 0)}")
     if result.get('player_news', 0) > 0:

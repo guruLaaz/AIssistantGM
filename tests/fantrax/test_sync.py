@@ -430,9 +430,11 @@ class TestSyncFreeAgents:
         }
 
         manager = SyncManager(mock_league, db_manager)
-        count = manager.sync_free_agents(sort_keys=['SCORE'], limit=10)
+        # Use include_trends=False to avoid needing to mock the trends API
+        result = manager.sync_free_agents(sort_keys=['SCORE'], limit=10, include_trends=False)
 
-        assert count == 2
+        assert result['players'] == 2
+        assert result['trends'] == 0
 
         # Verify players were saved
         player = db_manager.get_player('fa1')
@@ -445,9 +447,10 @@ class TestSyncFreeAgents:
         mock_fetch.return_value = None
 
         manager = SyncManager(mock_league, db_manager)
-        count = manager.sync_free_agents()
+        result = manager.sync_free_agents(include_trends=False)
 
-        assert count == 0
+        assert result['players'] == 0
+        assert result['trends'] == 0
 
 
 class TestSyncPlayerNews:
