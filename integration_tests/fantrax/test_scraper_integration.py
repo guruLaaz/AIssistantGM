@@ -88,6 +88,80 @@ class TestScraperIntegration:
             assert matched_count >= 0
 
 
+def _get_rostered_player_ids(db, league_id: str) -> tuple[list[str], str]:
+    """Helper to get rostered player IDs and a team ID from database."""
+    teams = db.get_teams(league_id)
+    if not teams:
+        return [], ""
+
+    # Get first team with players
+    for team in teams:
+        roster = db.get_roster(team['id'])
+        player_ids = [slot['player_id'] for slot in roster if slot.get('player_id')]
+        if player_ids:
+            return player_ids, team['id']
+
+    return [], ""
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+class TestToiScraperIntegration:
+    """Integration tests for TOI scraping that require real credentials."""
+
+    def test_scrape_toi_for_single_player(self, scraper, db):
+        """Test scraping TOI for a single player returns valid data."""
+        player_ids, team_id = _get_rostered_player_ids(db, scraper.league_id)
+        if not player_ids:
+            pytest.skip("No rostered players in database")
+
+        # Scrape TOI for single player
+        result = scraper.scrape_player_toi([player_ids[0]], team_id, max_players=1)
+
+        # May or may not find TOI depending on player type
+        assert isinstance(result, dict)
+
+    def test_scrape_toi_has_required_fields(self, scraper, db):
+        """Test that scraped TOI data has all required fields."""
+        player_ids, team_id = _get_rostered_player_ids(db, scraper.league_id)
+        if not player_ids:
+            pytest.skip("No rostered players in database")
+
+        # Scrape TOI for a few players
+        result = scraper.scrape_player_toi(player_ids[:3], team_id, max_players=3)
+
+        # Check returned data has required fields
+        for player_id, toi_data in result.items():
+            assert 'toi_seconds' in toi_data
+            assert 'toipp_seconds' in toi_data
+            assert 'toish_seconds' in toi_data
+            assert 'games_played' in toi_data
+            assert isinstance(toi_data['toi_seconds'], int)
+            assert isinstance(toi_data['games_played'], int)
+            assert toi_data['toi_seconds'] >= 0
+            assert toi_data['games_played'] >= 0
+
+    def test_scrape_toi_values_are_reasonable(self, scraper, db):
+        """Test that scraped TOI values are within reasonable ranges."""
+        player_ids, team_id = _get_rostered_player_ids(db, scraper.league_id)
+        if not player_ids:
+            pytest.skip("No rostered players in database")
+
+        result = scraper.scrape_player_toi(player_ids[:5], team_id, max_players=5)
+
+        for player_id, toi_data in result.items():
+            # TOI per game should be between 0 and 30 minutes (1800 seconds)
+            # This is average per game, so max ~25 min for star players
+            if toi_data['games_played'] > 0:
+                toi_per_game = toi_data['toi_seconds'] / toi_data['games_played']
+                assert 0 <= toi_per_game <= 1800, f"TOI per game {toi_per_game} out of range"
+
+            # TOIPP (power play) should be less than total TOI
+            assert toi_data['toipp_seconds'] <= toi_data['toi_seconds']
+            # TOISH (shorthanded) should be less than total TOI
+            assert toi_data['toish_seconds'] <= toi_data['toi_seconds']
+
+
 @pytest.mark.integration
 class TestScraperQuickIntegration:
     """Quick integration tests that don't require full scraping."""
@@ -113,3 +187,17 @@ class TestScraperQuickIntegration:
             assert result is not None, f"Failed to parse: {tooltip}"
             assert result['player_name'] is not None
             assert result['headline'] is not None
+
+    def test_parse_time_to_seconds_formats(self, scraper):
+        """Test parsing various time formats from real player pages."""
+        test_cases = [
+            ("16:05", 965),
+            ("01:20", 80),
+            ("01:30", 90),
+            ("20:00", 1200),
+            ("0:45", 45),
+        ]
+
+        for time_str, expected in test_cases:
+            result = scraper._parse_time_to_seconds(time_str)
+            assert result == expected, f"Expected {expected} for '{time_str}', got {result}"

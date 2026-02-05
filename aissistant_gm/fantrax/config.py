@@ -34,6 +34,10 @@ class Config:
     login_wait_time: int = 5  # Seconds to wait after login
     browser_window_size: str = "1920,1600"  # Chrome window dimensions
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    # Retry settings for network operations
+    scraper_max_retries: int = 3  # Max retry attempts for network requests
+    scraper_retry_delay: float = 2.0  # Initial delay between retries (seconds)
+    scraper_retry_backoff: float = 2.0  # Multiplier for exponential backoff
 
     @property
     def cookie_path(self) -> Path:
@@ -119,6 +123,11 @@ def load_config(league_id: Optional[str] = None) -> Config:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     )
 
+    # Retry settings for network operations
+    scraper_max_retries = int(os.getenv("FANTRAX_SCRAPER_MAX_RETRIES", "3"))
+    scraper_retry_delay = float(os.getenv("FANTRAX_SCRAPER_RETRY_DELAY", "2.0"))
+    scraper_retry_backoff = float(os.getenv("FANTRAX_SCRAPER_RETRY_BACKOFF", "2.0"))
+
     return Config(
         username=username,
         password=password,
@@ -136,5 +145,8 @@ def load_config(league_id: Optional[str] = None) -> Config:
         selenium_timeout=selenium_timeout,
         login_wait_time=login_wait_time,
         browser_window_size=browser_window_size,
-        user_agent=user_agent
+        user_agent=user_agent,
+        scraper_max_retries=scraper_max_retries,
+        scraper_retry_delay=scraper_retry_delay,
+        scraper_retry_backoff=scraper_retry_backoff
     )

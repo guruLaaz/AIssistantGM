@@ -100,6 +100,9 @@ Minimum 1 second between API requests (configurable via `FANTRAX_MIN_REQUEST_INT
 | FANTRAX_LOGIN_WAIT_TIME | No | Wait time after login in seconds (default: 5) |
 | FANTRAX_BROWSER_WINDOW_SIZE | No | Chrome window size (default: 1920,1600) |
 | FANTRAX_USER_AGENT | No | Browser user-agent string |
+| FANTRAX_SCRAPER_MAX_RETRIES | No | Max retry attempts for network requests (default: 3) |
+| FANTRAX_SCRAPER_RETRY_DELAY | No | Initial delay between retries in seconds (default: 2.0) |
+| FANTRAX_SCRAPER_RETRY_BACKOFF | No | Multiplier for exponential backoff (default: 2.0) |
 
 ## Coding
 

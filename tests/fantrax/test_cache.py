@@ -112,6 +112,59 @@ class TestCacheManager:
         assert cache.get_max_age('teams') == 6.0    # Uses override (6 < 168)
 
 
+class TestCacheManagerIsFresh:
+    """Tests for is_fresh method."""
+
+    def test_is_fresh_cache_disabled(self, db_manager):
+        """Test is_fresh returns False when cache disabled."""
+        config = Config(
+            username="test",
+            password="test",
+            league_id="test_league",
+            cache_enabled=False
+        )
+        cache = CacheManager(db_manager, config)
+        assert cache.is_fresh('teams') is False
+
+    def test_is_fresh_with_explicit_timestamp(self, cache_manager):
+        """Test is_fresh with explicit last_sync_at parameter."""
+        # Recent timestamp should be fresh
+        recent_time = datetime.now().isoformat()
+        assert cache_manager.is_fresh('teams', last_sync_at=recent_time) is True
+
+        # Old timestamp should not be fresh
+        old_time = (datetime.now() - timedelta(hours=200)).isoformat()
+        assert cache_manager.is_fresh('teams', last_sync_at=old_time) is False
+
+    def test_is_fresh_from_sync_log(self, cache_manager, db_manager, config):
+        """Test is_fresh looks up from sync log when no explicit timestamp."""
+        # Without any sync log, should not be fresh
+        assert cache_manager.is_fresh('teams') is False
+
+        # After logging a sync, should be fresh
+        sync_id = db_manager.log_sync_start('teams', config.league_id)
+        db_manager.log_sync_complete(sync_id, 5)
+        assert cache_manager.is_fresh('teams') is True
+
+
+class TestCacheManagerGetCacheAge:
+    """Tests for get_cache_age method."""
+
+    def test_get_cache_age_no_sync(self, cache_manager):
+        """Test get_cache_age returns None when no sync exists."""
+        age = cache_manager.get_cache_age('teams')
+        assert age is None
+
+    def test_get_cache_age_with_sync(self, cache_manager, db_manager, config):
+        """Test get_cache_age returns age when sync exists."""
+        sync_id = db_manager.log_sync_start('teams', config.league_id)
+        db_manager.log_sync_complete(sync_id, 5)
+
+        age = cache_manager.get_cache_age('teams')
+        assert age is not None
+        assert age < 1.0  # Should be very recent (less than 1 hour)
+
+
 class TestCacheManagerTeams:
     """Tests for team caching."""
 
@@ -188,6 +241,148 @@ class TestCacheManagerTeams:
         assert team is not None
 
 
+class TestCacheManagerStandings:
+    """Tests for standings caching."""
+
+    def test_get_standings_empty_cache(self, cache_manager):
+        """Test getting standings when cache is empty."""
+        result = cache_manager.get_standings()
+        assert result.from_cache is False
+        assert result.data is None
+
+    def test_get_standings_with_data(self, cache_manager, db_manager, config):
+        """Test getting standings when data is cached."""
+        # Add teams first
+        db_manager.save_teams(config.league_id, [
+            {'id': 'team1', 'name': 'Team 1', 'short': 'T1'},
+        ])
+
+        # Add standings
+        db_manager.save_standings(config.league_id, [
+            {'team_id': 'team1', 'rank': 1, 'wins': 10, 'losses': 5, 'ties': 0, 'points_for': 150.0}
+        ])
+
+        # Log a sync
+        sync_id = db_manager.log_sync_start('standings', config.league_id)
+        db_manager.log_sync_complete(sync_id, 5)
+
+        result = cache_manager.get_standings()
+        assert result.from_cache is True
+        assert len(result.data) == 1
+        assert result.stale is False
+
+    def test_get_standings_stale_cache(self, cache_manager, db_manager, config):
+        """Test getting standings when cache is stale."""
+        db_manager.save_teams(config.league_id, [
+            {'id': 'team1', 'name': 'Team 1', 'short': 'T1'},
+        ])
+        db_manager.save_standings(config.league_id, [
+            {'team_id': 'team1', 'rank': 1, 'wins': 10, 'losses': 5, 'ties': 0, 'points_for': 150.0}
+        ])
+
+        # Log an old sync
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            old_time = (datetime.now() - timedelta(hours=24)).isoformat()
+            cursor.execute("""
+                INSERT INTO sync_log (sync_type, league_id, started_at, completed_at, status, api_calls_made)
+                VALUES (?, ?, ?, ?, 'completed', 5)
+            """, ('standings', config.league_id, old_time, old_time))
+
+        result = cache_manager.get_standings()
+        assert result.from_cache is True
+        assert result.stale is True
+
+    def test_get_standings_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_teams(config.league_id, [
+            {'id': 'team1', 'name': 'Team 1', 'short': 'T1'},
+        ])
+        db_manager.save_standings(config.league_id, [
+            {'team_id': 'team1', 'rank': 1, 'wins': 10, 'losses': 5, 'ties': 0, 'points_for': 150.0}
+        ])
+
+        result = cache_manager.get_standings(force_refresh=True)
+        assert result.from_cache is False
+
+    def test_get_standings_no_sync_log(self, cache_manager, db_manager, config):
+        """Test standings marked stale when no sync log exists."""
+        db_manager.save_teams(config.league_id, [
+            {'id': 'team1', 'name': 'Team 1', 'short': 'T1'},
+        ])
+        db_manager.save_standings(config.league_id, [
+            {'team_id': 'team1', 'rank': 1, 'wins': 10, 'losses': 5, 'ties': 0, 'points_for': 150.0}
+        ])
+
+        result = cache_manager.get_standings()
+        assert result.from_cache is True
+        assert result.stale is True
+
+
+class TestCacheManagerTeamsWithStandings:
+    """Tests for teams with standings caching."""
+
+    def test_get_teams_with_standings_empty_cache(self, cache_manager):
+        """Test getting teams with standings when cache is empty."""
+        result = cache_manager.get_teams_with_standings()
+        assert result.from_cache is False
+        assert result.data is None
+
+    def test_get_teams_with_standings_with_data(self, cache_manager, db_manager, config):
+        """Test getting teams with standings when data is cached."""
+        db_manager.save_teams(config.league_id, [
+            {'id': 'team1', 'name': 'Team 1', 'short': 'T1'},
+        ])
+        db_manager.save_standings(config.league_id, [
+            {'team_id': 'team1', 'rank': 1, 'wins': 10, 'losses': 5, 'ties': 0, 'points_for': 150.0}
+        ])
+
+        sync_id = db_manager.log_sync_start('standings', config.league_id)
+        db_manager.log_sync_complete(sync_id, 5)
+
+        result = cache_manager.get_teams_with_standings()
+        assert result.from_cache is True
+        assert len(result.data) == 1
+
+    def test_get_teams_with_standings_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_teams(config.league_id, [
+            {'id': 'team1', 'name': 'Team 1', 'short': 'T1'},
+        ])
+
+        result = cache_manager.get_teams_with_standings(force_refresh=True)
+        assert result.from_cache is False
+
+    def test_get_teams_with_standings_falls_back_to_teams_sync(self, cache_manager, db_manager, config):
+        """Test using teams sync when standings sync doesn't exist."""
+        db_manager.save_teams(config.league_id, [
+            {'id': 'team1', 'name': 'Team 1', 'short': 'T1'},
+        ])
+        db_manager.save_standings(config.league_id, [
+            {'team_id': 'team1', 'rank': 1, 'wins': 10, 'losses': 5, 'ties': 0, 'points_for': 150.0}
+        ])
+
+        # Only log a teams sync, not standings
+        sync_id = db_manager.log_sync_start('teams', config.league_id)
+        db_manager.log_sync_complete(sync_id, 5)
+
+        result = cache_manager.get_teams_with_standings()
+        assert result.from_cache is True
+
+    def test_get_teams_with_standings_no_sync_log(self, cache_manager, db_manager, config):
+        """Test teams with standings marked stale when no sync log exists."""
+        db_manager.save_teams(config.league_id, [
+            {'id': 'team1', 'name': 'Team 1', 'short': 'T1'},
+        ])
+        db_manager.save_standings(config.league_id, [
+            {'team_id': 'team1', 'rank': 1, 'wins': 10, 'losses': 5, 'ties': 0, 'points_for': 150.0}
+        ])
+
+        result = cache_manager.get_teams_with_standings()
+        assert result.from_cache is True
+        assert result.stale is True
+
+
 class TestCacheManagerRosters:
     """Tests for roster caching."""
 
@@ -235,6 +430,27 @@ class TestCacheManagerRosters:
         players = cache_manager.get_players_by_ids(['p1', 'p2'])
         assert len(players) == 2
 
+    def test_get_roster_no_sync_log(self, cache_manager, db_manager):
+        """Test roster marked stale when no sync log exists."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+        db_manager.save_roster('team1', [
+            {'player_id': 'player1', 'position_id': '2010', 'position_short': 'C'}
+        ])
+
+        result = cache_manager.get_roster('team1')
+        assert result.from_cache is True
+        assert result.stale is True
+
+    def test_get_roster_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+        db_manager.save_roster('team1', [
+            {'player_id': 'player1', 'position_id': '2010', 'position_short': 'C'}
+        ])
+
+        result = cache_manager.get_roster('team1', force_refresh=True)
+        assert result.from_cache is False
+
 
 class TestCacheManagerTrends:
     """Tests for trends caching."""
@@ -275,6 +491,58 @@ class TestCacheManagerTrends:
         assert trends is not None
         assert 'week1' in trends
 
+    def test_get_player_trends_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+        db_manager.save_roster('team1', [
+            {'player_id': 'player1', 'position_id': '2010', 'position_short': 'C'}
+        ])
+
+        result = cache_manager.get_player_trends('team1', force_refresh=True)
+        assert result.from_cache is False
+
+    def test_get_player_trends_no_players(self, cache_manager, db_manager):
+        """Test getting trends when roster has no players."""
+        db_manager.save_roster('team1', [
+            {'position_id': '2010', 'position_short': 'C'}  # Empty slot, no player_id
+        ])
+
+        result = cache_manager.get_player_trends('team1')
+        assert result.from_cache is True
+        assert result.data == {}
+
+    def test_get_player_trends_falls_back_to_daily_scores_sync(self, cache_manager, db_manager, config):
+        """Test falling back to daily_scores sync when trends sync doesn't exist."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+        db_manager.save_roster('team1', [
+            {'player_id': 'player1', 'position_id': '2010', 'position_short': 'C'}
+        ])
+        db_manager.save_player_trends('player1', {
+            'week1': {'total': 10.0, 'games': 4, 'fpg': 2.5},
+        })
+
+        # Only log daily_scores sync, not trends
+        sync_id = db_manager.log_sync_start('daily_scores', config.league_id)
+        db_manager.log_sync_complete(sync_id, 50)
+
+        result = cache_manager.get_player_trends('team1')
+        assert result.from_cache is True
+        assert 'player1' in result.data
+
+    def test_get_player_trends_no_sync_returns_stale(self, cache_manager, db_manager):
+        """Test trends marked stale when no sync log exists but data exists."""
+        db_manager.save_player({'id': 'player1', 'name': 'Test Player'})
+        db_manager.save_roster('team1', [
+            {'player_id': 'player1', 'position_id': '2010', 'position_short': 'C'}
+        ])
+        db_manager.save_player_trends('player1', {
+            'week1': {'total': 10.0, 'games': 4, 'fpg': 2.5},
+        })
+
+        result = cache_manager.get_player_trends('team1')
+        assert result.from_cache is True
+        assert result.stale is True
+
 
 class TestCacheManagerFreeAgents:
     """Tests for free agent caching."""
@@ -303,6 +571,71 @@ class TestCacheManagerFreeAgents:
         result = cache_manager.get_free_agents(sort_key='SCORE', limit=10)
         assert result.from_cache is True
         assert len(result.data) == 2
+
+    def test_get_free_agents_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_players([{'id': 'fa1', 'name': 'Free Agent 1'}])
+        db_manager.save_free_agents([{'id': 'fa1', 'fpg': 2.5}], 'SCORE', None)
+
+        result = cache_manager.get_free_agents(force_refresh=True)
+        assert result.from_cache is False
+
+    def test_get_free_agents_no_sync_log(self, cache_manager, db_manager):
+        """Test free agents marked stale when no sync log exists."""
+        db_manager.save_players([{'id': 'fa1', 'name': 'Free Agent 1'}])
+        db_manager.save_free_agents([{'id': 'fa1', 'fpg': 2.5}], 'SCORE', None)
+
+        result = cache_manager.get_free_agents()
+        assert result.from_cache is True
+        assert result.stale is True
+
+
+class TestCacheManagerFaTrends:
+    """Tests for free agent trends caching."""
+
+    def test_get_fa_trends_empty_list(self, cache_manager):
+        """Test getting FA trends with empty player list."""
+        result = cache_manager.get_fa_trends([])
+        assert result.from_cache is True
+        assert result.data == {}
+
+    def test_get_fa_trends_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_player_trends('fa1', {
+            'week1': {'total': 10.0, 'games': 4, 'fpg': 2.5},
+        })
+
+        result = cache_manager.get_fa_trends(['fa1'], force_refresh=True)
+        assert result.from_cache is False
+
+    def test_get_fa_trends_with_data(self, cache_manager, db_manager, config):
+        """Test getting FA trends with data cached."""
+        db_manager.save_player_trends('fa1', {
+            'week1': {'total': 10.0, 'games': 4, 'fpg': 2.5},
+        })
+
+        sync_id = db_manager.log_sync_start('free_agents', config.league_id)
+        db_manager.log_sync_complete(sync_id, 5)
+
+        result = cache_manager.get_fa_trends(['fa1'])
+        assert result.from_cache is True
+        assert 'fa1' in result.data
+
+    def test_get_fa_trends_no_data(self, cache_manager, db_manager, config):
+        """Test getting FA trends when no data exists."""
+        result = cache_manager.get_fa_trends(['fa1'])
+        assert result.from_cache is False
+        assert result.data is None
+
+    def test_get_fa_trends_no_sync_log(self, cache_manager, db_manager):
+        """Test FA trends marked stale when no sync log exists."""
+        db_manager.save_player_trends('fa1', {
+            'week1': {'total': 10.0, 'games': 4, 'fpg': 2.5},
+        })
+
+        result = cache_manager.get_fa_trends(['fa1'])
+        assert result.from_cache is True
+        assert result.stale is True
 
 
 class TestCacheManagerDailyScores:
@@ -346,6 +679,23 @@ class TestCacheManagerDailyScores:
             date(2025, 1, 1),
             date(2025, 1, 15)
         ) is False
+
+    def test_get_daily_scores_for_player(self, cache_manager, db_manager):
+        """Test getting daily scores for a specific player."""
+        # Need to add the player to roster first for the query to work
+        db_manager.save_daily_scores('team1', date(2025, 1, 15), {
+            'player1': 5.5,
+            'player2': 3.0,
+        })
+
+        scores = cache_manager.get_daily_scores_for_player(
+            'player1',
+            date(2025, 1, 1),
+            date(2025, 1, 31)
+        )
+        # Should return scores for player1
+        assert len(scores) == 1
+        assert scores[0]['fantasy_points'] == 5.5
 
 
 class TestCacheManagerLeagueMetadata:
@@ -539,3 +889,69 @@ class TestCacheManagerPlayerNews:
         assert len(result.data) == 2
         # Should be sorted by date descending
         assert result.data[0]['headline'] == 'Latest news'
+
+    def test_get_all_player_news_no_sync_log(self, cache_manager, db_manager):
+        """Test all player news marked stale when no sync log exists."""
+        db_manager.save_players([{'id': 'p1', 'name': 'Player 1'}])
+        db_manager.save_player_news('p1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Test news'}
+        ])
+
+        result = cache_manager.get_all_player_news()
+        assert result.from_cache is True
+        assert result.stale is True
+
+    def test_get_all_player_news_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_players([{'id': 'p1', 'name': 'Player 1'}])
+        db_manager.save_player_news('p1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Test news'}
+        ])
+
+        result = cache_manager.get_all_player_news(force_refresh=True)
+        assert result.from_cache is False
+
+    def test_get_news_for_roster_no_players(self, cache_manager, db_manager, config):
+        """Test getting news for roster with no players (empty slots)."""
+        db_manager.save_roster('team1', [
+            {'position_id': '2010', 'position_short': 'C'}  # Empty slot
+        ])
+
+        result = cache_manager.get_news_for_roster('team1')
+        assert result.from_cache is True
+        assert result.data == {}
+
+    def test_get_news_for_roster_force_refresh(self, cache_manager, db_manager, config):
+        """Test force refresh bypasses cache."""
+        db_manager.save_players([{'id': 'p1', 'name': 'Player 1'}])
+        db_manager.save_roster('team1', [
+            {'player_id': 'p1', 'position_id': '2010', 'position_short': 'C'}
+        ])
+
+        result = cache_manager.get_news_for_roster('team1', force_refresh=True)
+        assert result.from_cache is False
+
+    def test_get_news_for_roster_no_sync_stale_with_data(self, cache_manager, db_manager):
+        """Test roster news returns stale when no sync but data exists."""
+        db_manager.save_players([{'id': 'p1', 'name': 'Player 1'}])
+        db_manager.save_roster('team1', [
+            {'player_id': 'p1', 'position_id': '2010', 'position_short': 'C'}
+        ])
+        db_manager.save_player_news('p1', [
+            {'news_date': '2025-01-25T10:00:00', 'headline': 'Test news'}
+        ])
+
+        result = cache_manager.get_news_for_roster('team1')
+        assert result.from_cache is True
+        assert result.stale is True
+
+    def test_get_news_for_roster_no_sync_no_data(self, cache_manager, db_manager):
+        """Test roster news returns from_cache=False when no sync and no data."""
+        db_manager.save_players([{'id': 'p1', 'name': 'Player 1'}])
+        db_manager.save_roster('team1', [
+            {'player_id': 'p1', 'position_id': '2010', 'position_short': 'C'}
+        ])
+        # No news saved
+
+        result = cache_manager.get_news_for_roster('team1')
+        assert result.from_cache is False

@@ -11,7 +11,7 @@ import json
 class DatabaseManager:
     """Manages SQLite database connection and operations for Fantrax cache."""
 
-    SCHEMA_VERSION = 4  # Added transactions, scoring_periods, matchups tables
+    SCHEMA_VERSION = 5  # Added player_toi table for Time On Ice stats
 
     def __init__(self, db_path: Optional[Path] = None):
         """
@@ -80,7 +80,7 @@ class DatabaseManager:
                 tables_to_drop = [
                     'sync_log', 'free_agents', 'player_trends', 'daily_scores',
                     'roster_slots', 'player_news', 'players', 'standings', 'teams', 'league_metadata',
-                    'transactions', 'transaction_players', 'scoring_periods', 'matchups'
+                    'transactions', 'transaction_players', 'player_toi'
                 ]
                 for table in tables_to_drop:
                     cursor.execute(f"DROP TABLE IF EXISTS {table}")
@@ -192,6 +192,21 @@ class DatabaseManager:
                 )
             """)
 
+            # Player TOI (Time On Ice) stats
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS player_toi (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_id TEXT NOT NULL,
+                    toi_seconds INTEGER NOT NULL DEFAULT 0,
+                    toipp_seconds INTEGER NOT NULL DEFAULT 0,
+                    toish_seconds INTEGER NOT NULL DEFAULT 0,
+                    games_played INTEGER NOT NULL DEFAULT 0,
+                    last_sync_at TEXT NOT NULL,
+                    UNIQUE(player_id),
+                    FOREIGN KEY (player_id) REFERENCES players(id)
+                )
+            """)
+
             # Free agents
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS free_agents (
@@ -276,39 +291,6 @@ class DatabaseManager:
                 )
             """)
 
-            # Scoring periods
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS scoring_periods (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    league_id TEXT NOT NULL,
-                    period_number INTEGER NOT NULL,
-                    start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    is_playoffs INTEGER DEFAULT 0,
-                    last_sync_at TEXT NOT NULL,
-                    UNIQUE(league_id, period_number),
-                    FOREIGN KEY (league_id) REFERENCES league_metadata(league_id)
-                )
-            """)
-
-            # Matchups
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS matchups (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    league_id TEXT NOT NULL,
-                    period_number INTEGER NOT NULL,
-                    matchup_key INTEGER NOT NULL,
-                    away_team_id TEXT,
-                    away_team_name TEXT,
-                    away_score REAL DEFAULT 0,
-                    home_team_id TEXT,
-                    home_team_name TEXT,
-                    home_score REAL DEFAULT 0,
-                    last_sync_at TEXT NOT NULL,
-                    UNIQUE(league_id, period_number, matchup_key),
-                    FOREIGN KEY (league_id) REFERENCES league_metadata(league_id)
-                )
-            """)
 
             # Create indexes for common queries
             cursor.execute("""
@@ -351,14 +333,6 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_transaction_players_tx
                 ON transaction_players(transaction_id)
             """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_matchups_league_period
-                ON matchups(league_id, period_number)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_scoring_periods_league
-                ON scoring_periods(league_id, period_number)
-            """)
 
             # Set schema version (delete first to avoid multiple rows)
             cursor.execute("DELETE FROM schema_version")
@@ -373,7 +347,7 @@ class DatabaseManager:
             tables = [
                 'sync_log', 'free_agents', 'player_trends', 'daily_scores',
                 'roster_slots', 'player_news', 'players', 'standings', 'teams', 'league_metadata',
-                'transaction_players', 'transactions', 'matchups', 'scoring_periods'
+                'transaction_players', 'transactions'
             ]
             for table in tables:
                 cursor.execute(f"DELETE FROM {table}")
@@ -799,6 +773,79 @@ class DatabaseManager:
                 }
             return result
 
+    # ==================== Player TOI (Time On Ice) ====================
+
+    def save_player_toi(self, player_id: str, toi_data: dict) -> None:
+        """
+        Save player TOI (Time On Ice) stats.
+
+        Args:
+            player_id: The player ID
+            toi_data: Dict with keys:
+                - toi_seconds: Total time on ice in seconds
+                - toipp_seconds: Power play time on ice in seconds
+                - toish_seconds: Short-handed time on ice in seconds
+                - games_played: Number of games played
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO player_toi
+                (player_id, toi_seconds, toipp_seconds, toish_seconds, games_played, last_sync_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                toi_data.get('toi_seconds', 0),
+                toi_data.get('toipp_seconds', 0),
+                toi_data.get('toish_seconds', 0),
+                toi_data.get('games_played', 0),
+                now
+            ))
+
+    def get_player_toi(self, player_id: str) -> Optional[dict]:
+        """Get TOI stats for a player."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM player_toi WHERE player_id = ?
+            """, (player_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'toi_seconds': row['toi_seconds'],
+                    'toipp_seconds': row['toipp_seconds'],
+                    'toish_seconds': row['toish_seconds'],
+                    'games_played': row['games_played'],
+                    'toi_per_game_seconds': row['toi_seconds'] // row['games_played'] if row['games_played'] > 0 else 0
+                }
+            return None
+
+    def get_toi_for_players(self, player_ids: list[str]) -> dict[str, dict]:
+        """Get TOI stats for multiple players."""
+        if not player_ids:
+            return {}
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ','.join('?' * len(player_ids))
+            cursor.execute(f"""
+                SELECT * FROM player_toi WHERE player_id IN ({placeholders})
+            """, player_ids)
+
+            result = {}
+            for row in cursor.fetchall():
+                player_id = row['player_id']
+                gp = row['games_played']
+                result[player_id] = {
+                    'toi_seconds': row['toi_seconds'],
+                    'toipp_seconds': row['toipp_seconds'],
+                    'toish_seconds': row['toish_seconds'],
+                    'games_played': gp,
+                    'toi_per_game_seconds': row['toi_seconds'] // gp if gp > 0 else 0
+                }
+            return result
+
     # ==================== Free Agents ====================
 
     def save_free_agents(
@@ -1129,165 +1176,6 @@ class DatabaseManager:
             )
             return cursor.fetchone()[0]
 
-    # ==================== Scoring Periods & Matchups ====================
-
-    def save_scoring_periods(self, league_id: str, periods: list[dict]) -> int:
-        """
-        Save scoring periods for a league.
-
-        Args:
-            league_id: The league ID
-            periods: List of period dicts with keys:
-                - period_number: Integer period number
-                - start_date: ISO format date string
-                - end_date: ISO format date string
-                - is_playoffs: Boolean
-
-        Returns:
-            Number of periods saved
-        """
-        if not periods:
-            return 0
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            now = datetime.now().isoformat()
-
-            for period in periods:
-                cursor.execute("""
-                    INSERT OR REPLACE INTO scoring_periods
-                    (league_id, period_number, start_date, end_date, is_playoffs, last_sync_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    league_id,
-                    period['period_number'],
-                    period['start_date'],
-                    period['end_date'],
-                    1 if period.get('is_playoffs') else 0,
-                    now
-                ))
-
-            return len(periods)
-
-    def get_scoring_periods(self, league_id: str) -> list[dict]:
-        """Get all scoring periods for a league, ordered by period number."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM scoring_periods
-                WHERE league_id = ?
-                ORDER BY period_number
-            """, (league_id,))
-            return [dict(row) for row in cursor.fetchall()]
-
-    def save_matchups(self, league_id: str, matchups: list[dict]) -> int:
-        """
-        Save matchups for a league.
-
-        Args:
-            league_id: The league ID
-            matchups: List of matchup dicts with keys:
-                - period_number: Integer period number
-                - matchup_key: Integer matchup identifier within period
-                - away_team_id: Away team ID (optional)
-                - away_team_name: Away team name (for display)
-                - away_score: Away team score
-                - home_team_id: Home team ID (optional)
-                - home_team_name: Home team name (for display)
-                - home_score: Home team score
-
-        Returns:
-            Number of matchups saved
-        """
-        if not matchups:
-            return 0
-
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            now = datetime.now().isoformat()
-
-            for matchup in matchups:
-                cursor.execute("""
-                    INSERT OR REPLACE INTO matchups
-                    (league_id, period_number, matchup_key, away_team_id, away_team_name,
-                     away_score, home_team_id, home_team_name, home_score, last_sync_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    league_id,
-                    matchup['period_number'],
-                    matchup['matchup_key'],
-                    matchup.get('away_team_id'),
-                    matchup.get('away_team_name'),
-                    matchup.get('away_score', 0),
-                    matchup.get('home_team_id'),
-                    matchup.get('home_team_name'),
-                    matchup.get('home_score', 0),
-                    now
-                ))
-
-            return len(matchups)
-
-    def get_matchups(
-        self,
-        league_id: str,
-        period_number: Optional[int] = None
-    ) -> list[dict]:
-        """
-        Get matchups for a league, optionally filtered by period.
-
-        Args:
-            league_id: The league ID
-            period_number: Optional period number to filter by
-
-        Returns:
-            List of matchup dicts ordered by period and matchup key
-        """
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-
-            if period_number is not None:
-                cursor.execute("""
-                    SELECT m.*, sp.start_date as period_start, sp.end_date as period_end,
-                           sp.is_playoffs
-                    FROM matchups m
-                    LEFT JOIN scoring_periods sp ON m.league_id = sp.league_id
-                        AND m.period_number = sp.period_number
-                    WHERE m.league_id = ? AND m.period_number = ?
-                    ORDER BY m.matchup_key
-                """, (league_id, period_number))
-            else:
-                cursor.execute("""
-                    SELECT m.*, sp.start_date as period_start, sp.end_date as period_end,
-                           sp.is_playoffs
-                    FROM matchups m
-                    LEFT JOIN scoring_periods sp ON m.league_id = sp.league_id
-                        AND m.period_number = sp.period_number
-                    WHERE m.league_id = ?
-                    ORDER BY m.period_number, m.matchup_key
-                """, (league_id,))
-
-            return [dict(row) for row in cursor.fetchall()]
-
-    def get_matchup_count(self, league_id: str) -> int:
-        """Get total number of matchups for a league."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM matchups WHERE league_id = ?",
-                (league_id,)
-            )
-            return cursor.fetchone()[0]
-
-    def get_scoring_period_count(self, league_id: str) -> int:
-        """Get total number of scoring periods for a league."""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM scoring_periods WHERE league_id = ?",
-                (league_id,)
-            )
-            return cursor.fetchone()[0]
-
     # ==================== Sync Log ====================
 
     def log_sync_start(self, sync_type: str, league_id: str) -> int:
@@ -1335,7 +1223,7 @@ class DatabaseManager:
 
     def get_all_sync_status(self, league_id: str) -> dict[str, Optional[dict]]:
         """Get the most recent sync status for all sync types."""
-        sync_types = ['full', 'teams', 'standings', 'rosters', 'daily_scores', 'trends', 'free_agents', 'player_news', 'transactions', 'matchups']
+        sync_types = ['full', 'teams', 'standings', 'rosters', 'daily_scores', 'trends', 'free_agents', 'player_news', 'transactions']
         result = {}
         for sync_type in sync_types:
             result[sync_type] = self.get_last_sync(league_id, sync_type)

@@ -30,7 +30,10 @@ class FantraxScraper:
         selenium_timeout: int = 10,
         login_wait_time: int = 5,
         browser_window_size: str = "1920,1600",
-        user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+        retry_backoff: float = 2.0
     ):
         """Initialize the scraper.
 
@@ -44,6 +47,9 @@ class FantraxScraper:
             login_wait_time: Seconds to wait after login
             browser_window_size: Chrome window dimensions
             user_agent: Browser user-agent string
+            max_retries: Maximum number of retries for network requests
+            retry_delay: Initial delay between retries in seconds
+            retry_backoff: Multiplier for delay between retries (exponential backoff)
         """
         self.league_id = league_id
         self.username = username
@@ -54,6 +60,9 @@ class FantraxScraper:
         self.login_wait_time = login_wait_time
         self.browser_window_size = browser_window_size
         self.user_agent = user_agent
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.retry_backoff = retry_backoff
 
     def _get_driver(self) -> webdriver.Chrome:
         """Create and configure Chrome WebDriver."""
@@ -65,6 +74,42 @@ class FantraxScraper:
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         return webdriver.Chrome(service=service, options=options)
+
+    def _get_with_retry(self, driver: webdriver.Chrome, url: str) -> bool:
+        """Navigate to URL with retry logic for network timeouts.
+
+        Args:
+            driver: Selenium WebDriver instance
+            url: URL to navigate to
+
+        Returns:
+            True if navigation succeeded, False if all retries failed (network errors only)
+
+        Raises:
+            Exception: For non-network errors (immediately, without retry)
+        """
+        delay = self.retry_delay
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                driver.get(url)
+                return True
+            except Exception as e:
+                error_str = str(e).lower()
+                # Only retry on network-related errors
+                if any(x in error_str for x in ['timeout', 'connection', 'httpconnectionpool', 'read timed out']):
+                    if attempt < self.max_retries:
+                        self.console.print(f"[dim]    Network error, retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})...[/dim]")
+                        time.sleep(delay)
+                        delay *= self.retry_backoff
+                    else:
+                        self.console.print(f"[yellow]    Max retries reached for {url}[/yellow]")
+                        return False
+                else:
+                    # Non-network error, don't retry
+                    raise
+
+        return False
 
     def _dismiss_cookie_popup(self, driver: webdriver.Chrome) -> None:
         """Try to dismiss cookie consent popup if present."""
@@ -114,7 +159,8 @@ class FantraxScraper:
         """
         # Try to use cached cookies first
         if self.cookie_file.exists():
-            driver.get("https://www.fantrax.com")
+            if not self._get_with_retry(driver, "https://www.fantrax.com"):
+                return False
             self._dismiss_cookie_popup(driver)
 
             with open(self.cookie_file, "rb") as f:
@@ -126,7 +172,8 @@ class FantraxScraper:
                         pass  # Some cookies may not be valid for current domain
 
             # Refresh to apply cookies
-            driver.get(f"https://www.fantrax.com/fantasy/league/{self.league_id}/home")
+            if not self._get_with_retry(driver, f"https://www.fantrax.com/fantasy/league/{self.league_id}/home"):
+                return False
             time.sleep(2)
             self._dismiss_cookie_popup(driver)
 
@@ -136,7 +183,8 @@ class FantraxScraper:
 
         # Need to login with credentials
         self.console.print("[dim]Logging in to Fantrax...[/dim]")
-        driver.get("https://www.fantrax.com/login")
+        if not self._get_with_retry(driver, "https://www.fantrax.com/login"):
+            return False
         self._dismiss_cookie_popup(driver)
 
         try:
@@ -191,7 +239,9 @@ class FantraxScraper:
 
             # Navigate to the players page with news view
             news_url = f"https://www.fantrax.com/fantasy/league/{self.league_id}/players;statusOrTeamFilter=ALL;pageNumber=1;positionOrGroup=ALL;miscDisplayType=1"
-            driver.get(news_url)
+            if not self._get_with_retry(driver, news_url):
+                self.console.print("[red]Failed to load news page[/red]")
+                return news_items
             time.sleep(5)
             self._dismiss_cookie_popup(driver)
             time.sleep(3)
@@ -267,7 +317,9 @@ class FantraxScraper:
             # Navigate to additional pages to get more news
             for page_num in range(2, max_pages + 1):
                 page_url = f"https://www.fantrax.com/fantasy/league/{self.league_id}/players;statusOrTeamFilter=ALL;pageNumber={page_num};positionOrGroup=ALL;miscDisplayType=1"
-                driver.get(page_url)
+                if not self._get_with_retry(driver, page_url):
+                    self.console.print(f"[yellow]Failed to load page {page_num}, stopping pagination[/yellow]")
+                    break
                 time.sleep(3)
 
                 # Find news icons on this page
@@ -504,3 +556,198 @@ class FantraxScraper:
             return news_item
         except Exception:
             return None
+
+    def scrape_player_toi(
+        self,
+        player_ids: list[str],
+        team_id: str,
+        max_players: int = 50,
+        batch_size: int = 30
+    ) -> dict[str, dict]:
+        """
+        Scrape TOI (Time On Ice) data for players from their profile pages.
+
+        Args:
+            player_ids: List of player IDs to scrape TOI for
+            team_id: Fantasy team ID (used for player page URL)
+            max_players: Maximum number of players to scrape
+            batch_size: Number of players to scrape before restarting browser
+                        (prevents WebDriver timeout issues)
+
+        Returns:
+            Dict mapping player_id to TOI data:
+            {
+                'player_id': {
+                    'toi_seconds': int,
+                    'toipp_seconds': int,
+                    'toish_seconds': int,
+                    'games_played': int
+                }
+            }
+        """
+        results = {}
+        players_to_scrape = player_ids[:max_players]
+
+        if not players_to_scrape:
+            return results
+
+        self.console.print(f"[dim]Scraping TOI for {len(players_to_scrape)} players (batch size: {batch_size})...[/dim]")
+
+        # Process in batches to avoid WebDriver timeout
+        for batch_start in range(0, len(players_to_scrape), batch_size):
+            batch_end = min(batch_start + batch_size, len(players_to_scrape))
+            batch = players_to_scrape[batch_start:batch_end]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (len(players_to_scrape) + batch_size - 1) // batch_size
+
+            self.console.print(f"[dim]  Batch {batch_num}/{total_batches}: players {batch_start + 1}-{batch_end}[/dim]")
+
+            driver = None
+            try:
+                driver = self._get_driver()
+                if not self._login(driver):
+                    self.console.print("[red]Failed to login to Fantrax[/red]")
+                    continue
+
+                for i, player_id in enumerate(batch):
+                    try:
+                        # Navigate to player page
+                        # URL format: /player/{player_id}/{league_id}/{player_name}/{team_id}
+                        # We don't have player_name but can use a placeholder - Fantrax redirects
+                        player_url = f"https://www.fantrax.com/player/{player_id}/{self.league_id}/_/{team_id}"
+                        if not self._get_with_retry(driver, player_url):
+                            self.console.print(f"[dim]    Failed to load player {player_id} after retries[/dim]")
+                            continue
+                        time.sleep(2)  # Wait for page to load
+
+                        # Extract TOI data from page text
+                        toi_data = self._extract_toi_from_page(driver)
+
+                        if toi_data:
+                            results[player_id] = toi_data
+
+                    except Exception as e:
+                        self.console.print(f"[dim]    Error scraping player {player_id}: {e}[/dim]")
+                        # If we get a connection error, break out of this batch
+                        if "HTTPConnectionPool" in str(e) or "read timed out" in str(e).lower():
+                            self.console.print("[dim]    Connection lost, ending batch early[/dim]")
+                            break
+                        continue
+
+            except Exception as e:
+                self.console.print(f"[dim]  Batch error: {e}[/dim]")
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+
+            # Brief pause between batches
+            if batch_end < len(players_to_scrape):
+                time.sleep(2)
+
+        self.console.print(f"[green]✓[/green] Scraped TOI for {len(results)} players")
+
+        return results
+
+    def _extract_toi_from_page(self, driver) -> Optional[dict]:
+        """
+        Extract TOI data from player page.
+
+        The page shows season stats in text format like:
+        GP G A Pt +/- PIM SOG Shot% PPG PPA SHG SHA GWG OG Hit Blk Gv Tk Faceoffs TOI TOIPP TOISH
+        57 8 25 33 1 16 82 9.8 1 6 0 0 1 1 33 43 52 15 357-296-55% 16:05 01:20 01:30
+
+        Returns:
+            Dict with toi_seconds, toipp_seconds, toish_seconds, games_played or None
+        """
+        from selenium.webdriver.common.by import By
+
+        try:
+            body = driver.find_element(By.TAG_NAME, 'body')
+            full_text = body.text
+            lines = full_text.split('\n')
+
+            # Find the line with TOI header
+            toi_header_idx = None
+            for i, line in enumerate(lines):
+                if 'TOI' in line and 'TOIPP' in line and 'TOISH' in line:
+                    toi_header_idx = i
+                    break
+
+            if toi_header_idx is None:
+                return None
+
+            # Get headers from the line containing TOI
+            # The headers might be on one line or multiple lines before it
+            # Look backwards for GP which should be the start
+            header_start_idx = toi_header_idx
+            for j in range(toi_header_idx, max(0, toi_header_idx - 30), -1):
+                if lines[j].strip() == 'GP':
+                    header_start_idx = j
+                    break
+
+            # Collect headers
+            headers = []
+            for j in range(header_start_idx, toi_header_idx + 1):
+                line = lines[j].strip()
+                if line:
+                    headers.append(line)
+
+            # Find indices for the stats we need
+            try:
+                gp_idx = headers.index('GP')
+                toi_idx = headers.index('TOI')
+                toipp_idx = headers.index('TOIPP')
+                toish_idx = headers.index('TOISH')
+            except ValueError:
+                return None
+
+            # Values should follow the headers
+            values = []
+            for j in range(toi_header_idx + 1, min(len(lines), toi_header_idx + len(headers) + 5)):
+                line = lines[j].strip()
+                if line and not any(x in line.lower() for x in ['recent', 'game', 'date', 'team']):
+                    values.append(line)
+                if len(values) >= len(headers):
+                    break
+
+            if len(values) < max(gp_idx, toi_idx, toipp_idx, toish_idx) + 1:
+                return None
+
+            # Parse values
+            games_played = int(values[gp_idx])
+            toi_str = values[toi_idx]
+            toipp_str = values[toipp_idx]
+            toish_str = values[toish_idx]
+
+            return {
+                'toi_seconds': self._parse_time_to_seconds(toi_str),
+                'toipp_seconds': self._parse_time_to_seconds(toipp_str),
+                'toish_seconds': self._parse_time_to_seconds(toish_str),
+                'games_played': games_played
+            }
+
+        except Exception:
+            return None
+
+    def _parse_time_to_seconds(self, time_str: str) -> int:
+        """
+        Parse time string in MM:SS format to total seconds.
+
+        Args:
+            time_str: Time string like "16:05" or "01:30"
+
+        Returns:
+            Total seconds as integer
+        """
+        try:
+            if ':' not in time_str:
+                return 0
+            parts = time_str.split(':')
+            minutes = int(parts[0])
+            seconds = int(parts[1])
+            return minutes * 60 + seconds
+        except (ValueError, IndexError):
+            return 0

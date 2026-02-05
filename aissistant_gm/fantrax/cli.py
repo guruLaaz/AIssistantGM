@@ -3,11 +3,11 @@
 import sys
 import io
 import typer
-from enum import Enum
 from typing import Optional
 from typing_extensions import Annotated
 
 from aissistant_gm.fantrax import __version__
+from aissistant_gm.fantrax.types import OutputFormat  # Re-export for backward compatibility
 
 # Configure UTF-8 encoding for stdout/stderr to handle Unicode characters on Windows
 # This fixes issues with team names containing special characters like "Udûn"
@@ -22,13 +22,6 @@ app = typer.Typer(
     help="CLI wrapper for Fantrax Fantasy Sports API",
     add_completion=False
 )
-
-
-class OutputFormat(str, Enum):
-    """Output format options for CLI commands."""
-    table = "table"
-    json = "json"
-    simple = "simple"
 
 
 def version_callback(value: bool):

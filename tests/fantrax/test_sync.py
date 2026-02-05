@@ -412,6 +412,331 @@ class TestSyncRosterWithVariousPlayers:
         assert result['roster_slots'] == 1
 
 
+class TestSyncStandings:
+    """Tests for sync_standings method."""
+
+    @patch('aissistant_gm.fantrax.fantraxapi.api.get_standings')
+    def test_sync_standings_success(self, mock_get_standings, db_manager, mock_league):
+        """Test syncing standings from raw API response."""
+        # Mock API response (raw format used by sync_standings)
+        mock_get_standings.return_value = {
+            'tableList': [{
+                'header': {
+                    'cells': [
+                        {'key': 'rank'},
+                        {'key': 'team'},
+                        {'key': 'win'},
+                        {'key': 'loss'},
+                        {'key': 'tie'},
+                        {'key': 'points'},
+                        {'key': 'winpc'},
+                        {'key': 'gamesback'},
+                        {'key': 'wwOrder'},
+                        {'key': 'fantasyPoints'},
+                        {'key': 'pointsAgainst'},
+                        {'key': 'streak'},
+                        {'key': 'sc'},
+                        {'key': 'FPtsPerGame'}
+                    ]
+                },
+                'rows': [
+                    {
+                        'fixedCells': [
+                            {'content': '1'},
+                            {'teamId': 'team1', 'content': 'Team Alpha'}
+                        ],
+                        'cells': [
+                            {'content': '1'},  # rank
+                            {'content': 'Team Alpha'},  # team
+                            {'content': '10'},  # win
+                            {'content': '5'},  # loss
+                            {'content': '2'},  # tie
+                            {'content': '22'},  # points
+                            {'content': '0.647'},  # winpc
+                            {'content': '0'},  # gamesback
+                            {'content': '2'},  # wwOrder
+                            {'content': '1,250.5'},  # fantasyPoints
+                            {'content': '1,100.0'},  # pointsAgainst
+                            {'content': 'W3'},  # streak
+                            {'content': '17'},  # sc (games played)
+                            {'content': '73.5'}  # FPtsPerGame
+                        ]
+                    },
+                    {
+                        'fixedCells': [
+                            {'content': '2'},
+                            {'teamId': 'team2', 'content': 'Team Beta'}
+                        ],
+                        'cells': [
+                            {'content': '2'},
+                            {'content': 'Team Beta'},
+                            {'content': '8'},
+                            {'content': '7'},
+                            {'content': '2'},
+                            {'content': '18'},
+                            {'content': '0.529'},
+                            {'content': '2'},
+                            {'content': '1'},
+                            {'content': '1,100.0'},
+                            {'content': '1,150.0'},
+                            {'content': 'L1'},
+                            {'content': '17'},
+                            {'content': '64.7'}
+                        ]
+                    }
+                ]
+            }]
+        }
+
+        manager = SyncManager(mock_league, db_manager)
+        manager.sync_league_metadata()
+        manager.sync_teams()
+
+        count = manager.sync_standings()
+
+        assert count == 2
+        assert manager.api_calls == 1
+
+        # Verify standings were saved
+        standings = db_manager.get_standings(mock_league.league_id)
+        assert len(standings) == 2
+        # Verify first team standings
+        team1_standing = next((s for s in standings if s['team_id'] == 'team1'), None)
+        assert team1_standing is not None
+        assert team1_standing['wins'] == 10
+        assert team1_standing['losses'] == 5
+        assert team1_standing['ties'] == 2
+
+    @patch('aissistant_gm.fantrax.fantraxapi.api.get_standings')
+    def test_sync_standings_empty_response(self, mock_get_standings, db_manager, mock_league):
+        """Test handling of empty API response."""
+        mock_get_standings.return_value = {}
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_standings()
+
+        assert count == 0
+
+    @patch('aissistant_gm.fantrax.fantraxapi.api.get_standings')
+    def test_sync_standings_no_tablelist(self, mock_get_standings, db_manager, mock_league):
+        """Test handling when tableList is missing."""
+        mock_get_standings.return_value = {'tableList': []}
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_standings()
+
+        assert count == 0
+
+    @patch('aissistant_gm.fantrax.fantraxapi.api.get_standings')
+    def test_sync_standings_api_exception(self, mock_get_standings, db_manager, mock_league):
+        """Test handling of API exception."""
+        mock_get_standings.side_effect = Exception("API Error")
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_standings()
+
+        # Should handle gracefully and return 0
+        assert count == 0
+
+    @patch('aissistant_gm.fantrax.fantraxapi.api.get_standings')
+    def test_sync_standings_missing_fields(self, mock_get_standings, db_manager, mock_league):
+        """Test handling of missing optional fields in API response."""
+        # Response with minimal fields
+        mock_get_standings.return_value = {
+            'tableList': [{
+                'header': {
+                    'cells': [
+                        {'key': 'win'},
+                        {'key': 'loss'}
+                    ]
+                },
+                'rows': [
+                    {
+                        'fixedCells': [
+                            {'content': '1'},
+                            {'teamId': 'team1', 'content': 'Team Alpha'}
+                        ],
+                        'cells': [
+                            {'content': '10'},
+                            {'content': '5'}
+                        ]
+                    }
+                ]
+            }]
+        }
+
+        manager = SyncManager(mock_league, db_manager)
+        manager.sync_league_metadata()
+        manager.sync_teams()
+
+        count = manager.sync_standings()
+
+        # Should still work with missing fields (using defaults)
+        assert count == 1
+
+    @patch('aissistant_gm.fantrax.fantraxapi.api.get_standings')
+    def test_sync_standings_dash_values(self, mock_get_standings, db_manager, mock_league):
+        """Test handling of dash '-' values (common for missing data)."""
+        mock_get_standings.return_value = {
+            'tableList': [{
+                'header': {
+                    'cells': [
+                        {'key': 'win'},
+                        {'key': 'loss'},
+                        {'key': 'fantasyPoints'}
+                    ]
+                },
+                'rows': [
+                    {
+                        'fixedCells': [
+                            {'content': '1'},
+                            {'teamId': 'team1', 'content': 'Team Alpha'}
+                        ],
+                        'cells': [
+                            {'content': '10'},
+                            {'content': '-'},  # Dash value
+                            {'content': '-'}   # Dash value
+                        ]
+                    }
+                ]
+            }]
+        }
+
+        manager = SyncManager(mock_league, db_manager)
+        manager.sync_league_metadata()
+        manager.sync_teams()
+
+        count = manager.sync_standings()
+
+        # Should handle dash values as defaults (0)
+        assert count == 1
+
+
+class TestSyncTransactions:
+    """Tests for sync_transactions method."""
+
+    def test_sync_transactions_success(self, db_manager, mock_league):
+        """Test syncing transactions."""
+        # Create mock transaction
+        mock_player = Mock()
+        mock_player.id = "player1"
+        mock_player.name = "Test Player"
+        mock_player.short_name = "T. Player"
+        mock_player.team = Mock()
+        mock_player.team.name = "Boston Bruins"
+        mock_player.team.short = "BOS"
+        mock_player.positions = []
+        mock_player.day_to_day = False
+        mock_player.out = False
+        mock_player.injured_reserve = False
+        mock_player.suspended = False
+        mock_player.type = "CLAIM"
+
+        mock_tx = Mock()
+        mock_tx.id = "tx1"
+        mock_tx.team = Mock()
+        mock_tx.team.id = "team1"
+        mock_tx.date = date(2025, 1, 15)
+        mock_tx.players = [mock_player]
+
+        mock_league.transactions.return_value = [mock_tx]
+
+        manager = SyncManager(mock_league, db_manager)
+        manager.sync_league_metadata()
+        manager.sync_teams()
+
+        count = manager.sync_transactions(count=10)
+
+        assert count == 1
+        assert manager.api_calls == 1
+
+        # Verify transaction was saved
+        transactions = db_manager.get_transactions(mock_league.league_id)
+        assert len(transactions) == 1
+        assert transactions[0]['id'] == 'tx1'
+
+    def test_sync_transactions_empty(self, db_manager, mock_league):
+        """Test handling of empty transactions list."""
+        mock_league.transactions.return_value = []
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_transactions()
+
+        assert count == 0
+
+    def test_sync_transactions_none(self, db_manager, mock_league):
+        """Test handling of None transactions response."""
+        mock_league.transactions.return_value = None
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_transactions()
+
+        assert count == 0
+
+    def test_sync_transactions_api_error(self, db_manager, mock_league):
+        """Test handling of API error."""
+        mock_league.transactions.side_effect = Exception("API Error")
+
+        manager = SyncManager(mock_league, db_manager)
+        count = manager.sync_transactions()
+
+        # Should handle gracefully and return 0
+        assert count == 0
+
+    def test_sync_transactions_multiple_players(self, db_manager, mock_league):
+        """Test transaction with multiple players (e.g., trade)."""
+        # Create mock players
+        mock_player1 = Mock()
+        mock_player1.id = "player1"
+        mock_player1.name = "Player One"
+        mock_player1.short_name = "P. One"
+        mock_player1.team = None  # Free agent
+        mock_player1.positions = []
+        mock_player1.day_to_day = False
+        mock_player1.out = False
+        mock_player1.injured_reserve = False
+        mock_player1.suspended = False
+        mock_player1.type = "DROP"
+
+        mock_player2 = Mock()
+        mock_player2.id = "player2"
+        mock_player2.name = "Player Two"
+        mock_player2.short_name = "P. Two"
+        mock_player2.team = Mock()
+        mock_player2.team.name = "Toronto Maple Leafs"
+        mock_player2.team.short = "TOR"
+        mock_player2.positions = [Mock(short="C")]
+        mock_player2.day_to_day = True
+        mock_player2.out = False
+        mock_player2.injured_reserve = False
+        mock_player2.suspended = False
+        mock_player2.type = "ADD"
+
+        mock_tx = Mock()
+        mock_tx.id = "tx2"
+        mock_tx.team = Mock()
+        mock_tx.team.id = "team1"
+        mock_tx.date = date(2025, 1, 16)
+        mock_tx.players = [mock_player1, mock_player2]
+
+        mock_league.transactions.return_value = [mock_tx]
+
+        manager = SyncManager(mock_league, db_manager)
+        manager.sync_league_metadata()
+        manager.sync_teams()
+
+        count = manager.sync_transactions()
+
+        assert count == 1
+
+        # Verify both players were saved
+        player1 = db_manager.get_player("player1")
+        player2 = db_manager.get_player("player2")
+        assert player1 is not None
+        assert player2 is not None
+        assert player2['day_to_day'] == 1
+
+
 class TestSyncFreeAgents:
     """Tests for free agent syncing."""
 
@@ -654,3 +979,358 @@ class TestSyncPlayerNews:
         assert count == 1
         assert len(db_manager.get_player_news('rostered1')) == 1
         assert len(db_manager.get_player_news('fa1')) == 0
+
+
+# ============================================================================
+# Tests for sync_command function (CLI command)
+# ============================================================================
+
+import aissistant_gm.fantrax.commands.sync as sync_command_module
+import typer
+
+
+class TestSyncCommandFunction:
+    """Tests for the sync_command CLI function."""
+
+    def _create_mock_context(self, league_id=None):
+        """Create a mock typer context."""
+        ctx = Mock(spec=typer.Context)
+        ctx.obj = {"league_id": league_id}
+        return ctx
+
+    def _create_mock_config(self):
+        """Create a mock config object."""
+        config = Mock()
+        config.league_id = "test-league-123"
+        config.database_path = ":memory:"
+        config.username = "test@test.com"
+        config.password = "testpass"
+        config.cookie_path = "/tmp/cookies.json"
+        config.cookie_file = "/tmp/cookies.json"
+        config.min_request_interval = 1
+        config.selenium_timeout = 10
+        config.login_wait_time = 5
+        config.browser_window_size = "1920,1080"
+        config.user_agent = "TestAgent"
+        config.scraper_max_retries = 3
+        config.scraper_retry_delay = 2.0
+        config.scraper_retry_backoff = 2.0
+        config.max_news_per_player = 30
+        return config
+
+    def test_no_option_shows_help(self):
+        """Test that no option shows help message."""
+        ctx = self._create_mock_context()
+
+        with patch.object(sync_command_module, 'load_config') as mock_load_config, \
+             patch.object(sync_command_module, 'DatabaseManager') as mock_db_class, \
+             patch.object(sync_command_module, 'Console') as mock_console_class:
+
+            mock_config = self._create_mock_config()
+            mock_load_config.return_value = mock_config
+
+            mock_db = Mock()
+            mock_db_class.return_value = mock_db
+
+            mock_console = Mock()
+            mock_console_class.return_value = mock_console
+
+            # Execute without any flags
+            sync_command_module.sync_command(ctx)
+
+            # Should show "No sync option specified" message
+            mock_console.print.assert_any_call("[yellow]No sync option specified. Use --help for options.[/yellow]")
+
+    def test_status_flag_shows_status(self):
+        """Test that --status flag shows cache status."""
+        ctx = self._create_mock_context()
+
+        with patch.object(sync_command_module, 'load_config') as mock_load_config, \
+             patch.object(sync_command_module, 'DatabaseManager') as mock_db_class, \
+             patch.object(sync_command_module, 'Console') as mock_console_class, \
+             patch.object(sync_command_module, '_show_status') as mock_show_status:
+
+            mock_config = self._create_mock_config()
+            mock_load_config.return_value = mock_config
+
+            mock_db = Mock()
+            mock_db_class.return_value = mock_db
+
+            mock_console = Mock()
+            mock_console_class.return_value = mock_console
+
+            sync_command_module.sync_command(ctx, status=True)
+
+            mock_show_status.assert_called_once_with(mock_console, mock_db, mock_config.league_id)
+
+    def test_clear_flag_with_confirmation(self):
+        """Test that --clear flag clears cache with confirmation."""
+        ctx = self._create_mock_context()
+
+        with patch.object(sync_command_module, 'load_config') as mock_load_config, \
+             patch.object(sync_command_module, 'DatabaseManager') as mock_db_class, \
+             patch.object(sync_command_module, 'Console') as mock_console_class, \
+             patch.object(sync_command_module, 'typer') as mock_typer:
+
+            mock_config = self._create_mock_config()
+            mock_load_config.return_value = mock_config
+
+            mock_db = Mock()
+            mock_db_class.return_value = mock_db
+
+            mock_console = Mock()
+            mock_console_class.return_value = mock_console
+
+            mock_typer.confirm.return_value = True
+
+            sync_command_module.sync_command(ctx, clear=True)
+
+            mock_db.clear_all.assert_called_once()
+            mock_console.print.assert_any_call("[green]✓[/green] Cache cleared successfully")
+
+    def test_clear_flag_cancelled(self):
+        """Test that --clear flag respects cancelled confirmation."""
+        ctx = self._create_mock_context()
+
+        with patch.object(sync_command_module, 'load_config') as mock_load_config, \
+             patch.object(sync_command_module, 'DatabaseManager') as mock_db_class, \
+             patch.object(sync_command_module, 'Console') as mock_console_class, \
+             patch.object(sync_command_module, 'typer') as mock_typer:
+
+            mock_config = self._create_mock_config()
+            mock_load_config.return_value = mock_config
+
+            mock_db = Mock()
+            mock_db_class.return_value = mock_db
+
+            mock_console = Mock()
+            mock_console_class.return_value = mock_console
+
+            mock_typer.confirm.return_value = False
+
+            sync_command_module.sync_command(ctx, clear=True)
+
+            mock_db.clear_all.assert_not_called()
+
+    def test_clear_flag_with_yes_skips_confirmation(self):
+        """Test that --clear --yes skips confirmation."""
+        ctx = self._create_mock_context()
+
+        with patch.object(sync_command_module, 'load_config') as mock_load_config, \
+             patch.object(sync_command_module, 'DatabaseManager') as mock_db_class, \
+             patch.object(sync_command_module, 'Console') as mock_console_class:
+
+            mock_config = self._create_mock_config()
+            mock_load_config.return_value = mock_config
+
+            mock_db = Mock()
+            mock_db_class.return_value = mock_db
+
+            mock_console = Mock()
+            mock_console_class.return_value = mock_console
+
+            sync_command_module.sync_command(ctx, clear=True, yes=True)
+
+            mock_db.clear_all.assert_called_once()
+
+    def test_teams_flag_syncs_teams(self):
+        """Test that --teams flag syncs teams."""
+        ctx = self._create_mock_context()
+
+        with patch.object(sync_command_module, 'load_config') as mock_load_config, \
+             patch.object(sync_command_module, 'DatabaseManager') as mock_db_class, \
+             patch.object(sync_command_module, 'Console') as mock_console_class, \
+             patch.object(sync_command_module, 'get_authenticated_league') as mock_auth, \
+             patch.object(sync_command_module, 'SyncManager') as mock_sync_class:
+
+            mock_config = self._create_mock_config()
+            mock_load_config.return_value = mock_config
+
+            mock_db = Mock()
+            mock_db_class.return_value = mock_db
+
+            mock_console = Mock()
+            mock_console.status.return_value.__enter__ = Mock()
+            mock_console.status.return_value.__exit__ = Mock()
+            mock_console_class.return_value = mock_console
+
+            mock_league = Mock()
+            mock_league.name = "Test League"
+            mock_auth.return_value = mock_league
+
+            mock_sync_manager = Mock()
+            mock_sync_manager.api_calls = 1
+            mock_sync_manager.sync_teams.return_value = 6
+            mock_sync_class.return_value = mock_sync_manager
+
+            sync_command_module.sync_command(ctx, teams=True)
+
+            mock_sync_manager.sync_league_metadata.assert_called_once()
+            mock_sync_manager.sync_teams.assert_called_once()
+
+    def test_config_error_exits(self):
+        """Test that configuration error exits with code 1."""
+        ctx = self._create_mock_context()
+
+        with patch.object(sync_command_module, 'load_config') as mock_load_config, \
+             patch.object(sync_command_module, 'Console') as mock_console_class:
+
+            mock_load_config.side_effect = ValueError("Missing required config")
+
+            mock_console = Mock()
+            mock_console_class.return_value = mock_console
+
+            with pytest.raises(typer.Exit) as exc_info:
+                sync_command_module.sync_command(ctx, teams=True)
+
+            assert exc_info.value.exit_code == 1
+
+    def test_general_error_exits(self):
+        """Test that general error exits with code 1."""
+        ctx = self._create_mock_context()
+
+        with patch.object(sync_command_module, 'load_config') as mock_load_config, \
+             patch.object(sync_command_module, 'DatabaseManager') as mock_db_class, \
+             patch.object(sync_command_module, 'Console') as mock_console_class:
+
+            mock_config = self._create_mock_config()
+            mock_load_config.return_value = mock_config
+
+            mock_db_class.side_effect = Exception("Database error")
+
+            mock_console = Mock()
+            mock_console_class.return_value = mock_console
+
+            with pytest.raises(typer.Exit) as exc_info:
+                sync_command_module.sync_command(ctx, teams=True)
+
+            assert exc_info.value.exit_code == 1
+
+
+class TestShowStatus:
+    """Tests for the _show_status helper function."""
+
+    def test_empty_database(self):
+        """Test status display with empty database."""
+        mock_console = Mock()
+        mock_db = Mock()
+
+        with patch.object(sync_command_module, 'get_sync_status') as mock_get_status:
+            mock_get_status.return_value = {
+                'has_data': False,
+                'league_id': 'test-league',
+                'data_counts': {},
+                'sync_types': {}
+            }
+
+            sync_command_module._show_status(mock_console, mock_db, 'test-league')
+
+            mock_console.print.assert_any_call("[yellow]No cached data found.[/yellow]")
+
+    def test_with_data(self):
+        """Test status display with existing data."""
+        mock_console = Mock()
+        mock_db = Mock()
+        mock_db.db_path = "/path/to/db.sqlite"
+
+        with patch.object(sync_command_module, 'get_sync_status') as mock_get_status:
+            mock_get_status.return_value = {
+                'has_data': True,
+                'league_name': 'Test League',
+                'league_id': 'test-league',
+                'data_counts': {
+                    'teams': 6,
+                    'rostered_players': 120
+                },
+                'sync_types': {
+                    'full': {
+                        'last_sync': '2025-01-15T10:30:00',
+                        'age_hours': 2.5,
+                        'api_calls': 50
+                    }
+                }
+            }
+
+            sync_command_module._show_status(mock_console, mock_db, 'test-league')
+
+            # Verify league name and db path are printed
+            mock_console.print.assert_any_call("League: Test League")
+            mock_console.print.assert_any_call("Database: /path/to/db.sqlite")
+
+    def test_with_daily_scores_range(self):
+        """Test status display shows daily scores range."""
+        mock_console = Mock()
+        mock_db = Mock()
+        mock_db.db_path = "/path/to/db.sqlite"
+
+        with patch.object(sync_command_module, 'get_sync_status') as mock_get_status:
+            mock_get_status.return_value = {
+                'has_data': True,
+                'league_name': 'Test League',
+                'league_id': 'test-league',
+                'data_counts': {
+                    'teams': 6,
+                    'rostered_players': 120,
+                    'daily_scores_range': {
+                        'start': '2025-01-01',
+                        'end': '2025-01-15'
+                    }
+                },
+                'sync_types': {}
+            }
+
+            sync_command_module._show_status(mock_console, mock_db, 'test-league')
+
+            mock_console.print.assert_any_call("  Daily Scores: 2025-01-01 to 2025-01-15")
+
+
+class TestShowSyncResult:
+    """Tests for the _show_sync_result helper function."""
+
+    def test_basic_result(self):
+        """Test sync result display with basic data."""
+        mock_console = Mock()
+
+        result = {
+            'status': 'completed',
+            'teams': 6,
+            'players': 120,
+            'roster_slots': 180,
+            'daily_scores': 1000,
+            'trends': 100,
+            'api_calls': 50
+        }
+
+        sync_command_module._show_sync_result(mock_console, result)
+
+        # Verify success message
+        mock_console.print.assert_any_call("[bold green]✓ Sync completed successfully![/bold green]")
+        mock_console.print.assert_any_call("  Teams synced: 6")
+        mock_console.print.assert_any_call("  Players synced: 120")
+
+    def test_result_with_all_fields(self):
+        """Test sync result display with all optional fields."""
+        mock_console = Mock()
+
+        result = {
+            'status': 'completed',
+            'teams': 6,
+            'standings': 6,
+            'players': 120,
+            'roster_slots': 180,
+            'daily_scores': 1000,
+            'trends': 100,
+            'transactions': 50,
+            'free_agents': 500,
+            'player_news': 200,
+            'api_calls': 75
+        }
+
+        sync_command_module._show_sync_result(mock_console, result)
+
+        # Verify all optional fields are displayed
+        mock_console.print.assert_any_call("  Standings synced: 6")
+        mock_console.print.assert_any_call("  Transactions: 50")
+        mock_console.print.assert_any_call("  Free agents: 500")
+        mock_console.print.assert_any_call("  Player news: 200")
+        mock_console.print.assert_any_call("  Total API calls: 75")

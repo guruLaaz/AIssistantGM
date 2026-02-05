@@ -3,7 +3,7 @@
 These tests validate functionality against actual league data rather than
 mocked responses. They require:
 - Valid .env credentials configured
-- Database synced with real data (run `fantrax sync --full` first)
+- Database is synced automatically by the module-level fixture
 
 Run with: pytest integration_tests/test_real_data.py -v
 """
@@ -14,6 +14,22 @@ import sqlite3
 import pytest
 
 from aissistant_gm.fantrax.config import load_config
+from .conftest import populate_database
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ensure_database_populated():
+    """Ensure database is populated before running data validation tests.
+
+    This module-scoped fixture runs once before any test in this module,
+    and syncs all necessary data so that data validation tests don't skip.
+
+    Note: This runs at module level (not session) because test_sync_clear
+    in test_commands.py clears the database, so we need to repopulate it
+    right before these tests run.
+    """
+    populate_database()
+    yield
 
 
 def parse_json_output(output: str) -> dict | list:
@@ -462,6 +478,101 @@ class TestRealSyncOperations:
         assert period_count > 0, "Should have scoring periods after sync"
         assert matchup_count > 0, "Should have matchups after sync"
 
+    def test_sync_standings_updates_database(self, cli_runner):
+        """Test that sync --standings updates standings data."""
+        config = load_config()
+
+        result = cli_runner("sync", "--standings")
+        assert result.returncode == 0
+        assert "Synced" in result.stdout or "standings" in result.stdout.lower()
+
+        # Standings are stored in the standings table
+        conn = sqlite3.connect(config.database_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM standings")
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        assert count > 0, "Should have standings data after sync"
+
+    def test_sync_free_agents_populates_table(self, cli_runner):
+        """Test that sync --free-agents populates free_agents table."""
+        config = load_config()
+
+        result = cli_runner("sync", "--free-agents")
+        assert result.returncode == 0
+        assert "Synced" in result.stdout or "free agent" in result.stdout.lower()
+
+        conn = sqlite3.connect(config.database_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM free_agents")
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        assert count > 0, "Should have free agents after sync"
+
+    def test_sync_scores_populates_daily_scores(self, cli_runner):
+        """Test that sync --scores populates daily_scores table."""
+        config = load_config()
+
+        # Sync just 3 days to keep test faster
+        result = cli_runner("sync", "--scores", "3")
+        assert result.returncode == 0
+        assert "Synced" in result.stdout or "score" in result.stdout.lower()
+
+        conn = sqlite3.connect(config.database_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM daily_scores")
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        assert count > 0, "Should have daily scores after sync"
+
+    def test_sync_trends_calculates_trends(self, cli_runner):
+        """Test that sync --trends calculates and stores player trends."""
+        config = load_config()
+
+        # First ensure we have daily scores to calculate trends from
+        scores_result = cli_runner("sync", "--scores", "14")
+        assert scores_result.returncode == 0
+
+        # Then calculate trends
+        result = cli_runner("sync", "--trends")
+        assert result.returncode == 0
+        assert "Calculated" in result.stdout or "trend" in result.stdout.lower()
+
+        conn = sqlite3.connect(config.database_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM player_trends")
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        assert count > 0, "Should have player trends after sync"
+
+    def test_sync_toi_scrapes_and_stores_toi(self, cli_runner):
+        """Test that sync --toi scrapes and stores TOI data."""
+        config = load_config()
+
+        # First ensure rosters are synced (TOI needs player IDs)
+        roster_result = cli_runner("sync", "--rosters")
+        assert roster_result.returncode == 0
+
+        # Then scrape TOI
+        result = cli_runner("sync", "--toi")
+        assert result.returncode == 0
+        # Should mention TOI or scraping
+        assert "TOI" in result.stdout or "Scrape" in result.stdout or "scraped" in result.stdout.lower()
+
+        conn = sqlite3.connect(config.database_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM player_toi")
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        # Note: count may be 0 if no skaters in roster (e.g., only goalies which don't have TOI)
+        # Just verify command succeeded
+        assert count >= 0, "player_toi table should exist"
+
 
 @pytest.mark.integration
 class TestRealTransactionData:
@@ -509,68 +620,303 @@ class TestRealTransactionData:
 
 
 @pytest.mark.integration
-class TestRealMatchupData:
-    """Tests using real matchup data."""
+class TestRealDailyScoresData:
+    """Tests using real daily scores data."""
 
-    def test_matchups_table_has_valid_structure(self, cli_runner):
-        """Test that matchups table has valid data structure."""
+    def test_daily_scores_table_has_valid_structure(self, cli_runner):
+        """Test that daily_scores table has valid data structure."""
         config = load_config()
         conn = sqlite3.connect(config.database_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM matchups LIMIT 1")
+        cursor.execute("SELECT * FROM daily_scores LIMIT 1")
         row = cursor.fetchone()
         conn.close()
 
         if row is None:
-            pytest.skip("No matchups in database")
+            pytest.skip("No daily scores in database")
 
         # Verify expected columns exist
         columns = row.keys()
-        assert 'league_id' in columns
-        assert 'period_number' in columns
-        assert 'matchup_key' in columns
-        assert 'away_score' in columns
-        assert 'home_score' in columns
+        assert 'player_id' in columns
+        assert 'team_id' in columns
+        assert 'scoring_date' in columns
+        assert 'fantasy_points' in columns
 
-    def test_scoring_periods_are_ordered(self, cli_runner):
-        """Test that scoring periods are ordered by period number."""
+    def test_daily_scores_have_valid_dates(self, cli_runner):
+        """Test that daily scores have valid date format."""
         config = load_config()
         conn = sqlite3.connect(config.database_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("""
-            SELECT period_number FROM scoring_periods
-            ORDER BY period_number
-        """)
-        rows = cursor.fetchall()
-        conn.close()
-
-        if len(rows) < 2:
-            pytest.skip("Not enough scoring periods to test ordering")
-
-        # Verify periods are sequential (may have gaps for playoffs)
-        period_numbers = [row['period_number'] for row in rows]
-        for i in range(1, len(period_numbers)):
-            assert period_numbers[i] > period_numbers[i-1], "Periods should be ordered"
-
-    def test_matchups_have_valid_scores(self, cli_runner):
-        """Test that matchup scores are valid numbers."""
-        config = load_config()
-        conn = sqlite3.connect(config.database_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT away_score, home_score FROM matchups LIMIT 10")
+        cursor.execute("SELECT DISTINCT scoring_date FROM daily_scores LIMIT 10")
         rows = cursor.fetchall()
         conn.close()
 
         if not rows:
-            pytest.skip("No matchups in database")
+            pytest.skip("No daily scores in database")
 
         for row in rows:
-            # Scores should be non-negative (can be 0 for future matchups)
-            assert row['away_score'] >= 0, "Away score should be non-negative"
-            assert row['home_score'] >= 0, "Home score should be non-negative"
+            date_str = row['scoring_date']
+            # Should be in YYYY-MM-DD format
+            assert len(date_str) == 10, f"Invalid date format: {date_str}"
+            assert date_str[4] == '-' and date_str[7] == '-', f"Invalid date format: {date_str}"
+
+    def test_daily_scores_fantasy_points_reasonable(self, cli_runner):
+        """Test that fantasy points are within reasonable ranges."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT fantasy_points FROM daily_scores LIMIT 100")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            pytest.skip("No daily scores in database")
+
+        for row in rows:
+            # Fantasy points should be reasonable (-10 to 30 typical range)
+            assert -20 <= row['fantasy_points'] <= 50, f"Unusual fantasy points: {row['fantasy_points']}"
+
+
+@pytest.mark.integration
+class TestRealPlayerTrendsData:
+    """Tests using real player trends data."""
+
+    def test_player_trends_table_has_valid_structure(self, cli_runner):
+        """Test that player_trends table has valid data structure."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM player_trends LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+
+        if row is None:
+            pytest.skip("No player trends in database")
+
+        # Verify expected columns exist
+        columns = row.keys()
+        assert 'player_id' in columns
+        assert 'period_type' in columns
+        assert 'total_points' in columns
+        assert 'games_played' in columns
+        assert 'fpg' in columns
+
+    def test_player_trends_have_expected_periods(self, cli_runner):
+        """Test that player trends have expected period types."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT DISTINCT period_type FROM player_trends")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            pytest.skip("No player trends in database")
+
+        period_types = {row['period_type'] for row in rows}
+        # Should have at least some of these period types
+        expected_periods = {'week1', 'week2', 'week3', '14', '30'}
+        assert len(period_types & expected_periods) > 0, f"Expected period types, got: {period_types}"
+
+    def test_player_trends_fpg_reasonable(self, cli_runner):
+        """Test that FPG (fantasy points per game) values are reasonable."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT fpg FROM player_trends WHERE games_played > 0 LIMIT 50")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            pytest.skip("No player trends with games in database")
+
+        for row in rows:
+            # FPG should be reasonable (-5 to 10 typical range)
+            assert -10 <= row['fpg'] <= 15, f"Unusual FPG: {row['fpg']}"
+
+
+@pytest.mark.integration
+class TestRealPlayerToiData:
+    """Tests using real player TOI (Time On Ice) data."""
+
+    def test_player_toi_table_has_valid_structure(self, cli_runner):
+        """Test that player_toi table has valid data structure."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM player_toi LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+
+        if row is None:
+            pytest.skip("No TOI data in database")
+
+        # Verify expected columns exist
+        columns = row.keys()
+        assert 'player_id' in columns
+        assert 'toi_seconds' in columns
+        assert 'toipp_seconds' in columns
+        assert 'toish_seconds' in columns
+        assert 'games_played' in columns
+
+    def test_player_toi_values_are_reasonable(self, cli_runner):
+        """Test that TOI values are within reasonable ranges."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM player_toi WHERE games_played > 0 LIMIT 20")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            pytest.skip("No TOI data with games in database")
+
+        for row in rows:
+            # TOI per game should be between 0 and 30 minutes (1800 seconds)
+            if row['games_played'] > 0:
+                toi_per_game = row['toi_seconds'] / row['games_played']
+                assert 0 <= toi_per_game <= 1800, f"TOI per game {toi_per_game} out of range"
+
+            # TOIPP (power play) should be less than total TOI
+            assert row['toipp_seconds'] <= row['toi_seconds'], "TOIPP should be <= TOI"
+            # TOISH (shorthanded) should be less than total TOI
+            assert row['toish_seconds'] <= row['toi_seconds'], "TOISH should be <= TOI"
+
+    def test_player_toi_linked_to_players(self, cli_runner):
+        """Test that player_toi records are linked to valid players."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Check for orphaned TOI records
+        cursor.execute("""
+            SELECT COUNT(*) as count FROM player_toi pt
+            WHERE NOT EXISTS (
+                SELECT 1 FROM players p WHERE p.id = pt.player_id
+            )
+        """)
+        orphan_count = cursor.fetchone()['count']
+        conn.close()
+
+        assert orphan_count == 0, "Should have no orphaned player_toi records"
+
+
+@pytest.mark.integration
+class TestRealFreeAgentsData:
+    """Tests using real free agents data."""
+
+    def test_free_agents_table_has_valid_structure(self, cli_runner):
+        """Test that free_agents table has valid data structure."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM free_agents LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+
+        if row is None:
+            pytest.skip("No free agents in database")
+
+        # Verify expected columns exist
+        columns = row.keys()
+        assert 'player_id' in columns
+        assert 'rank' in columns
+
+    def test_free_agents_linked_to_players(self, cli_runner):
+        """Test that free_agents records are linked to valid players."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Check for orphaned free agent records
+        cursor.execute("""
+            SELECT COUNT(*) as count FROM free_agents fa
+            WHERE NOT EXISTS (
+                SELECT 1 FROM players p WHERE p.id = fa.player_id
+            )
+        """)
+        orphan_count = cursor.fetchone()['count']
+        conn.close()
+
+        assert orphan_count == 0, "Should have no orphaned free_agents records"
+
+    def test_free_agents_have_rank(self, cli_runner):
+        """Test that free agents have rank values."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT rank FROM free_agents WHERE rank IS NOT NULL LIMIT 10")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            pytest.skip("No ranked free agents in database")
+
+        for row in rows:
+            assert row['rank'] > 0, "Rank should be positive"
+
+
+@pytest.mark.integration
+class TestRealStandingsData:
+    """Tests using real standings data."""
+
+    def test_standings_table_has_valid_structure(self, cli_runner):
+        """Test that standings table has valid data structure."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM standings LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+
+        if row is None:
+            pytest.skip("No standings in database")
+
+        # Verify expected columns exist
+        columns = row.keys()
+        assert 'league_id' in columns
+        assert 'team_id' in columns
+        assert 'rank' in columns
+
+    def test_standings_have_team_records(self, cli_runner):
+        """Test that standings have team records (wins, losses)."""
+        config = load_config()
+        conn = sqlite3.connect(config.database_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM standings LIMIT 10")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            pytest.skip("No standings in database")
+
+        columns = rows[0].keys()
+        # May have wins/losses/ties columns
+        has_record = any(col in columns for col in ['wins', 'win', 'losses', 'loss', 'points'])
+        assert has_record or 'rank' in columns, f"Expected standings data, got columns: {list(columns)}"

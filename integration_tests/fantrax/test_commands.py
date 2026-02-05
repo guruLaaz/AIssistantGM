@@ -329,10 +329,46 @@ class TestSyncCommand:
         # Should complete successfully
         assert "Teams" in result.stdout or "sync" in result.stdout.lower()
 
+    def test_sync_standings(self, cli_runner):
+        """Test sync --standings syncs league standings."""
+        result = cli_runner("sync", "--standings")
+
+        assert result.returncode == 0
+        # Should mention syncing standings
+        assert "standings" in result.stdout.lower() or "Synced" in result.stdout
+
+    def test_sync_transactions(self, cli_runner):
+        """Test sync --transactions syncs transaction history."""
+        result = cli_runner("sync", "--transactions")
+
+        assert result.returncode == 0
+        # Should mention syncing transactions
+        assert "transaction" in result.stdout.lower() or "Synced" in result.stdout
+
+    def test_sync_rosters(self, cli_runner):
+        """Test sync --rosters syncs all team rosters."""
+        result = cli_runner("sync", "--rosters")
+
+        assert result.returncode == 0
+        # Should mention syncing rosters/players/slots
+        assert "roster" in result.stdout.lower() or "player" in result.stdout.lower() or "Synced" in result.stdout
+
+    def test_sync_free_agents(self, cli_runner):
+        """Test sync --free-agents syncs free agent listings."""
+        result = cli_runner("sync", "--free-agents")
+
+        assert result.returncode == 0
+        # Should mention syncing free agents
+        assert "free agent" in result.stdout.lower() or "Synced" in result.stdout
+
     @pytest.mark.slow
     def test_sync_full(self, cli_runner):
-        """Test sync --full performs a complete sync."""
-        result = cli_runner("sync", "--full")
+        """Test sync --full performs a complete sync.
+
+        Note: Uses --no-toi to skip TOI scraping which is very slow (424+ players).
+        TOI scraping is tested separately in test_sync_toi_scrapes_and_stores_toi.
+        """
+        result = cli_runner("sync", "--full", "--no-toi")
 
         assert result.returncode == 0
         # Should mention syncing multiple data types
@@ -632,8 +668,11 @@ class TestNewsCacheBehavior:
 
     @pytest.mark.slow
     def test_sync_full_includes_news(self, cli_runner):
-        """Test sync --full includes news sync."""
-        result = cli_runner("sync", "--full")
+        """Test sync --full includes news sync.
+
+        Note: Uses --no-toi to skip TOI scraping which is very slow.
+        """
+        result = cli_runner("sync", "--full", "--no-toi")
 
         assert result.returncode == 0
         # Full sync should complete (news is part of it)
@@ -641,8 +680,11 @@ class TestNewsCacheBehavior:
 
     @pytest.mark.slow
     def test_sync_no_news_flag(self, cli_runner):
-        """Test sync --full --no-news skips news sync."""
-        result = cli_runner("sync", "--full", "--no-news")
+        """Test sync --full --no-news skips news sync.
+
+        Note: Uses --no-toi to skip TOI scraping which is very slow.
+        """
+        result = cli_runner("sync", "--full", "--no-news", "--no-toi")
 
         assert result.returncode == 0
         # Should still complete successfully

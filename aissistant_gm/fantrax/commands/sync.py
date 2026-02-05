@@ -19,7 +19,7 @@ def sync_command(
     ctx: typer.Context,
     full: Annotated[bool, typer.Option(
         "--full",
-        help="Full sync: teams, standings, rosters, scores, trends, matchups, transactions, news + web scrape"
+        help="Full sync: teams, standings, rosters, scores, trends, transactions, news, TOI + web scrape"
     )] = False,
     teams: Annotated[bool, typer.Option(
         "--teams",
@@ -57,17 +57,21 @@ def sync_command(
         "--scrape-pages",
         help="Number of pages to scrape for news (default: 5)"
     )] = 5,
+    toi: Annotated[bool, typer.Option(
+        "--toi",
+        help="Scrape Time On Ice (TOI) stats from player pages for all rostered players"
+    )] = False,
     no_news: Annotated[bool, typer.Option(
         "--no-news",
         help="Skip player news sync during --full sync"
     )] = False,
+    no_toi: Annotated[bool, typer.Option(
+        "--no-toi",
+        help="Skip TOI scraping during --full sync"
+    )] = False,
     transactions: Annotated[bool, typer.Option(
         "--transactions", "--tx",
         help="Sync transaction history"
-    )] = False,
-    matchups: Annotated[bool, typer.Option(
-        "--matchups",
-        help="Sync scoring periods and matchups"
     )] = False,
     status: Annotated[bool, typer.Option(
         "--status", "-s",
@@ -117,7 +121,7 @@ def sync_command(
             return
 
         # If no specific flags, show help
-        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents, news, scrape_news, transactions, matchups]):
+        if not any([full, teams, standings, rosters, scores > 0, trends, free_agents, news, scrape_news, transactions, toi]):
             console.print("[yellow]No sync option specified. Use --help for options.[/yellow]")
             console.print("\nQuick options:")
             console.print("  [bold]fantrax sync --full[/bold]          Full sync (includes all data)")
@@ -125,7 +129,6 @@ def sync_command(
             console.print("  [bold]fantrax sync --standings[/bold]     Update standings")
             console.print("  [bold]fantrax sync --rosters[/bold]       Update just rosters")
             console.print("  [bold]fantrax sync --transactions[/bold]  Sync transaction history")
-            console.print("  [bold]fantrax sync --matchups[/bold]      Sync matchup schedules")
             console.print("  [bold]fantrax sync --news[/bold]          Update player news (API)")
             console.print("  [bold]fantrax sync --scrape-news[/bold]   Scrape historical news (website)")
             return
@@ -213,7 +216,10 @@ def sync_command(
                     selenium_timeout=config.selenium_timeout,
                     login_wait_time=config.login_wait_time,
                     browser_window_size=config.browser_window_size,
-                    user_agent=config.user_agent
+                    user_agent=config.user_agent,
+                    max_retries=config.scraper_max_retries,
+                    retry_delay=config.scraper_retry_delay,
+                    retry_backoff=config.scraper_retry_backoff
                 )
                 scraped_news = scraper.scrape_player_news(max_pages=5)
                 if scraped_news:
@@ -233,6 +239,57 @@ def sync_command(
                             )
                             saved_count += 1
                     console.print(f"[green]✓[/green] Scraped and saved news for {saved_count} players")
+
+            # Scrape TOI (unless --no-toi)
+            if not no_toi:
+                console.print("\n[bold blue]→[/bold blue] Scraping Time On Ice (TOI) stats from player pages...")
+
+                # Get all rostered player IDs
+                player_ids = []
+                my_team_id = None
+                for team in league.teams:
+                    if my_team_id is None:
+                        my_team_id = team.id  # Use first team's ID for player URLs
+                    roster = db.get_roster(team.id)
+                    for slot in roster:
+                        if slot.get('player_id'):
+                            player_ids.append(slot['player_id'])
+
+                if player_ids:
+                    # Reuse scraper if already created for news, otherwise create new one
+                    if 'scraper' not in dir():
+                        scraper = FantraxScraper(
+                            league_id=config.league_id,
+                            username=config.username,
+                            password=config.password,
+                            cookie_file=Path(config.cookie_file),
+                            console=console,
+                            selenium_timeout=config.selenium_timeout,
+                            login_wait_time=config.login_wait_time,
+                            browser_window_size=config.browser_window_size,
+                            user_agent=config.user_agent,
+                            max_retries=config.scraper_max_retries,
+                            retry_delay=config.scraper_retry_delay,
+                            retry_backoff=config.scraper_retry_backoff
+                        )
+
+                    # Scrape TOI for all rostered players
+                    toi_data = scraper.scrape_player_toi(
+                        player_ids=player_ids,
+                        team_id=my_team_id,
+                        max_players=len(player_ids)
+                    )
+
+                    # Save to database
+                    toi_saved_count = 0
+                    for player_id, data in toi_data.items():
+                        db.save_player_toi(player_id, data)
+                        toi_saved_count += 1
+
+                    console.print(f"[green]✓[/green] Scraped and saved TOI for {toi_saved_count} players")
+                else:
+                    console.print("[yellow]No rostered players found for TOI scraping[/yellow]")
+
             return
 
         # Handle individual sync options
@@ -307,7 +364,10 @@ def sync_command(
                 selenium_timeout=config.selenium_timeout,
                 login_wait_time=config.login_wait_time,
                 browser_window_size=config.browser_window_size,
-                user_agent=config.user_agent
+                user_agent=config.user_agent,
+                max_retries=config.scraper_max_retries,
+                retry_delay=config.scraper_retry_delay,
+                retry_backoff=config.scraper_retry_backoff
             )
 
             # Scrape news from website
@@ -337,6 +397,59 @@ def sync_command(
             else:
                 console.print("[yellow]No news items scraped[/yellow]")
 
+        if toi:
+            console.print("\n[bold blue]→[/bold blue] Scraping Time On Ice (TOI) stats from player pages...")
+
+            # Need rosters to get player IDs
+            if not rosters and not full:
+                sync_manager.sync_league_metadata()
+                sync_manager.sync_teams()
+                sync_manager.sync_all_rosters()
+
+            # Get all rostered player IDs
+            player_ids = []
+            my_team_id = None
+            for team in league.teams:
+                if my_team_id is None:
+                    my_team_id = team.id  # Use first team's ID for player URLs
+                roster = db.get_roster(team.id)
+                for slot in roster:
+                    if slot.get('player_id'):
+                        player_ids.append(slot['player_id'])
+
+            if not player_ids:
+                console.print("[yellow]No rostered players found. Run --rosters first.[/yellow]")
+            else:
+                scraper = FantraxScraper(
+                    league_id=config.league_id,
+                    username=config.username,
+                    password=config.password,
+                    cookie_file=Path(config.cookie_file),
+                    console=console,
+                    selenium_timeout=config.selenium_timeout,
+                    login_wait_time=config.login_wait_time,
+                    browser_window_size=config.browser_window_size,
+                    user_agent=config.user_agent,
+                    max_retries=config.scraper_max_retries,
+                    retry_delay=config.scraper_retry_delay,
+                    retry_backoff=config.scraper_retry_backoff
+                )
+
+                # Scrape TOI for all rostered players
+                toi_data = scraper.scrape_player_toi(
+                    player_ids=player_ids,
+                    team_id=my_team_id,
+                    max_players=len(player_ids)
+                )
+
+                # Save to database
+                saved_count = 0
+                for player_id, data in toi_data.items():
+                    db.save_player_toi(player_id, data)
+                    saved_count += 1
+
+                console.print(f"[green]✓[/green] Scraped and saved TOI for {saved_count} players")
+
         if transactions:
             console.print("\n[bold blue]→[/bold blue] Syncing transactions...")
             if not teams:
@@ -344,15 +457,6 @@ def sync_command(
                 sync_manager.sync_teams()
             count = sync_manager.sync_transactions()
             console.print(f"[green]✓[/green] Synced {count} transactions")
-            api_calls += sync_manager.api_calls
-
-        if matchups:
-            console.print("\n[bold blue]→[/bold blue] Syncing matchups...")
-            if not teams:
-                sync_manager.sync_league_metadata()
-                sync_manager.sync_teams()
-            result = sync_manager.sync_matchups()
-            console.print(f"[green]✓[/green] Synced {result['periods']} periods, {result['matchups']} matchups")
             api_calls += sync_manager.api_calls
 
         console.print(f"\n[bold]Sync complete![/bold] Total API calls: {api_calls}")
@@ -394,10 +498,6 @@ def _show_status(console: Console, db: DatabaseManager, league_id: str) -> None:
         console.print(f"  Daily Scores: {dr['start']} to {dr['end']}")
     if counts.get('transactions', 0) > 0:
         console.print(f"  Transactions: {counts.get('transactions', 0)}")
-    if counts.get('scoring_periods', 0) > 0:
-        console.print(f"  Scoring Periods: {counts.get('scoring_periods', 0)}")
-    if counts.get('matchups', 0) > 0:
-        console.print(f"  Matchups: {counts.get('matchups', 0)}")
 
     # Sync history
     console.print("\n[bold]Last Syncs:[/bold]")
@@ -453,10 +553,6 @@ def _show_sync_result(console: Console, result: dict) -> None:
     console.print(f"  Roster slots: {result.get('roster_slots', 0)}")
     console.print(f"  Daily scores: {result.get('daily_scores', 0)}")
     console.print(f"  Player trends: {result.get('trends', 0)}")
-    if result.get('scoring_periods', 0) > 0:
-        console.print(f"  Scoring periods: {result.get('scoring_periods', 0)}")
-    if result.get('matchups', 0) > 0:
-        console.print(f"  Matchups: {result.get('matchups', 0)}")
     if result.get('transactions', 0) > 0:
         console.print(f"  Transactions: {result.get('transactions', 0)}")
     if result.get('free_agents', 0) > 0:

@@ -236,3 +236,372 @@ class TestScraperInit:
         assert scraper.selenium_timeout == 20
         assert scraper.login_wait_time == 10
         assert scraper.browser_window_size == "1280,800"
+
+
+class TestParseTimeToSeconds:
+    """Tests for the _parse_time_to_seconds method."""
+
+    @pytest.fixture
+    def scraper(self):
+        """Create a scraper instance for testing."""
+        return FantraxScraper(
+            league_id="test_league",
+            username="test_user",
+            password="test_pass",
+            cookie_file=Path("/tmp/test_cookies"),
+            console=Mock()
+        )
+
+    def test_parse_standard_time(self, scraper):
+        """Test parsing standard MM:SS format."""
+        assert scraper._parse_time_to_seconds("16:05") == 965
+        assert scraper._parse_time_to_seconds("01:30") == 90
+        assert scraper._parse_time_to_seconds("00:45") == 45
+
+    def test_parse_single_digit_minutes(self, scraper):
+        """Test parsing with single digit minutes."""
+        assert scraper._parse_time_to_seconds("5:30") == 330
+        assert scraper._parse_time_to_seconds("0:15") == 15
+
+    def test_parse_zero(self, scraper):
+        """Test parsing zero time."""
+        assert scraper._parse_time_to_seconds("00:00") == 0
+        assert scraper._parse_time_to_seconds("0:00") == 0
+
+    def test_parse_invalid_format(self, scraper):
+        """Test parsing invalid format returns 0."""
+        assert scraper._parse_time_to_seconds("invalid") == 0
+        assert scraper._parse_time_to_seconds("") == 0
+        assert scraper._parse_time_to_seconds("16") == 0
+
+    def test_parse_no_colon(self, scraper):
+        """Test parsing string without colon returns 0."""
+        assert scraper._parse_time_to_seconds("1630") == 0
+
+    def test_parse_large_minutes(self, scraper):
+        """Test parsing with large minute values (like total TOI)."""
+        assert scraper._parse_time_to_seconds("120:00") == 7200
+        assert scraper._parse_time_to_seconds("999:59") == 59999
+
+
+class TestExtractToiFromPage:
+    """Tests for the _extract_toi_from_page method."""
+
+    @pytest.fixture
+    def scraper(self):
+        """Create a scraper instance for testing."""
+        return FantraxScraper(
+            league_id="test_league",
+            username="test_user",
+            password="test_pass",
+            cookie_file=Path("/tmp/test_cookies"),
+            console=Mock()
+        )
+
+    @pytest.mark.skip(reason="Page format parsing depends on actual Fantrax page structure; tested by integration tests")
+    def test_extract_toi_valid_page_text(self, scraper):
+        """Test extracting TOI from valid page text with standard layout.
+
+        Note: This test is skipped because the actual Fantrax page format
+        is complex and varies. The real page scraping is tested by integration
+        tests in test_scraper_integration.py.
+        """
+        # The actual page format from Fantrax is difficult to mock correctly
+        # as it depends on how Selenium extracts text from the HTML.
+        # See integration tests for real page scraping validation.
+        pass
+
+    def test_extract_toi_no_toi_headers(self, scraper):
+        """Test extracting TOI when page doesn't have TOI headers."""
+        page_text = """
+Player Stats
+GP
+G
+A
+10
+5
+3
+"""
+        mock_driver = MagicMock()
+        mock_body = MagicMock()
+        mock_body.text = page_text
+        mock_driver.find_element.return_value = mock_body
+
+        result = scraper._extract_toi_from_page(mock_driver)
+
+        assert result is None
+
+    def test_extract_toi_missing_toish(self, scraper):
+        """Test extracting TOI when TOISH header is missing."""
+        page_text = """
+GP
+TOI
+TOIPP
+57
+16:05
+01:20
+"""
+        mock_driver = MagicMock()
+        mock_body = MagicMock()
+        mock_body.text = page_text
+        mock_driver.find_element.return_value = mock_body
+
+        result = scraper._extract_toi_from_page(mock_driver)
+
+        # Should return None because TOISH is required
+        assert result is None
+
+    def test_extract_toi_empty_page(self, scraper):
+        """Test extracting TOI from empty page."""
+        mock_driver = MagicMock()
+        mock_body = MagicMock()
+        mock_body.text = ""
+        mock_driver.find_element.return_value = mock_body
+
+        result = scraper._extract_toi_from_page(mock_driver)
+
+        assert result is None
+
+    def test_extract_toi_driver_exception(self, scraper):
+        """Test extracting TOI when driver raises exception."""
+        mock_driver = MagicMock()
+        mock_driver.find_element.side_effect = Exception("Element not found")
+
+        result = scraper._extract_toi_from_page(mock_driver)
+
+        assert result is None
+
+
+class TestScrapePlayerToi:
+    """Tests for the scrape_player_toi method."""
+
+    @pytest.fixture
+    def scraper(self):
+        """Create a scraper instance for testing."""
+        return FantraxScraper(
+            league_id="test_league",
+            username="test_user",
+            password="test_pass",
+            cookie_file=Path("/tmp/test_cookies"),
+            console=Mock()
+        )
+
+    @patch.object(FantraxScraper, '_get_driver')
+    @patch.object(FantraxScraper, '_login')
+    @patch.object(FantraxScraper, '_extract_toi_from_page')
+    def test_scrape_player_toi_success(self, mock_extract, mock_login, mock_get_driver, scraper):
+        """Test successful TOI scraping for multiple players."""
+        # Setup mocks - driver is now created directly without context manager
+        mock_driver = MagicMock()
+        mock_get_driver.return_value = mock_driver
+        mock_login.return_value = True
+        mock_extract.return_value = {
+            'toi_seconds': 965,
+            'toipp_seconds': 80,
+            'toish_seconds': 90,
+            'games_played': 57
+        }
+
+        player_ids = ['player1', 'player2', 'player3']
+        result = scraper.scrape_player_toi(player_ids, 'team123')
+
+        assert len(result) == 3
+        assert 'player1' in result
+        assert result['player1']['toi_seconds'] == 965
+        assert result['player1']['games_played'] == 57
+
+    @patch.object(FantraxScraper, '_get_driver')
+    @patch.object(FantraxScraper, '_login')
+    def test_scrape_player_toi_login_failure(self, mock_login, mock_get_driver, scraper):
+        """Test TOI scraping when login fails."""
+        mock_driver = MagicMock()
+        mock_get_driver.return_value = mock_driver
+        mock_login.return_value = False
+
+        result = scraper.scrape_player_toi(['player1'], 'team123')
+
+        assert result == {}
+
+    @patch.object(FantraxScraper, '_get_driver')
+    @patch.object(FantraxScraper, '_login')
+    @patch.object(FantraxScraper, '_extract_toi_from_page')
+    def test_scrape_player_toi_partial_success(self, mock_extract, mock_login, mock_get_driver, scraper):
+        """Test TOI scraping when some players fail to extract."""
+        mock_driver = MagicMock()
+        mock_get_driver.return_value = mock_driver
+        mock_login.return_value = True
+        # First player succeeds, second fails, third succeeds
+        mock_extract.side_effect = [
+            {'toi_seconds': 965, 'toipp_seconds': 80, 'toish_seconds': 90, 'games_played': 57},
+            None,
+            {'toi_seconds': 800, 'toipp_seconds': 60, 'toish_seconds': 70, 'games_played': 50}
+        ]
+
+        player_ids = ['player1', 'player2', 'player3']
+        result = scraper.scrape_player_toi(player_ids, 'team123')
+
+        assert len(result) == 2
+        assert 'player1' in result
+        assert 'player2' not in result
+        assert 'player3' in result
+
+    @patch.object(FantraxScraper, '_get_driver')
+    @patch.object(FantraxScraper, '_login')
+    @patch.object(FantraxScraper, '_extract_toi_from_page')
+    def test_scrape_player_toi_respects_max_players(self, mock_extract, mock_login, mock_get_driver, scraper):
+        """Test that max_players parameter is respected."""
+        mock_driver = MagicMock()
+        mock_get_driver.return_value = mock_driver
+        mock_login.return_value = True
+        mock_extract.return_value = {
+            'toi_seconds': 965, 'toipp_seconds': 80, 'toish_seconds': 90, 'games_played': 57
+        }
+
+        player_ids = ['p1', 'p2', 'p3', 'p4', 'p5']
+        result = scraper.scrape_player_toi(player_ids, 'team123', max_players=3)
+
+        # Should only scrape first 3 players
+        assert len(result) == 3
+        assert 'p1' in result
+        assert 'p2' in result
+        assert 'p3' in result
+        assert 'p4' not in result
+
+    def test_scrape_player_toi_empty_list(self, scraper):
+        """Test TOI scraping with empty player list returns early."""
+        # Empty list should return immediately without creating driver
+        result = scraper.scrape_player_toi([], 'team123')
+
+        assert result == {}
+
+    @patch.object(FantraxScraper, '_get_driver')
+    @patch.object(FantraxScraper, '_login')
+    @patch.object(FantraxScraper, '_extract_toi_from_page')
+    def test_scrape_player_toi_driver_exception(self, mock_extract, mock_login, mock_get_driver, scraper):
+        """Test TOI scraping handles driver exceptions gracefully."""
+        mock_driver = MagicMock()
+        mock_get_driver.return_value = mock_driver
+        mock_login.return_value = True
+        # First player raises exception, second succeeds
+        mock_driver.get.side_effect = [Exception("Network error"), None]
+        mock_extract.return_value = {
+            'toi_seconds': 965, 'toipp_seconds': 80, 'toish_seconds': 90, 'games_played': 57
+        }
+
+        player_ids = ['player1', 'player2']
+        result = scraper.scrape_player_toi(player_ids, 'team123')
+
+        # Should handle exception and continue with remaining players
+        assert len(result) == 1
+        assert 'player2' in result
+
+
+class TestGetWithRetry:
+    """Tests for the _get_with_retry method."""
+
+    @pytest.fixture
+    def scraper(self):
+        """Create a scraper instance with custom retry settings for testing."""
+        return FantraxScraper(
+            league_id="test_league",
+            username="test_user",
+            password="test_pass",
+            cookie_file=Path("/tmp/test_cookies"),
+            console=Mock(),
+            max_retries=3,
+            retry_delay=0.1,  # Short delay for faster tests
+            retry_backoff=2.0
+        )
+
+    def test_retry_init_defaults(self):
+        """Test that default retry settings are set correctly."""
+        scraper = FantraxScraper(
+            league_id="test_league",
+            username="test_user",
+            password="test_pass",
+            cookie_file=Path("/tmp/test_cookies")
+        )
+        assert scraper.max_retries == 3
+        assert scraper.retry_delay == 2.0
+        assert scraper.retry_backoff == 2.0
+
+    def test_retry_init_custom(self):
+        """Test that custom retry settings are set correctly."""
+        scraper = FantraxScraper(
+            league_id="test_league",
+            username="test_user",
+            password="test_pass",
+            cookie_file=Path("/tmp/test_cookies"),
+            max_retries=5,
+            retry_delay=1.0,
+            retry_backoff=1.5
+        )
+        assert scraper.max_retries == 5
+        assert scraper.retry_delay == 1.0
+        assert scraper.retry_backoff == 1.5
+
+    def test_get_with_retry_success_first_attempt(self, scraper):
+        """Test successful navigation on first attempt."""
+        mock_driver = MagicMock()
+
+        result = scraper._get_with_retry(mock_driver, "https://example.com")
+
+        assert result is True
+        mock_driver.get.assert_called_once_with("https://example.com")
+
+    def test_get_with_retry_success_after_timeout(self, scraper):
+        """Test successful navigation after timeout errors."""
+        mock_driver = MagicMock()
+        # First two calls fail with timeout, third succeeds
+        mock_driver.get.side_effect = [
+            Exception("Read timed out"),
+            Exception("HTTPConnectionPool connection error"),
+            None  # Success
+        ]
+
+        result = scraper._get_with_retry(mock_driver, "https://example.com")
+
+        assert result is True
+        assert mock_driver.get.call_count == 3
+
+    def test_get_with_retry_max_retries_exceeded(self, scraper):
+        """Test failure after max retries exceeded."""
+        mock_driver = MagicMock()
+        # All calls fail with timeout
+        mock_driver.get.side_effect = Exception("Read timed out")
+
+        result = scraper._get_with_retry(mock_driver, "https://example.com")
+
+        assert result is False
+        # Initial attempt + 3 retries = 4 total calls
+        assert mock_driver.get.call_count == 4
+
+    def test_get_with_retry_non_network_error_raises(self, scraper):
+        """Test that non-network errors are raised immediately."""
+        mock_driver = MagicMock()
+        mock_driver.get.side_effect = ValueError("Some other error")
+
+        with pytest.raises(ValueError, match="Some other error"):
+            scraper._get_with_retry(mock_driver, "https://example.com")
+
+        # Should not retry for non-network errors
+        mock_driver.get.assert_called_once()
+
+    def test_get_with_retry_various_timeout_messages(self, scraper):
+        """Test that various timeout message formats are handled."""
+        mock_driver = MagicMock()
+
+        timeout_messages = [
+            "urllib3.exceptions.ReadTimeoutError",
+            "Connection timed out",
+            "HTTPConnectionPool(host='localhost', port=54137): Read timed out",
+        ]
+
+        for msg in timeout_messages:
+            mock_driver.reset_mock()
+            mock_driver.get.side_effect = [Exception(msg), None]
+
+            result = scraper._get_with_retry(mock_driver, "https://example.com")
+
+            assert result is True, f"Failed for message: {msg}"
+            assert mock_driver.get.call_count == 2

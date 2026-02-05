@@ -6,7 +6,7 @@ from typing_extensions import Annotated
 from rich.console import Console
 from rich.table import Table
 
-from aissistant_gm.fantrax.cli import OutputFormat
+from aissistant_gm.fantrax.types import OutputFormat
 from aissistant_gm.fantrax.config import load_config
 from aissistant_gm.fantrax.auth import get_authenticated_league
 from aissistant_gm.fantrax.stats import fetch_fa_player_trends

@@ -163,10 +163,16 @@ class League:
         if season:
             for scoring_period_data in response["tableList"]:
                 scoring_period = ScoringPeriodResult(self, scoring_period_data)
-                periods[scoring_period.period.number] = scoring_period
+                # Skip periods that couldn't be resolved (period is None)
+                if scoring_period.period is not None:
+                    periods[scoring_period.period.number] = scoring_period
 
         if playoffs:
-            playoff_responses = api.get_standings(self, views=["PLAYOFFS"] + [tab["id"] for tab in response["displayedLists"]["tabs"] if tab["id"].startswith(".")])
+            playoff_views = ["PLAYOFFS"] + [tab["id"] for tab in response["displayedLists"]["tabs"] if tab["id"].startswith(".")]
+            playoff_responses = api.get_standings(self, views=playoff_views)
+            # Ensure playoff_responses is always a list (API returns dict for single view)
+            if not isinstance(playoff_responses, list):
+                playoff_responses = [playoff_responses]
 
             other_data = {}
             for bracket_response in playoff_responses[1:]:
@@ -175,7 +181,12 @@ class League:
                 for obj in bracket_response["tableList"]:
                     if obj["caption"] == "Standings":
                         continue
-                    playoff_number = int(re.search(r"(\d+)$", obj["caption"]).group())
+                    # Extract playoff number from caption (e.g., "Playoffs - Week 1" -> 1)
+                    # Skip if caption doesn't contain a number
+                    playoff_match = re.search(r"(\d+)$", obj["caption"])
+                    if not playoff_match:
+                        continue
+                    playoff_number = int(playoff_match.group())
                     if playoff_number not in other_data:
                         other_data[playoff_number] = []
                     other_data[playoff_number].append((name, obj))
@@ -183,9 +194,15 @@ class League:
             for obj in reversed(playoff_responses[0]["tableList"]):
                 if obj["caption"] == "Standings":
                     continue
-                playoff_number = int(re.search(r"(\d+)$", obj["caption"]).group())
+                # Extract playoff number from caption (e.g., "Playoffs - Week 1" -> 1)
+                # Skip if caption doesn't contain a number
+                playoff_match = re.search(r"(\d+)$", obj["caption"])
+                if not playoff_match:
+                    continue
+                playoff_number = int(playoff_match.group())
                 scoring_period = ScoringPeriodResult(self, obj, other_data=other_data[playoff_number] if playoff_number in other_data else None)
-                periods[scoring_period.period.number] = scoring_period
+                if scoring_period.period is not None:
+                    periods[scoring_period.period.number] = scoring_period
 
         return periods
 

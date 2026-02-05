@@ -49,8 +49,8 @@ class TestDatabaseManager:
 
         expected_tables = [
             'daily_scores', 'free_agents', 'league_metadata',
-            'matchups', 'player_news', 'player_trends', 'players', 'roster_slots',
-            'schema_version', 'scoring_periods', 'standings', 'sync_log', 'teams',
+            'player_news', 'player_toi', 'player_trends', 'players', 'roster_slots',
+            'schema_version', 'standings', 'sync_log', 'teams',
             'transaction_players', 'transactions'
         ]
         assert sorted(tables) == sorted(expected_tables)
@@ -72,8 +72,6 @@ class TestDatabaseManager:
         assert 'idx_player_news_player_date' in indexes
         assert 'idx_transactions_league_date' in indexes
         assert 'idx_transaction_players_tx' in indexes
-        assert 'idx_matchups_league_period' in indexes
-        assert 'idx_scoring_periods_league' in indexes
 
     def test_clear_all(self, db_manager):
         """Test clearing all data from database."""
@@ -349,6 +347,147 @@ class TestPlayerTrends:
         assert len(result) == 2
         assert result['p1']['week1']['fpg'] == 2.5
         assert result['p2']['week1']['fpg'] == 2.67
+
+
+class TestPlayerToi:
+    """Tests for player TOI (Time On Ice) operations."""
+
+    def test_save_and_get_player_toi(self, db_manager):
+        """Test saving and retrieving player TOI data."""
+        toi_data = {
+            'toi_seconds': 965,  # 16:05
+            'toipp_seconds': 80,  # 01:20
+            'toish_seconds': 90,  # 01:30
+            'games_played': 57
+        }
+        db_manager.save_player_toi('player1', toi_data)
+
+        result = db_manager.get_player_toi('player1')
+        assert result is not None
+        assert result['toi_seconds'] == 965
+        assert result['toipp_seconds'] == 80
+        assert result['toish_seconds'] == 90
+        assert result['games_played'] == 57
+        assert result['toi_per_game_seconds'] == 16  # 965 // 57
+
+    def test_get_player_toi_not_found(self, db_manager):
+        """Test getting TOI for non-existent player."""
+        result = db_manager.get_player_toi('nonexistent')
+        assert result is None
+
+    def test_get_toi_for_multiple_players(self, db_manager):
+        """Test getting TOI for multiple players."""
+        db_manager.save_player_toi('p1', {
+            'toi_seconds': 1000,
+            'toipp_seconds': 100,
+            'toish_seconds': 50,
+            'games_played': 50
+        })
+        db_manager.save_player_toi('p2', {
+            'toi_seconds': 800,
+            'toipp_seconds': 80,
+            'toish_seconds': 40,
+            'games_played': 40
+        })
+
+        result = db_manager.get_toi_for_players(['p1', 'p2'])
+        assert len(result) == 2
+        assert result['p1']['toi_seconds'] == 1000
+        assert result['p1']['toi_per_game_seconds'] == 20
+        assert result['p2']['toi_seconds'] == 800
+        assert result['p2']['toi_per_game_seconds'] == 20
+
+    def test_get_toi_for_empty_list(self, db_manager):
+        """Test getting TOI for empty player list."""
+        result = db_manager.get_toi_for_players([])
+        assert result == {}
+
+    def test_save_player_toi_zero_games(self, db_manager):
+        """Test saving and retrieving TOI when games_played is zero."""
+        toi_data = {
+            'toi_seconds': 0,
+            'toipp_seconds': 0,
+            'toish_seconds': 0,
+            'games_played': 0
+        }
+        db_manager.save_player_toi('player_zero', toi_data)
+
+        result = db_manager.get_player_toi('player_zero')
+        assert result is not None
+        assert result['toi_seconds'] == 0
+        assert result['games_played'] == 0
+        # Division by zero should be handled
+        assert result['toi_per_game_seconds'] == 0
+
+    def test_save_player_toi_missing_fields(self, db_manager):
+        """Test saving TOI with missing optional fields uses defaults."""
+        toi_data = {
+            'toi_seconds': 500,
+            'games_played': 25
+            # Missing toipp_seconds and toish_seconds
+        }
+        db_manager.save_player_toi('player_missing', toi_data)
+
+        result = db_manager.get_player_toi('player_missing')
+        assert result is not None
+        assert result['toi_seconds'] == 500
+        assert result['toipp_seconds'] == 0  # Default value
+        assert result['toish_seconds'] == 0  # Default value
+        assert result['games_played'] == 25
+        assert result['toi_per_game_seconds'] == 20  # 500 // 25
+
+    def test_save_player_toi_update_existing(self, db_manager):
+        """Test that saving TOI for existing player replaces the data."""
+        # Save initial data
+        initial_data = {
+            'toi_seconds': 500,
+            'toipp_seconds': 50,
+            'toish_seconds': 30,
+            'games_played': 25
+        }
+        db_manager.save_player_toi('player_update', initial_data)
+
+        # Update with new data
+        updated_data = {
+            'toi_seconds': 1000,
+            'toipp_seconds': 100,
+            'toish_seconds': 60,
+            'games_played': 50
+        }
+        db_manager.save_player_toi('player_update', updated_data)
+
+        result = db_manager.get_player_toi('player_update')
+        assert result['toi_seconds'] == 1000
+        assert result['toipp_seconds'] == 100
+        assert result['toish_seconds'] == 60
+        assert result['games_played'] == 50
+        assert result['toi_per_game_seconds'] == 20
+
+    def test_get_toi_for_players_filters_correctly(self, db_manager):
+        """Test that get_toi_for_players only returns requested players."""
+        # Save TOI for 3 players
+        db_manager.save_player_toi('p1', {'toi_seconds': 100, 'games_played': 10})
+        db_manager.save_player_toi('p2', {'toi_seconds': 200, 'games_played': 20})
+        db_manager.save_player_toi('p3', {'toi_seconds': 300, 'games_played': 30})
+
+        # Request only p1 and p3
+        result = db_manager.get_toi_for_players(['p1', 'p3'])
+        assert len(result) == 2
+        assert 'p1' in result
+        assert 'p3' in result
+        assert 'p2' not in result
+
+    def test_get_toi_for_players_handles_missing(self, db_manager):
+        """Test that get_toi_for_players handles players without TOI data."""
+        # Save TOI for only one player
+        db_manager.save_player_toi('p1', {'toi_seconds': 100, 'games_played': 10})
+
+        # Request multiple players, some without TOI
+        result = db_manager.get_toi_for_players(['p1', 'p2', 'p3'])
+        assert len(result) == 1
+        assert 'p1' in result
+        assert 'p2' not in result
+        assert 'p3' not in result
 
 
 class TestFreeAgents:
@@ -789,164 +928,3 @@ class TestTransactions:
         assert result[0]['players'][0]['player_id'] == 'player2'
 
 
-class TestScoringPeriods:
-    """Tests for scoring period operations."""
-
-    def test_save_and_get_scoring_periods(self, db_manager):
-        """Test saving and retrieving scoring periods."""
-        periods = [
-            {'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False},
-            {'period_number': 2, 'start_date': '2025-01-13', 'end_date': '2025-01-19', 'is_playoffs': False},
-            {'period_number': 3, 'start_date': '2025-01-20', 'end_date': '2025-01-26', 'is_playoffs': True},
-        ]
-        saved = db_manager.save_scoring_periods('league1', periods)
-        assert saved == 3
-
-        result = db_manager.get_scoring_periods('league1')
-        assert len(result) == 3
-        assert result[0]['period_number'] == 1
-        assert result[0]['start_date'] == '2025-01-06'
-        assert result[0]['is_playoffs'] == 0
-        assert result[2]['is_playoffs'] == 1
-
-    def test_save_scoring_periods_empty_list(self, db_manager):
-        """Test saving empty periods list."""
-        saved = db_manager.save_scoring_periods('league1', [])
-        assert saved == 0
-
-    def test_get_scoring_period_count(self, db_manager):
-        """Test getting scoring period count."""
-        assert db_manager.get_scoring_period_count('league1') == 0
-
-        periods = [
-            {'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False},
-            {'period_number': 2, 'start_date': '2025-01-13', 'end_date': '2025-01-19', 'is_playoffs': False},
-        ]
-        db_manager.save_scoring_periods('league1', periods)
-
-        assert db_manager.get_scoring_period_count('league1') == 2
-
-    def test_save_scoring_periods_updates_existing(self, db_manager):
-        """Test that saving periods updates existing ones."""
-        # Save initial period
-        periods = [{'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False}]
-        db_manager.save_scoring_periods('league1', periods)
-
-        # Update with new end date
-        periods = [{'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-13', 'is_playoffs': False}]
-        db_manager.save_scoring_periods('league1', periods)
-
-        result = db_manager.get_scoring_periods('league1')
-        assert len(result) == 1
-        assert result[0]['end_date'] == '2025-01-13'
-
-
-class TestMatchups:
-    """Tests for matchup operations."""
-
-    def test_save_and_get_matchups(self, db_manager):
-        """Test saving and retrieving matchups."""
-        # First save scoring periods
-        db_manager.save_scoring_periods('league1', [
-            {'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False}
-        ])
-
-        matchups = [
-            {
-                'period_number': 1,
-                'matchup_key': 1,
-                'away_team_id': 'team1',
-                'away_team_name': 'Team One',
-                'away_score': 105.5,
-                'home_team_id': 'team2',
-                'home_team_name': 'Team Two',
-                'home_score': 98.2
-            },
-            {
-                'period_number': 1,
-                'matchup_key': 2,
-                'away_team_id': 'team3',
-                'away_team_name': 'Team Three',
-                'away_score': 88.0,
-                'home_team_id': 'team4',
-                'home_team_name': 'Team Four',
-                'home_score': 92.5
-            }
-        ]
-        saved = db_manager.save_matchups('league1', matchups)
-        assert saved == 2
-
-        result = db_manager.get_matchups('league1')
-        assert len(result) == 2
-        assert result[0]['away_team_name'] == 'Team One'
-        assert result[0]['away_score'] == 105.5
-        assert result[0]['period_start'] == '2025-01-06'
-
-    def test_get_matchups_by_period(self, db_manager):
-        """Test getting matchups filtered by period."""
-        db_manager.save_scoring_periods('league1', [
-            {'period_number': 1, 'start_date': '2025-01-06', 'end_date': '2025-01-12', 'is_playoffs': False},
-            {'period_number': 2, 'start_date': '2025-01-13', 'end_date': '2025-01-19', 'is_playoffs': False},
-        ])
-
-        matchups = [
-            {'period_number': 1, 'matchup_key': 1, 'away_team_name': 'A', 'home_team_name': 'B'},
-            {'period_number': 2, 'matchup_key': 1, 'away_team_name': 'C', 'home_team_name': 'D'},
-        ]
-        db_manager.save_matchups('league1', matchups)
-
-        result = db_manager.get_matchups('league1', period_number=1)
-        assert len(result) == 1
-        assert result[0]['away_team_name'] == 'A'
-
-    def test_save_matchups_empty_list(self, db_manager):
-        """Test saving empty matchups list."""
-        saved = db_manager.save_matchups('league1', [])
-        assert saved == 0
-
-    def test_get_matchup_count(self, db_manager):
-        """Test getting matchup count."""
-        assert db_manager.get_matchup_count('league1') == 0
-
-        matchups = [
-            {'period_number': 1, 'matchup_key': 1, 'away_team_name': 'A', 'home_team_name': 'B'},
-            {'period_number': 1, 'matchup_key': 2, 'away_team_name': 'C', 'home_team_name': 'D'},
-            {'period_number': 2, 'matchup_key': 1, 'away_team_name': 'E', 'home_team_name': 'F'},
-        ]
-        db_manager.save_matchups('league1', matchups)
-
-        assert db_manager.get_matchup_count('league1') == 3
-
-    def test_save_matchups_updates_existing(self, db_manager):
-        """Test that saving matchups updates existing ones."""
-        matchup = {'period_number': 1, 'matchup_key': 1, 'away_team_name': 'A', 'away_score': 50.0, 'home_team_name': 'B', 'home_score': 45.0}
-        db_manager.save_matchups('league1', [matchup])
-
-        # Update with new scores
-        matchup['away_score'] = 100.0
-        matchup['home_score'] = 95.0
-        db_manager.save_matchups('league1', [matchup])
-
-        result = db_manager.get_matchups('league1')
-        assert len(result) == 1
-        assert result[0]['away_score'] == 100.0
-        assert result[0]['home_score'] == 95.0
-
-    def test_matchup_with_no_team_id(self, db_manager):
-        """Test matchup where team_id is None (e.g., bye week)."""
-        matchup = {
-            'period_number': 1,
-            'matchup_key': 1,
-            'away_team_id': None,
-            'away_team_name': 'BYE',
-            'away_score': 0,
-            'home_team_id': 'team1',
-            'home_team_name': 'Team One',
-            'home_score': 0
-        }
-        db_manager.save_matchups('league1', [matchup])
-
-        result = db_manager.get_matchups('league1')
-        assert len(result) == 1
-        assert result[0]['away_team_id'] is None
-        assert result[0]['away_team_name'] == 'BYE'

@@ -44,7 +44,6 @@ class SyncManager:
         include_free_agents: bool = False,
         include_news: bool = True,
         include_transactions: bool = True,
-        include_matchups: bool = True,
         progress_callback: Optional[Callable[[str, int, int], None]] = None
     ) -> dict:
         """
@@ -56,7 +55,6 @@ class SyncManager:
             include_free_agents: Whether to sync free agent listings
             include_news: Whether to sync player news
             include_transactions: Whether to sync transaction history
-            include_matchups: Whether to sync scoring periods and matchups
             progress_callback: Optional callback for progress updates (message, current, total)
 
         Returns:
@@ -80,9 +78,7 @@ class SyncManager:
                 'free_agents': 0,
                 'fa_trends': 0,
                 'player_news': 0,
-                'transactions': 0,
-                'scoring_periods': 0,
-                'matchups': 0
+                'transactions': 0
             }
 
             # Step 1: Sync league metadata
@@ -112,26 +108,19 @@ class SyncManager:
                 self._log_step("Calculating trends...")
                 stats['trends'] = self.sync_trends()
 
-            # Step 6: Sync matchups (if requested)
-            if include_matchups:
-                self._log_step("Syncing matchups...")
-                matchup_stats = self.sync_matchups()
-                stats['scoring_periods'] = matchup_stats['periods']
-                stats['matchups'] = matchup_stats['matchups']
-
-            # Step 7: Sync transactions (if requested)
+            # Step 6: Sync transactions (if requested)
             if include_transactions:
                 self._log_step("Syncing transactions...")
                 stats['transactions'] = self.sync_transactions()
 
-            # Step 8: Sync free agents (if requested)
+            # Step 7: Sync free agents (if requested)
             if include_free_agents:
                 self._log_step("Syncing free agents...")
                 fa_stats = self.sync_free_agents()
                 stats['free_agents'] = fa_stats['players']
                 stats['fa_trends'] = fa_stats['trends']
 
-            # Step 9: Sync player news (if requested)
+            # Step 8: Sync player news (if requested)
             if include_news:
                 self._log_step("Syncing player news...")
                 stats['player_news'] = self.sync_player_news()
@@ -832,94 +821,6 @@ class SyncManager:
             self.console.print(f"[dim]{traceback.format_exc()}[/dim]")
             return 0
 
-    def sync_matchups(self) -> dict:
-        """
-        Sync scoring periods and matchups from Fantrax API.
-
-        Returns:
-            Dictionary with 'periods' and 'matchups' counts
-        """
-        try:
-            # Fetch scoring period results
-            period_results = self.league.scoring_period_results()
-            self.api_calls += 1
-
-            if not period_results:
-                return {'periods': 0, 'matchups': 0}
-
-            # Extract scoring periods and matchups
-            periods_data = []
-            matchups_data = []
-            seen_periods = set()
-
-            for result in period_results:
-                # Extract period data (avoid duplicates)
-                period_num = result.period.number
-                if period_num not in seen_periods:
-                    seen_periods.add(period_num)
-                    periods_data.append({
-                        'period_number': period_num,
-                        'start_date': result.start.isoformat(),
-                        'end_date': result.end.isoformat(),
-                        'is_playoffs': result.playoffs
-                    })
-
-                # Extract matchups
-                for matchup in result.matchups:
-                    # Handle team which might be a string (for byes/special cases)
-                    away_team = matchup.away
-                    home_team = matchup.home
-
-                    matchups_data.append({
-                        'period_number': period_num,
-                        'matchup_key': matchup.matchup_key,
-                        'away_team_id': away_team.id if hasattr(away_team, 'id') else None,
-                        'away_team_name': away_team.name if hasattr(away_team, 'name') else str(away_team),
-                        'away_score': matchup.away_score,
-                        'home_team_id': home_team.id if hasattr(home_team, 'id') else None,
-                        'home_team_name': home_team.name if hasattr(home_team, 'name') else str(home_team),
-                        'home_score': matchup.home_score
-                    })
-
-                # Also include other brackets (e.g., consolation bracket)
-                for bracket_name, bracket_matchups in result.other_brackets.items():
-                    for matchup in bracket_matchups:
-                        away_team = matchup.away
-                        home_team = matchup.home
-
-                        matchups_data.append({
-                            'period_number': period_num,
-                            'matchup_key': matchup.matchup_key,
-                            'away_team_id': away_team.id if hasattr(away_team, 'id') else None,
-                            'away_team_name': away_team.name if hasattr(away_team, 'name') else str(away_team),
-                            'away_score': matchup.away_score,
-                            'home_team_id': home_team.id if hasattr(home_team, 'id') else None,
-                            'home_team_name': home_team.name if hasattr(home_team, 'name') else str(home_team),
-                            'home_score': matchup.home_score
-                        })
-
-            # Save to database
-            periods_saved = self.db.save_scoring_periods(
-                self.league.league_id,
-                periods_data
-            )
-            matchups_saved = self.db.save_matchups(
-                self.league.league_id,
-                matchups_data
-            )
-
-            # Log the sync
-            sync_id = self.db.log_sync_start('matchups', self.league.league_id)
-            self.db.log_sync_complete(sync_id, 1)
-
-            return {'periods': periods_saved, 'matchups': matchups_saved}
-
-        except Exception as e:
-            self.console.print(f"[red]Error syncing matchups: {e}[/red]")
-            import traceback
-            self.console.print(f"[dim]{traceback.format_exc()}[/dim]")
-            return {'periods': 0, 'matchups': 0}
-
     def _log_step(self, message: str) -> None:
         """Log a sync step."""
         self.console.print(f"[bold blue]→[/bold blue] {message}")
@@ -986,9 +887,5 @@ def get_sync_status(db: DatabaseManager, league_id: str) -> dict:
 
     # Get transaction count
     status['data_counts']['transactions'] = db.get_transaction_count(league_id)
-
-    # Get matchup counts
-    status['data_counts']['scoring_periods'] = db.get_scoring_period_count(league_id)
-    status['data_counts']['matchups'] = db.get_matchup_count(league_id)
 
     return status

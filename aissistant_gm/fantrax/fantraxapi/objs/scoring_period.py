@@ -1,6 +1,6 @@
 import re
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Self
 
 from aissistant_gm.fantrax.fantraxapi import NotTeamInLeague
@@ -10,6 +10,20 @@ from .team import Team
 
 if TYPE_CHECKING:
     from .league import League
+
+
+def _parse_score(value: str | int | float | None) -> Decimal:
+    """Safely parse a score value to Decimal.
+
+    Handles non-numeric values like "-", "", "N/A" by returning Decimal(0).
+    """
+    if value is None:
+        return Decimal(0)
+    try:
+        # Convert to string, remove commas, and parse
+        return Decimal(str(value).replace(",", ""))
+    except InvalidOperation:
+        return Decimal(0)
 
 
 class ScoringPeriod(FantraxBaseObject):
@@ -74,14 +88,29 @@ class ScoringPeriodResult(FantraxBaseObject):
         self.name: str = self._data["caption"]
 
         self.playoffs: bool = self.name.startswith("Playoffs")
-        dates = self._data["subCaption"][1:-1].split(" - ")
-        self.start: date = datetime.strptime(dates[0], "%a %b %d, %Y").date()
-        self.end: date = datetime.strptime(dates[1], "%a %b %d, %Y").date()
+
+        # subCaption may not be present in all API responses
+        sub_caption = self._data.get("subCaption")
+        if sub_caption:
+            dates = sub_caption[1:-1].split(" - ")
+            self.start: date = datetime.strptime(dates[0], "%a %b %d, %Y").date()
+            self.end: date = datetime.strptime(dates[1], "%a %b %d, %Y").date()
+        else:
+            # Fallback: try to parse from caption or use today's date
+            # Caption format is usually "Period X" - get period from league
+            self.start: date = datetime.today().date()
+            self.end: date = datetime.today().date()
 
         if self.playoffs:
             self.period: ScoringPeriod = self.league.scoring_periods_lookup[self.range]
         else:
-            self.period: ScoringPeriod = self.league.scoring_periods[int(re.search(r"(\d+)$", self.name).group())]
+            # Try to extract period number from caption (e.g., "Period 18" -> 18)
+            period_match = re.search(r"(\d+)$", self.name)
+            if period_match:
+                self.period: ScoringPeriod = self.league.scoring_periods[int(period_match.group())]
+            else:
+                # Fallback: use the range to look up the period
+                self.period: ScoringPeriod = self.league.scoring_periods_lookup.get(self.range)
 
         self.next: date = self.end + timedelta(days=1)
         self.days: int = (self.next - self.start).days
@@ -138,14 +167,14 @@ class Matchup(FantraxBaseObject):
         self.matchup_key: int = matchup_key
         try:
             self.away: Team | str = self.league.team(self._data[0]["teamId"])
-        except NotTeamInLeague:
-            self.away: Team | str = self._data[0]["content"]
-        self._away_score: Decimal = Decimal(str(self._data[1]["content"]).replace(",", ""))
+        except (NotTeamInLeague, KeyError):
+            self.away: Team | str = self._data[0].get("content", "Unknown")
+        self._away_score: Decimal = _parse_score(self._data[1].get("content"))
         try:
             self.home: Team | str = self.league.team(self._data[2]["teamId"])
-        except NotTeamInLeague:
-            self.home: Team | str = self._data[2]["content"]
-        self._home_score: Decimal = Decimal(str(self._data[3]["content"]).replace(",", ""))
+        except (NotTeamInLeague, KeyError):
+            self.home: Team | str = self._data[2].get("content", "Unknown")
+        self._home_score: Decimal = _parse_score(self._data[3].get("content"))
 
     @property
     def away_score(self) -> float:
