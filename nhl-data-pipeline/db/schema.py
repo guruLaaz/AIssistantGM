@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 
 class PlayerDict(TypedDict, total=False):
@@ -21,7 +21,7 @@ class PlayerDict(TypedDict, total=False):
 
 
 def init_db(db_path: Path) -> None:
-    """Create all 6 tables if they don't exist.
+    """Create all 9 tables if they don't exist.
 
     Idempotent - safe to call multiple times.
 
@@ -55,6 +55,7 @@ def init_db(db_path: Path) -> None:
             season TEXT NOT NULL,
             is_season_total INTEGER NOT NULL DEFAULT 0,
             toi INTEGER NOT NULL DEFAULT 0,
+            pp_toi INTEGER NOT NULL DEFAULT 0,
             goals INTEGER DEFAULT 0,
             assists INTEGER DEFAULT 0,
             points INTEGER DEFAULT 0,
@@ -149,6 +150,91 @@ def init_db(db_path: Path) -> None:
         """
     )
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fantasy_teams (
+            id TEXT PRIMARY KEY,
+            league_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            short_name TEXT,
+            logo_url TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fantasy_standings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            league_id TEXT NOT NULL,
+            team_id TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            ties INTEGER DEFAULT 0,
+            points INTEGER DEFAULT 0,
+            win_percentage REAL DEFAULT 0,
+            games_back REAL DEFAULT 0,
+            waiver_order INTEGER,
+            claims_remaining INTEGER,
+            points_for REAL DEFAULT 0,
+            points_against REAL DEFAULT 0,
+            streak TEXT,
+            games_played INTEGER DEFAULT 0,
+            fantasy_points_per_game REAL DEFAULT 0,
+            UNIQUE (league_id, team_id)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fantasy_roster_slots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id TEXT NOT NULL,
+            player_id TEXT,
+            player_name TEXT,
+            position_id TEXT,
+            position_short TEXT,
+            status_id TEXT,
+            salary REAL,
+            total_fantasy_points REAL,
+            fantasy_points_per_game REAL
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS line_combinations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER,
+            team_abbrev TEXT NOT NULL,
+            player_name TEXT NOT NULL,
+            position TEXT,
+            ev_line INTEGER,
+            pp_unit INTEGER,
+            pk_unit INTEGER,
+            ev_group TEXT,
+            pp_group TEXT,
+            pk_group TEXT,
+            ev_linemates TEXT,
+            pp_linemates TEXT,
+            rating REAL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (player_id) REFERENCES players(id)
+        )
+        """
+    )
+
+    # Migration: add pp_toi if missing (for existing DBs created before this column)
+    cursor.execute("PRAGMA table_info(skater_stats)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "pp_toi" not in columns:
+        cursor.execute(
+            "ALTER TABLE skater_stats ADD COLUMN pp_toi INTEGER NOT NULL DEFAULT 0"
+        )
+
     conn.commit()
     conn.close()
 
@@ -236,3 +322,54 @@ def upsert_player(conn: sqlite3.Connection, player: PlayerDict) -> int:
 
     conn.commit()
     return player_id
+
+
+def get_player_with_news(
+    conn: sqlite3.Connection,
+    player_id: int,
+) -> dict[str, Any] | None:
+    """Get a player's info and their linked news items.
+
+    Args:
+        conn: Database connection with row_factory=sqlite3.Row.
+        player_id: Player's NHL API ID.
+
+    Returns:
+        Dict with player fields and a ``news`` list of dicts, each with
+        id, rotowire_news_id, headline, content, published_at.
+        Returns None if the player is not found.
+    """
+    cursor = conn.execute("SELECT * FROM players WHERE id = ?", (player_id,))
+    player_row = cursor.fetchone()
+    if player_row is None:
+        return None
+
+    player = dict(player_row)
+
+    news_cursor = conn.execute(
+        "SELECT id, rotowire_news_id, headline, content, published_at "
+        "FROM player_news WHERE player_id = ? "
+        "ORDER BY published_at DESC",
+        (player_id,),
+    )
+    player["news"] = [dict(row) for row in news_cursor.fetchall()]
+
+    return player
+
+
+def get_unlinked_news(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Get all news items that have no linked player.
+
+    Args:
+        conn: Database connection with row_factory=sqlite3.Row.
+
+    Returns:
+        List of dicts with id, rotowire_news_id, headline, content,
+        published_at for news rows where player_id IS NULL.
+    """
+    cursor = conn.execute(
+        "SELECT id, rotowire_news_id, headline, content, published_at "
+        "FROM player_news WHERE player_id IS NULL "
+        "ORDER BY published_at DESC"
+    )
+    return [dict(row) for row in cursor.fetchall()]

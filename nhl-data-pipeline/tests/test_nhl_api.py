@@ -14,9 +14,14 @@ import requests
 from db.schema import PlayerDict, get_db, init_db, upsert_player
 from fetchers.nhl_api import (
     ALL_TEAMS,
+    _api_get,
+    _season_month_ranges,
     calculate_games_benched,
+    discover_missing_players,
     fetch_all_rosters,
+    fetch_all_skater_gamelogs_bulk,
     fetch_goalie_game_log,
+    fetch_player_landing,
     fetch_roster,
     fetch_skater_game_log,
     fetch_team_schedule,
@@ -37,7 +42,9 @@ def db_path(tmp_path: Path) -> Path:
 def db(db_path: Path) -> sqlite3.Connection:
     """Provide an initialized database connection."""
     init_db(db_path)
-    return get_db(db_path)
+    conn = get_db(db_path)
+    yield conn
+    conn.close()
 
 
 def make_mock_response(
@@ -246,7 +253,7 @@ class TestFetchRoster:
 
 
 # =============================================================================
-# Skater Game Log Fetching Tests (7 tests)
+# Skater Game Log Fetching Tests (10 tests)
 # =============================================================================
 
 
@@ -289,6 +296,7 @@ class TestFetchSkaterGameLog:
             assert stats[0]["assists"] == 1
             assert stats[0]["hits"] == 1
             assert stats[0]["blocks"] == 0
+            assert stats[0]["pp_toi"] == 255  # 4:15 = 255 seconds
 
     def test_skater_toi_converted_to_seconds(self) -> None:
         """TOI string '18:30' is converted to 1110 seconds before returning."""
@@ -430,9 +438,222 @@ class TestFetchSkaterGameLog:
             stats = fetch_skater_game_log(8478402, "20232024")
             assert stats[0]["toi"] == 2100  # 35*60
 
+    def test_is_season_total_sets_game_date_null(self, db: sqlite3.Connection) -> None:
+        """is_season_total=True stores game_date as NULL and is_season_total=1."""
+        upsert_player(db, {"id": 8478402, "full_name": "Connor McDavid"})
+        stats = [
+            {
+                "game_date": None,
+                "toi": 72000,
+                "goals": 40,
+                "assists": 60,
+                "points": 100,
+                "plus_minus": 20,
+                "pim": 10,
+                "shots": 250,
+                "hits": 15,
+                "blocks": 10,
+                "powerplay_goals": 10,
+                "powerplay_points": 30,
+                "shorthanded_goals": 1,
+                "shorthanded_points": 2,
+            }
+        ]
+
+        count = save_skater_stats(db, 8478402, "20232024", stats, is_season_total=True)
+        assert count == 1
+
+        cursor = db.execute(
+            "SELECT game_date, is_season_total FROM skater_stats WHERE player_id = 8478402"
+        )
+        row = cursor.fetchone()
+        assert row["game_date"] is None
+        assert row["is_season_total"] == 1
+
+    def test_same_game_date_replaces_via_save(self, db: sqlite3.Connection) -> None:
+        """INSERT OR REPLACE overwrites on duplicate (player_id, game_date)."""
+        upsert_player(db, {"id": 8478402, "full_name": "Connor McDavid"})
+        stats_v1 = [
+            {
+                "game_date": "2024-01-15",
+                "toi": 1200,
+                "goals": 2,
+                "assists": 1,
+                "points": 3,
+                "plus_minus": 1,
+                "pim": 0,
+                "shots": 5,
+                "hits": 1,
+                "blocks": 0,
+                "powerplay_goals": 0,
+                "powerplay_points": 0,
+                "shorthanded_goals": 0,
+                "shorthanded_points": 0,
+            }
+        ]
+        save_skater_stats(db, 8478402, "20232024", stats_v1)
+
+        stats_v2 = [
+            {
+                "game_date": "2024-01-15",
+                "toi": 1200,
+                "goals": 3,
+                "assists": 1,
+                "points": 4,
+                "plus_minus": 2,
+                "pim": 0,
+                "shots": 6,
+                "hits": 1,
+                "blocks": 0,
+                "powerplay_goals": 0,
+                "powerplay_points": 0,
+                "shorthanded_goals": 0,
+                "shorthanded_points": 0,
+            }
+        ]
+        save_skater_stats(db, 8478402, "20232024", stats_v2)
+
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM skater_stats WHERE player_id = 8478402 AND game_date = '2024-01-15'"
+        )
+        assert cursor.fetchone()["cnt"] == 1
+
+        cursor = db.execute(
+            "SELECT goals FROM skater_stats WHERE player_id = 8478402 AND game_date = '2024-01-15'"
+        )
+        assert cursor.fetchone()["goals"] == 3
+
+    def test_stats_with_max_int_values(self, db: sqlite3.Connection) -> None:
+        """Very large int values (2^31-1) do not cause overflow in SQLite."""
+        upsert_player(db, {"id": 8478402, "full_name": "Connor McDavid"})
+        max_val = 2**31 - 1
+        stats = [
+            {
+                "game_date": "2024-01-15",
+                "toi": max_val,
+                "goals": max_val,
+                "assists": max_val,
+                "points": max_val,
+                "plus_minus": max_val,
+                "pim": max_val,
+                "shots": max_val,
+                "hits": max_val,
+                "blocks": max_val,
+                "powerplay_goals": max_val,
+                "powerplay_points": max_val,
+                "shorthanded_goals": max_val,
+                "shorthanded_points": max_val,
+            }
+        ]
+
+        count = save_skater_stats(db, 8478402, "20232024", stats)
+        assert count == 1
+
+        cursor = db.execute(
+            "SELECT goals, toi FROM skater_stats WHERE player_id = 8478402 AND game_date = '2024-01-15'"
+        )
+        row = cursor.fetchone()
+        assert row["goals"] == max_val
+        assert row["toi"] == max_val
+
 
 # =============================================================================
-# Goalie Game Log Fetching Tests (3 tests)
+# Player Landing Page Tests (5 tests)
+# =============================================================================
+
+
+class TestFetchPlayerLanding:
+    """Tests for fetch_player_landing function."""
+
+    def test_normal_response_returns_raw_json(self) -> None:
+        """Returns the raw JSON dict from the API as-is."""
+        mock_json = {
+            "firstName": {"default": "Connor"},
+            "lastName": {"default": "McDavid"},
+            "position": "C",
+            "featuredStats": {
+                "season": 20232024,
+                "regularSeason": {
+                    "subSeason": {
+                        "gamesPlayed": 76,
+                        "goals": 50,
+                        "assists": 80,
+                        "points": 130,
+                    }
+                },
+            },
+            "seasonTotals": [
+                {"season": 20232024, "leagueAbbrev": "NHL", "goals": 50}
+            ],
+        }
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            result = fetch_player_landing(8478402)
+
+            assert result == mock_json
+            assert result["featuredStats"]["regularSeason"]["subSeason"]["goals"] == 50
+            assert result["seasonTotals"][0]["season"] == 20232024
+
+    def test_404_raises_http_error(self) -> None:
+        """404 response raises HTTPError (player not found)."""
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(
+                status_code=404, raise_for_status=True
+            )
+            mock_session_cls.return_value = mock_session
+
+            with pytest.raises(requests.HTTPError):
+                fetch_player_landing(9999999)
+
+    def test_malformed_missing_nested_keys(self) -> None:
+        """Response missing featuredStats/seasonTotals keys — returns dict as-is."""
+        mock_json = {
+            "firstName": {"default": "Connor"},
+            "lastName": {"default": "McDavid"},
+        }
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            result = fetch_player_landing(8478402)
+
+            assert result == mock_json
+            assert "featuredStats" not in result
+
+    def test_empty_featured_stats_section(self) -> None:
+        """Empty featuredStats dict returned without error."""
+        mock_json = {
+            "firstName": {"default": "Connor"},
+            "lastName": {"default": "McDavid"},
+            "featuredStats": {},
+        }
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            result = fetch_player_landing(8478402)
+
+            assert result["featuredStats"] == {}
+
+    def test_network_timeout(self) -> None:
+        """Network timeout raises requests.Timeout."""
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.side_effect = requests.Timeout("Connection timed out")
+            mock_session_cls.return_value = mock_session
+
+            with pytest.raises(requests.Timeout):
+                fetch_player_landing(8478402)
+
+
+# =============================================================================
+# Goalie Game Log Fetching Tests (9 tests)
 # =============================================================================
 
 
@@ -518,6 +739,161 @@ class TestFetchGoalieGameLog:
             stats = fetch_goalie_game_log(8477424, "20232024")
             assert stats[0]["toi"] == 3510  # 58*60 + 30
 
+    def test_empty_game_log_returns_empty_list(self) -> None:
+        """Empty gameLog array returns empty list."""
+        mock_json = {"gameLog": []}
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            stats = fetch_goalie_game_log(8477424, "20232024")
+            assert stats == []
+
+    def test_missing_save_pctg_and_gaa(self) -> None:
+        """Response without savePctg/goalsAgainstAvg keys does not crash."""
+        mock_json = {
+            "gameLog": [
+                {
+                    "gameDate": "2024-01-15",
+                    "decision": "W",
+                    "shotsAgainst": 30,
+                    "goalsAgainst": 2,
+                    "shutouts": 0,
+                    "toi": "60:00",
+                }
+            ]
+        }
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            stats = fetch_goalie_game_log(8477424, "20232024")
+            assert len(stats) == 1
+            assert stats[0]["saves"] == 28  # 30 - 2
+            assert stats[0]["wins"] == 1
+            assert "savePctg" not in stats[0]
+            assert "goalsAgainstAvg" not in stats[0]
+
+    def test_zero_saves_zero_shots_game(self) -> None:
+        """Zero shots against produces saves=0."""
+        mock_json = {
+            "gameLog": [
+                {
+                    "gameDate": "2024-01-15",
+                    "decision": "L",
+                    "shotsAgainst": 0,
+                    "goalsAgainst": 0,
+                    "shutouts": 0,
+                    "toi": "5:00",
+                }
+            ]
+        }
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            stats = fetch_goalie_game_log(8477424, "20232024")
+            assert stats[0]["saves"] == 0
+            assert stats[0]["shots_against"] == 0
+            assert stats[0]["goals_against"] == 0
+
+    def test_goalie_toi_zero_did_not_play(self) -> None:
+        """toi='0:00' converts to toi=0 (goalie did not play)."""
+        mock_json = {
+            "gameLog": [
+                {
+                    "gameDate": "2024-01-15",
+                    "decision": "",
+                    "shotsAgainst": 0,
+                    "goalsAgainst": 0,
+                    "shutouts": 0,
+                    "toi": "0:00",
+                }
+            ]
+        }
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            stats = fetch_goalie_game_log(8477424, "20232024")
+            assert stats[0]["toi"] == 0
+
+    def test_same_game_date_replaces_goalie(self, db: sqlite3.Connection) -> None:
+        """Same (player_id, game_date) replaces via INSERT OR REPLACE."""
+        upsert_player(db, {"id": 8477424, "full_name": "Juuse Saros"})
+        base_stat = {
+            "game_date": "2024-01-15",
+            "toi": 3600,
+            "saves": 28,
+            "goals_against": 2,
+            "shots_against": 30,
+            "wins": 1,
+            "losses": 0,
+            "ot_losses": 0,
+            "shutouts": 0,
+        }
+        save_goalie_stats(db, 8477424, "20232024", [base_stat])
+
+        updated_stat = {
+            "game_date": "2024-01-15",
+            "toi": 3600,
+            "saves": 35,
+            "goals_against": 2,
+            "shots_against": 37,
+            "wins": 1,
+            "losses": 0,
+            "ot_losses": 0,
+            "shutouts": 0,
+        }
+        save_goalie_stats(db, 8477424, "20232024", [updated_stat])
+
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM goalie_stats WHERE player_id = 8477424 AND game_date = '2024-01-15'"
+        )
+        assert cursor.fetchone()["cnt"] == 1
+
+        cursor = db.execute(
+            "SELECT saves FROM goalie_stats WHERE player_id = 8477424 AND game_date = '2024-01-15'"
+        )
+        assert cursor.fetchone()["saves"] == 35
+
+    def test_goalie_season_total_path(self, db: sqlite3.Connection) -> None:
+        """is_season_total=True uses DELETE+INSERT path, game_date is NULL."""
+        upsert_player(db, {"id": 8477424, "full_name": "Juuse Saros"})
+        stats = [
+            {
+                "game_date": None,
+                "toi": 180000,
+                "saves": 1500,
+                "goals_against": 120,
+                "shots_against": 1620,
+                "wins": 30,
+                "losses": 15,
+                "ot_losses": 5,
+                "shutouts": 3,
+            }
+        ]
+
+        save_goalie_stats(db, 8477424, "20232024", stats, is_season_total=True)
+        stats[0]["wins"] = 32
+        save_goalie_stats(db, 8477424, "20232024", stats, is_season_total=True)
+
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM goalie_stats WHERE player_id = 8477424 AND is_season_total = 1"
+        )
+        assert cursor.fetchone()["cnt"] == 1
+
+        cursor = db.execute(
+            "SELECT game_date, wins FROM goalie_stats WHERE player_id = 8477424 AND is_season_total = 1"
+        )
+        row = cursor.fetchone()
+        assert row["game_date"] is None
+        assert row["wins"] == 32
+
 
 # =============================================================================
 # Season Totals Tests (2 tests)
@@ -599,7 +975,7 @@ class TestSeasonTotals:
 
 
 # =============================================================================
-# Team Schedule Tests (2 tests)
+# Team Schedule Tests (5 tests)
 # =============================================================================
 
 
@@ -661,6 +1037,60 @@ class TestTeamSchedule:
         )
         assert cursor.fetchone()["result"] == "L"
 
+    def test_empty_schedule(self) -> None:
+        """Empty games array returns empty list."""
+        mock_json = {"games": []}
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            games = fetch_team_schedule("EDM", "20232024")
+            assert games == []
+
+    def test_schedule_with_future_dates(self) -> None:
+        """Future dates handled normally, result is None."""
+        mock_json = {
+            "games": [
+                {
+                    "gameDate": "2025-04-15",
+                    "awayTeam": {"abbrev": "CGY"},
+                    "homeTeam": {"abbrev": "EDM"},
+                }
+            ]
+        }
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            games = fetch_team_schedule("EDM", "20242025")
+            assert len(games) == 1
+            assert games[0]["game_date"] == "2025-04-15"
+            assert games[0]["result"] is None
+
+    def test_doubleheader_same_date_save(self, db: sqlite3.Connection) -> None:
+        """Two games on same date — UNIQUE constraint means second overwrites first."""
+        games = [
+            {"game_date": "2024-01-15", "opponent": "CGY", "home_away": "home", "result": None},
+            {"game_date": "2024-01-15", "opponent": "VAN", "home_away": "away", "result": None},
+        ]
+
+        save_team_schedule(db, "EDM", "20232024", games)
+
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM team_games WHERE team = 'EDM' AND game_date = '2024-01-15'"
+        )
+        # UNIQUE(team, season, game_date) means second overwrites first
+        assert cursor.fetchone()["cnt"] == 1
+
+        cursor = db.execute(
+            "SELECT opponent, home_away FROM team_games WHERE team = 'EDM' AND game_date = '2024-01-15'"
+        )
+        row = cursor.fetchone()
+        assert row["opponent"] == "VAN"
+        assert row["home_away"] == "away"
+
 
 # =============================================================================
 # Rate Limiting Tests (1 test)
@@ -681,10 +1111,67 @@ class TestRateLimiting:
             mock_session_cls.return_value = mock_session
 
             with patch("fetchers.nhl_api.time.sleep") as mock_sleep:
-                sync_all(db, "20232024", rate_limit=0.5)
+                sync_all(db, "20232024", rate_limit=0.1)
 
                 # Should sleep between requests
                 assert mock_sleep.call_count > 0
+
+    def test_api_get_retries_on_429(self) -> None:
+        """_api_get retries with backoff on 429, then succeeds."""
+        session = MagicMock()
+        resp_429 = make_mock_response(status_code=429, raise_for_status=True)
+        resp_429.headers = {}
+        resp_200 = make_mock_response(json_data={"ok": True})
+        resp_200.headers = {}
+        session.get.side_effect = [resp_429, resp_200]
+
+        with patch("fetchers.nhl_api.time.sleep") as mock_sleep:
+            result = _api_get(session, "https://example.com/test")
+
+        assert result.json() == {"ok": True}
+        assert session.get.call_count == 2
+        mock_sleep.assert_called_once_with(1)  # first backoff = 1s
+
+    def test_api_get_respects_retry_after_header(self) -> None:
+        """_api_get uses Retry-After header value when present."""
+        session = MagicMock()
+        resp_429 = make_mock_response(status_code=429, raise_for_status=True)
+        resp_429.headers = {"Retry-After": "3"}
+        resp_200 = make_mock_response(json_data={"ok": True})
+        resp_200.headers = {}
+        session.get.side_effect = [resp_429, resp_200]
+
+        with patch("fetchers.nhl_api.time.sleep") as mock_sleep:
+            result = _api_get(session, "https://example.com/test")
+
+        assert result.json() == {"ok": True}
+        mock_sleep.assert_called_once_with(3.0)
+
+    def test_api_get_raises_after_max_retries(self) -> None:
+        """_api_get raises HTTPError after exhausting retries."""
+        session = MagicMock()
+        resp_429 = make_mock_response(status_code=429, raise_for_status=True)
+        resp_429.headers = {}
+        session.get.return_value = resp_429
+
+        with patch("fetchers.nhl_api.time.sleep"):
+            with pytest.raises(requests.HTTPError):
+                _api_get(session, "https://example.com/test")
+
+        # 1 initial + 4 retries = 5 total
+        assert session.get.call_count == 5
+
+    def test_api_get_raises_immediately_on_non_429(self) -> None:
+        """_api_get does not retry on non-429 errors."""
+        session = MagicMock()
+        resp_500 = make_mock_response(status_code=500, raise_for_status=True)
+        resp_500.headers = {}
+        session.get.return_value = resp_500
+
+        with pytest.raises(requests.HTTPError):
+            _api_get(session, "https://example.com/test")
+
+        assert session.get.call_count == 1
 
 
 # =============================================================================
@@ -700,6 +1187,7 @@ class TestApiEdgeCases:
         with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
             mock_session = MagicMock()
             mock_response = Mock()
+            mock_response.status_code = 200
             mock_response.raise_for_status.return_value = None
             mock_response.json.side_effect = json.JSONDecodeError("Error", "", 0)
             mock_session.get.return_value = mock_response
@@ -917,6 +1405,187 @@ class TestSaveDbEdgeCases:
 
 
 # =============================================================================
+# Sync All Tests (3 tests)
+# =============================================================================
+
+
+class TestSyncAll:
+    """Tests for sync_all orchestration."""
+
+    def test_one_player_fetch_fails_others_continue(self, db: sqlite3.Connection) -> None:
+        """One player game-log fetch fails, other player still gets stats."""
+        upsert_player(
+            db,
+            {"id": 8478402, "full_name": "Connor McDavid", "team_abbrev": "EDM", "position": "C"},
+        )
+        upsert_player(
+            db,
+            {"id": 8479318, "full_name": "Leon Draisaitl", "team_abbrev": "EDM", "position": "C"},
+        )
+
+        mock_roster_json = {"forwards": [], "defensemen": [], "goalies": []}
+        mock_schedule_json = {"games": []}
+        mock_skater_log_json = {
+            "gameLog": [
+                {"gameDate": "2024-01-15", "goals": 1, "assists": 2, "toi": "20:00"}
+            ]
+        }
+
+        def mock_get(url: str, **kwargs: Any) -> Mock:
+            if "roster" in url:
+                return make_mock_response(mock_roster_json)
+            elif "schedule" in url:
+                return make_mock_response(mock_schedule_json)
+            elif "game-log" in url:
+                if "8478402" in url:
+                    return make_mock_response(status_code=500, raise_for_status=True)
+                else:
+                    return make_mock_response(mock_skater_log_json)
+            return make_mock_response({})
+
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.side_effect = mock_get
+            mock_session_cls.return_value = mock_session
+
+            with patch("fetchers.nhl_api.time.sleep"):
+                with patch("fetchers.nhl_api.ALL_TEAMS", ["EDM"]):
+                    result = sync_all(db, "20232024", rate_limit=0)
+
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM skater_stats WHERE player_id = 8478402"
+        )
+        assert cursor.fetchone()["cnt"] == 0
+
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM skater_stats WHERE player_id = 8479318"
+        )
+        assert cursor.fetchone()["cnt"] == 1
+
+    def test_mix_skaters_and_goalies_on_same_team(self, db: sqlite3.Connection) -> None:
+        """Skaters go to skater path, goalies go to goalie path."""
+        upsert_player(
+            db,
+            {"id": 8478402, "full_name": "Connor McDavid", "team_abbrev": "EDM", "position": "C"},
+        )
+        upsert_player(
+            db,
+            {"id": 8477424, "full_name": "Stuart Skinner", "team_abbrev": "EDM", "position": "G"},
+        )
+
+        mock_roster_json = {"forwards": [], "defensemen": [], "goalies": []}
+        mock_schedule_json = {"games": []}
+        mock_skater_log = {
+            "gameLog": [
+                {"gameDate": "2024-01-15", "goals": 2, "assists": 1, "toi": "22:00"}
+            ]
+        }
+        mock_goalie_log = {
+            "gameLog": [
+                {
+                    "gameDate": "2024-01-15",
+                    "decision": "W",
+                    "shotsAgainst": 30,
+                    "goalsAgainst": 2,
+                    "toi": "60:00",
+                }
+            ]
+        }
+
+        def mock_get(url: str, **kwargs: Any) -> Mock:
+            if "roster" in url:
+                return make_mock_response(mock_roster_json)
+            elif "schedule" in url:
+                return make_mock_response(mock_schedule_json)
+            elif "game-log" in url:
+                if "8478402" in url:
+                    return make_mock_response(mock_skater_log)
+                elif "8477424" in url:
+                    return make_mock_response(mock_goalie_log)
+            return make_mock_response({})
+
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.side_effect = mock_get
+            mock_session_cls.return_value = mock_session
+
+            with patch("fetchers.nhl_api.time.sleep"):
+                with patch("fetchers.nhl_api.ALL_TEAMS", ["EDM"]):
+                    result = sync_all(db, "20232024", rate_limit=0)
+
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM skater_stats WHERE player_id = 8478402"
+        )
+        assert cursor.fetchone()["cnt"] == 1
+
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM goalie_stats WHERE player_id = 8477424"
+        )
+        assert cursor.fetchone()["cnt"] == 1
+
+        # No cross-contamination
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM skater_stats WHERE player_id = 8477424"
+        )
+        assert cursor.fetchone()["cnt"] == 0
+        cursor = db.execute(
+            "SELECT COUNT(*) as cnt FROM goalie_stats WHERE player_id = 8478402"
+        )
+        assert cursor.fetchone()["cnt"] == 0
+
+    def test_empty_roster_team_doesnt_break_loop(self, db: sqlite3.Connection) -> None:
+        """Team with empty roster doesn't break the sync loop."""
+        mock_edm_roster = {"forwards": [], "defensemen": [], "goalies": []}
+        mock_tor_roster = {
+            "forwards": [
+                {
+                    "id": 8479318,
+                    "firstName": {"default": "Auston"},
+                    "lastName": {"default": "Matthews"},
+                    "positionCode": "C",
+                }
+            ],
+            "defensemen": [],
+            "goalies": [],
+        }
+        mock_schedule_json = {"games": []}
+        mock_skater_log = {
+            "gameLog": [
+                {"gameDate": "2024-01-15", "goals": 1, "assists": 0, "toi": "19:00"}
+            ]
+        }
+
+        def mock_get(url: str, **kwargs: Any) -> Mock:
+            if "roster" in url:
+                if "EDM" in url:
+                    return make_mock_response(mock_edm_roster)
+                elif "TOR" in url:
+                    return make_mock_response(mock_tor_roster)
+            elif "schedule" in url:
+                return make_mock_response(mock_schedule_json)
+            elif "game-log" in url:
+                return make_mock_response(mock_skater_log)
+            return make_mock_response({})
+
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.side_effect = mock_get
+            mock_session_cls.return_value = mock_session
+
+            with patch("fetchers.nhl_api.time.sleep"):
+                with patch("fetchers.nhl_api.ALL_TEAMS", ["EDM", "TOR"]):
+                    result = sync_all(db, "20232024", rate_limit=0)
+
+        cursor = db.execute("SELECT COUNT(*) as cnt FROM players")
+        assert cursor.fetchone()["cnt"] == 1
+
+        cursor = db.execute("SELECT full_name FROM players WHERE id = 8479318")
+        assert cursor.fetchone()["full_name"] == "Auston Matthews"
+
+        assert result["skater_games"] >= 1
+
+
+# =============================================================================
 # Integration Tests (2 tests)
 # =============================================================================
 
@@ -1042,3 +1711,284 @@ class TestIntegration:
 
         result = calculate_games_benched(db, 8478402, "20232024")
         assert result == 3
+
+
+# =============================================================================
+# Season Month Ranges Tests (4 tests)
+# =============================================================================
+
+
+class TestSeasonMonthRanges:
+    """Tests for _season_month_ranges helper."""
+
+    def test_standard_season(self) -> None:
+        """20252026 season returns 7 month ranges Oct-Apr."""
+        ranges = _season_month_ranges("20252026")
+        assert len(ranges) == 7
+        assert ranges[0] == ("2025-10-01", "2025-10-31")
+        assert ranges[1] == ("2025-11-01", "2025-11-30")
+        assert ranges[2] == ("2025-12-01", "2025-12-31")
+        assert ranges[3] == ("2026-01-01", "2026-01-31")
+        assert ranges[4] == ("2026-02-01", "2026-02-28")
+        assert ranges[5] == ("2026-03-01", "2026-03-31")
+        assert ranges[6] == ("2026-04-01", "2026-04-30")
+
+    def test_leap_year_february(self) -> None:
+        """Season crossing a leap year (Feb 2024 has 29 days)."""
+        ranges = _season_month_ranges("20232024")
+        feb_range = ranges[4]  # Index 4 = February
+        assert feb_range == ("2024-02-01", "2024-02-29")
+
+    def test_non_leap_year_february(self) -> None:
+        """Season crossing a non-leap year (Feb 2025 has 28 days)."""
+        ranges = _season_month_ranges("20242025")
+        feb_range = ranges[4]
+        assert feb_range == ("2025-02-01", "2025-02-28")
+
+    def test_year_parsing(self) -> None:
+        """Start and end years are correctly parsed from season string."""
+        ranges = _season_month_ranges("20192020")
+        assert ranges[0][0].startswith("2019-")
+        assert ranges[6][0].startswith("2020-")
+
+
+# =============================================================================
+# Bulk Skater Gamelogs Monthly Chunking Tests (4 tests)
+# =============================================================================
+
+
+class TestFetchAllSkaterGamelogsBulk:
+    """Tests for fetch_all_skater_gamelogs_bulk monthly chunking."""
+
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    @patch("fetchers.nhl_api.time.sleep")
+    def test_calls_paginate_per_month(
+        self, mock_sleep: MagicMock, mock_paginate: MagicMock
+    ) -> None:
+        """Makes 14 _paginate_stats_api calls (7 months x 2 endpoints)."""
+        mock_paginate.return_value = []
+        result = fetch_all_skater_gamelogs_bulk("20252026")
+        assert mock_paginate.call_count == 14
+        assert result == []
+
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    @patch("fetchers.nhl_api.time.sleep")
+    def test_date_filter_in_cayenne_exp(
+        self, mock_sleep: MagicMock, mock_paginate: MagicMock
+    ) -> None:
+        """Each call includes date range in cayenneExp parameter."""
+        mock_paginate.return_value = []
+        fetch_all_skater_gamelogs_bulk("20252026")
+
+        # Check the first call's params contain the October date range
+        first_call_args = mock_paginate.call_args_list[0]
+        params = first_call_args[0][2]  # positional arg index 2 = params dict
+        cayenne = params["cayenneExp"]
+        assert '2025-10-01' in cayenne
+        assert '2025-10-31' in cayenne
+
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    @patch("fetchers.nhl_api.time.sleep")
+    def test_joins_summary_and_realtime(
+        self, mock_sleep: MagicMock, mock_paginate: MagicMock
+    ) -> None:
+        """Summary and realtime rows are joined by (playerId, gameId)."""
+        summary_row = {
+            "playerId": 8478402, "gameId": 2024020001,
+            "gameDate": "2025-10-15", "goals": 2, "assists": 1,
+            "points": 3, "plusMinus": 1, "penaltyMinutes": 0,
+            "shots": 5, "timeOnIcePerGame": 1350,
+            "ppGoals": 0, "ppPoints": 0, "shGoals": 0, "shPoints": 0,
+        }
+        realtime_row = {
+            "playerId": 8478402, "gameId": 2024020001,
+            "hits": 3, "blockedShots": 2,
+        }
+
+        # First two calls are for Oct (summary then realtime)
+        # Remaining 12 calls return empty
+        call_results = [[summary_row], [realtime_row]] + [[] for _ in range(12)]
+        mock_paginate.side_effect = call_results
+
+        result = fetch_all_skater_gamelogs_bulk("20252026")
+
+        assert len(result) == 1
+        assert result[0]["hits"] == 3
+        assert result[0]["blocks"] == 2
+        assert result[0]["goals"] == 2
+
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    @patch("fetchers.nhl_api.time.sleep")
+    def test_empty_months_handled(
+        self, mock_sleep: MagicMock, mock_paginate: MagicMock
+    ) -> None:
+        """Months with no games return 0 rows without error."""
+        mock_paginate.return_value = []
+        result = fetch_all_skater_gamelogs_bulk("20252026")
+        assert result == []
+        assert mock_paginate.call_count == 14
+
+
+# =============================================================================
+# Discover Missing Players Tests (5 tests)
+# =============================================================================
+
+
+class TestDiscoverMissingPlayers:
+    """Tests for discover_missing_players function."""
+
+    @patch("fetchers.nhl_api.time.sleep")
+    @patch("fetchers.nhl_api._api_get")
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    def test_discovers_missing_skater(
+        self,
+        mock_paginate: MagicMock,
+        mock_api_get: MagicMock,
+        mock_sleep: MagicMock,
+        db: sqlite3.Connection,
+    ) -> None:
+        """Player in Stats API but not in DB gets discovered and upserted."""
+        # Seed one known player
+        upsert_player(db, {
+            "id": 8478402, "full_name": "Connor McDavid",
+            "first_name": "Connor", "last_name": "McDavid",
+            "team_abbrev": "EDM", "position": "C",
+        })
+
+        # Stats API returns known + unknown player
+        mock_paginate.side_effect = [
+            [{"playerId": 8478402}, {"playerId": 9999999}],  # skaters
+            [],  # goalies
+        ]
+
+        # Player landing for unknown player
+        mock_landing_resp = Mock()
+        mock_landing_resp.json.return_value = {
+            "firstName": {"default": "Clayton"},
+            "lastName": {"default": "Keller"},
+            "currentTeamAbbrev": "UTA",
+            "position": "LW",
+        }
+        mock_api_get.return_value = mock_landing_resp
+
+        discovered = discover_missing_players(db, "20252026")
+
+        assert discovered == 1
+        row = db.execute(
+            "SELECT full_name, team_abbrev, position FROM players WHERE id = 9999999"
+        ).fetchone()
+        assert row["full_name"] == "Clayton Keller"
+        assert row["team_abbrev"] == "UTA"
+        assert row["position"] == "LW"
+
+    @patch("fetchers.nhl_api.time.sleep")
+    @patch("fetchers.nhl_api._api_get")
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    def test_skips_already_known_players(
+        self,
+        mock_paginate: MagicMock,
+        mock_api_get: MagicMock,
+        mock_sleep: MagicMock,
+        db: sqlite3.Connection,
+    ) -> None:
+        """Players already in the DB are not re-fetched."""
+        upsert_player(db, {
+            "id": 8478402, "full_name": "Connor McDavid",
+            "team_abbrev": "EDM",
+        })
+
+        mock_paginate.side_effect = [
+            [{"playerId": 8478402}],  # all known
+            [],
+        ]
+
+        discovered = discover_missing_players(db, "20252026")
+
+        assert discovered == 0
+        mock_api_get.assert_not_called()
+
+    @patch("fetchers.nhl_api.time.sleep")
+    @patch("fetchers.nhl_api._api_get")
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    def test_discovers_missing_goalie(
+        self,
+        mock_paginate: MagicMock,
+        mock_api_get: MagicMock,
+        mock_sleep: MagicMock,
+        db: sqlite3.Connection,
+    ) -> None:
+        """Goalie in Stats API but not in DB gets discovered."""
+        mock_paginate.side_effect = [
+            [],  # skaters
+            [{"playerId": 8888888}],  # goalies
+        ]
+
+        mock_landing_resp = Mock()
+        mock_landing_resp.json.return_value = {
+            "firstName": {"default": "Test"},
+            "lastName": {"default": "Goalie"},
+            "currentTeamAbbrev": "TOR",
+            "position": "G",
+        }
+        mock_api_get.return_value = mock_landing_resp
+
+        discovered = discover_missing_players(db, "20252026")
+
+        assert discovered == 1
+        row = db.execute("SELECT full_name FROM players WHERE id = 8888888").fetchone()
+        assert row["full_name"] == "Test Goalie"
+
+    @patch("fetchers.nhl_api.time.sleep")
+    @patch("fetchers.nhl_api._api_get")
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    def test_continues_on_individual_failure(
+        self,
+        mock_paginate: MagicMock,
+        mock_api_get: MagicMock,
+        mock_sleep: MagicMock,
+        db: sqlite3.Connection,
+    ) -> None:
+        """One player landing fails, others still discovered."""
+        mock_paginate.side_effect = [
+            [{"playerId": 1111111}, {"playerId": 2222222}],  # skaters
+            [],  # goalies
+        ]
+
+        landing_ok = Mock()
+        landing_ok.json.return_value = {
+            "firstName": {"default": "Good"},
+            "lastName": {"default": "Player"},
+            "currentTeamAbbrev": "TOR",
+            "position": "C",
+        }
+
+        mock_api_get.side_effect = [
+            Exception("API error"),  # first player fails
+            landing_ok,  # second succeeds
+        ]
+
+        discovered = discover_missing_players(db, "20252026")
+
+        assert discovered == 1
+        assert db.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 1
+
+    @patch("fetchers.nhl_api.time.sleep")
+    @patch("fetchers.nhl_api._paginate_stats_api")
+    def test_empty_stats_api_no_calls(
+        self,
+        mock_paginate: MagicMock,
+        mock_sleep: MagicMock,
+        db: sqlite3.Connection,
+    ) -> None:
+        """Empty Stats API response results in 0 discoveries."""
+        mock_paginate.side_effect = [[], []]
+
+        discovered = discover_missing_players(db, "20252026")
+
+        assert discovered == 0
+
+    @pytest.mark.integration
+    def test_live_discovers_players(self, db: sqlite3.Connection) -> None:
+        """Live: discovers at least some players not on current rosters."""
+        discovered = discover_missing_players(db, "20252026", rate_limit=0.1)
+        assert discovered > 50  # Should find ~146 missing players

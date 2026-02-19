@@ -1,8 +1,8 @@
-# Cron: 0 6 * * * cd /path/to/nhl-data-pipeline && python pipeline.py >> logs/cron.log 2>&1
+# Cron (daily full):  0 6 * * *   cd /path/to/nhl-data-pipeline && python pipeline.py >> logs/cron.log 2>&1
 """Daily NHL data pipeline orchestrator.
 
 Runs all data-fetching steps (rosters, schedules, game logs, season totals,
-news, injuries), logs progress, and generates summary reports.
+injuries), logs progress, and generates summary reports.
 """
 
 from __future__ import annotations
@@ -18,8 +18,14 @@ from typing import Any
 from db.schema import get_db, init_db
 from fetchers.nhl_api import (
     ALL_TEAMS,
+    DEFAULT_RATE_LIMIT,
     calculate_games_benched,
+    fetch_all_goalie_gamelogs_bulk,
+    fetch_all_goalie_seasontotals_bulk,
+    discover_missing_players,
     fetch_all_rosters,
+    fetch_all_skater_gamelogs_bulk,
+    fetch_all_skater_seasontotals_bulk,
     fetch_goalie_game_log,
     fetch_player_landing,
     fetch_skater_game_log,
@@ -28,20 +34,23 @@ from fetchers.nhl_api import (
     save_skater_stats,
     save_team_schedule,
 )
+from fetchers.fantrax_league import sync_fantrax_league
+from fetchers.fantrax_news import backfill_fantrax_news
+from fetchers.dailyfaceoff import fetch_all_lines
 from fetchers.rotowire import (
+    backfill_news_player_ids,
     fetch_injuries,
-    fetch_news,
     save_injuries,
-    save_news,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pipeline")
 
 DB_PATH = Path(__file__).parent / "db" / "nhl_data.db"
 LOG_DIR = Path(__file__).parent / "logs"
 
 PIPELINE_STEPS = [
-    "rosters", "schedules", "gamelogs", "seasontotals", "news", "injuries",
+    "rosters", "schedules", "gamelogs", "seasontotals", "injuries",
+    "lines", "fantrax-league",
 ]
 STEP_ALIASES: dict[str, list[str]] = {
     "stats": ["gamelogs", "seasontotals"],
@@ -116,6 +125,10 @@ def setup_logging(
     fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
     pl.addHandler(fh)
 
+    # Suppress noisy third-party loggers
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+
     return pl
 
 
@@ -136,7 +149,14 @@ def _log_pipeline_step(conn, step_name: str, status: str) -> None:
 
 def _run_rosters(conn, season):
     count, failed = fetch_all_rosters(conn)
-    return {"players_upserted": count, "teams_failed": failed}
+    discovered = discover_missing_players(conn, season)
+    backfilled = backfill_news_player_ids(conn)
+    return {
+        "players_upserted": count,
+        "teams_failed": failed,
+        "discovered": discovered,
+        "news_backfilled": backfilled,
+    }
 
 
 def _run_schedules(conn, season):
@@ -149,91 +169,78 @@ def _run_schedules(conn, season):
         except Exception as e:
             logger.warning("Failed schedule for %s: %s", team, e)
         if i < len(ALL_TEAMS) - 1:
-            time_module.sleep(0.5)
+            time_module.sleep(DEFAULT_RATE_LIMIT)
     return {"games_saved": total}
 
 
 def _run_gamelogs(conn, season):
-    cursor = conn.execute("SELECT id, position FROM players")
-    players = cursor.fetchall()
+    # Get known player IDs for filtering
+    known_ids = {
+        row["id"] for row in conn.execute("SELECT id FROM players").fetchall()
+    }
+
+    # Bulk fetch skater gamelogs from Stats API
+    skater_rows = fetch_all_skater_gamelogs_bulk(season)
     skater_games = 0
-    goalie_games = 0
-    for player in players:
-        pid = player["id"]
-        pos = player["position"]
+    for row in skater_rows:
+        pid = row["player_id"]
+        if pid not in known_ids:
+            continue
         try:
-            if pos == "G":
-                stats = fetch_goalie_game_log(pid, season)
-                save_goalie_stats(conn, pid, season, stats)
-                goalie_games += len(stats)
-            else:
-                stats = fetch_skater_game_log(pid, season)
-                save_skater_stats(conn, pid, season, stats)
-                skater_games += len(stats)
+            save_skater_stats(conn, pid, season, [row])
+            skater_games += 1
         except Exception as e:
-            logger.warning("Failed game log for player %d: %s", pid, e)
-        time_module.sleep(0.5)
+            logger.warning("Failed saving skater game log for %d: %s", pid, e)
+
+    # Bulk fetch goalie gamelogs from Stats API
+    goalie_rows = fetch_all_goalie_gamelogs_bulk(season)
+    goalie_games = 0
+    for row in goalie_rows:
+        pid = row["player_id"]
+        if pid not in known_ids:
+            continue
+        try:
+            save_goalie_stats(conn, pid, season, [row])
+            goalie_games += 1
+        except Exception as e:
+            logger.warning("Failed saving goalie game log for %d: %s", pid, e)
+
     return {"skater_games": skater_games, "goalie_games": goalie_games}
 
 
 def _run_seasontotals(conn, season):
-    cursor = conn.execute("SELECT id, position FROM players")
-    players = cursor.fetchall()
+    # Get known player IDs for filtering
+    known_ids = {
+        row["id"] for row in conn.execute("SELECT id FROM players").fetchall()
+    }
+
+    # Bulk fetch skater season totals from Stats API
+    skater_rows = fetch_all_skater_seasontotals_bulk(season)
     skaters_updated = 0
-    goalies_updated = 0
-    for player in players:
-        pid = player["id"]
-        pos = player["position"]
+    for row in skater_rows:
+        pid = row["player_id"]
+        if pid not in known_ids:
+            continue
         try:
-            landing = fetch_player_landing(pid)
-            featured = landing.get("featuredStats", {})
-            reg = featured.get("regularSeason", {})
-            sub = reg.get("subSeason", {})
-            if not sub:
-                continue
-            if pos == "G":
-                stats = [{
-                    "game_date": None,
-                    "toi": 0,
-                    "saves": int(sub.get("saves", 0)),
-                    "goals_against": int(sub.get("goalsAgainst", 0)),
-                    "shots_against": int(sub.get("shotsAgainst", 0)),
-                    "wins": int(sub.get("wins", 0)),
-                    "losses": int(sub.get("losses", 0)),
-                    "ot_losses": int(sub.get("otLosses", 0)),
-                    "shutouts": int(sub.get("shutouts", 0)),
-                }]
-                save_goalie_stats(conn, pid, season, stats, is_season_total=True)
-                goalies_updated += 1
-            else:
-                stats = [{
-                    "game_date": None,
-                    "toi": 0,
-                    "goals": int(sub.get("goals", 0)),
-                    "assists": int(sub.get("assists", 0)),
-                    "points": int(sub.get("points", 0)),
-                    "plus_minus": int(sub.get("plusMinus", 0)),
-                    "pim": int(sub.get("pim", 0)),
-                    "shots": int(sub.get("shots", 0)),
-                    "hits": 0,
-                    "blocks": 0,
-                    "powerplay_goals": int(sub.get("powerPlayGoals", 0)),
-                    "powerplay_points": int(sub.get("powerPlayPoints", 0)),
-                    "shorthanded_goals": int(sub.get("shorthandedGoals", 0)),
-                    "shorthanded_points": int(sub.get("shorthandedPoints", 0)),
-                }]
-                save_skater_stats(conn, pid, season, stats, is_season_total=True)
-                skaters_updated += 1
+            save_skater_stats(conn, pid, season, [row], is_season_total=True)
+            skaters_updated += 1
         except Exception as e:
-            logger.warning("Failed season totals for player %d: %s", pid, e)
-        time_module.sleep(0.5)
+            logger.warning("Failed saving skater season totals for %d: %s", pid, e)
+
+    # Bulk fetch goalie season totals from Stats API
+    goalie_rows = fetch_all_goalie_seasontotals_bulk(season)
+    goalies_updated = 0
+    for row in goalie_rows:
+        pid = row["player_id"]
+        if pid not in known_ids:
+            continue
+        try:
+            save_goalie_stats(conn, pid, season, [row], is_season_total=True)
+            goalies_updated += 1
+        except Exception as e:
+            logger.warning("Failed saving goalie season totals for %d: %s", pid, e)
+
     return {"skaters_updated": skaters_updated, "goalies_updated": goalies_updated}
-
-
-def _run_news(conn, season):
-    items = fetch_news()
-    count = save_news(conn, items)
-    return {"news_added": count}
 
 
 def _run_injuries(conn, season):
@@ -242,13 +249,27 @@ def _run_injuries(conn, season):
     return {"injuries_upserted": upserted, "unmatched": unmatched}
 
 
+def _run_lines(conn, season):
+    return fetch_all_lines(conn)
+
+
+def _run_backfill_news(conn, season):
+    return backfill_fantrax_news(conn)
+
+
+def _run_fantrax_league(conn, season):
+    return sync_fantrax_league(conn)
+
+
 _STEP_RUNNERS: dict[str, Any] = {
     "rosters": _run_rosters,
     "schedules": _run_schedules,
     "gamelogs": _run_gamelogs,
     "seasontotals": _run_seasontotals,
-    "news": _run_news,
     "injuries": _run_injuries,
+    "lines": _run_lines,
+    "backfill-news": _run_backfill_news,
+    "fantrax-league": _run_fantrax_league,
 }
 
 
@@ -272,23 +293,26 @@ def run_step(step: str, db_path: Path, season: str) -> StepResult:
     """
     if step not in _STEP_RUNNERS:
         raise ValueError(
-            f"Unknown step: {step!r}. Valid steps: {PIPELINE_STEPS}"
+            f"Unknown step: {step!r}. Valid steps: {list(_STEP_RUNNERS.keys())}"
         )
 
     init_db(db_path)
     conn = get_db(db_path)
     try:
+        logger.info("Step: %s", step)
         start = time_module.monotonic()
         try:
             detail = _STEP_RUNNERS[step](conn, season)
             duration = time_module.monotonic() - start
             _log_pipeline_step(conn, step, "ok")
+            logger.info("  OK (%.1fs)", duration)
             return StepResult(
                 name=step, status="ok", duration_s=duration, detail=detail,
             )
         except Exception as e:
             duration = time_module.monotonic() - start
             _log_pipeline_step(conn, step, "error")
+            logger.error("  FAILED: %s (%.1fs)", e, duration)
             return StepResult(
                 name=step, status="error", duration_s=duration,
                 detail={}, error=str(e),
@@ -479,19 +503,39 @@ _STEP_LABELS = {
     "schedules": ("games_saved", "games"),
     "gamelogs": (None, "game logs"),
     "seasontotals": (None, "players updated"),
-    "news": ("news_added", "articles"),
     "injuries": ("injuries_upserted", "injuries"),
+    "lines": ("players_saved", "line assignments"),
+    "backfill-news": ("new_inserted", "articles"),
+    "fantrax-league": ("teams_synced", "fantasy teams"),
 }
 
 
 def _format_detail(r: StepResult) -> str:
     d = r.detail
+    if r.name == "rosters":
+        s = f"{d.get('players_upserted', 0):,} players"
+        disc = d.get("discovered", 0)
+        if disc:
+            s += f" ({disc} discovered)"
+        return s
     if r.name == "gamelogs":
         total = d.get("skater_games", 0) + d.get("goalie_games", 0)
         return f"{total:,} game logs"
     if r.name == "seasontotals":
         total = d.get("skaters_updated", 0) + d.get("goalies_updated", 0)
         return f"{total:,} players updated"
+    if r.name == "lines":
+        return (
+            f"{d.get('players_saved', 0):,} line assignments "
+            f"({d.get('unmatched', 0)} unmatched, "
+            f"{d.get('teams_failed', 0)} teams failed)"
+        )
+    if r.name == "fantrax-league":
+        return (
+            f"{d.get('teams_synced', 0)} teams, "
+            f"{d.get('standings_synced', 0)} standings, "
+            f"{d.get('roster_slots_synced', 0)} roster slots"
+        )
     key, label = _STEP_LABELS.get(r.name, (None, "items"))
     if key:
         return f"{d.get(key, 0):,} {label}"
@@ -505,9 +549,9 @@ def _print_results(results: list[StepResult]) -> None:
         total += r.duration_s
         dur = _format_duration(r.duration_s)
         if r.status == "ok":
-            print(f"  \u2713 {r.name.capitalize()}: {_format_detail(r)} ({dur})")
+            print(f"  [OK] {r.name.capitalize()}: {_format_detail(r)} ({dur})")
         else:
-            print(f"  \u2717 {r.name.capitalize()}: FAILED - {r.error} ({dur})")
+            print(f"  [FAIL] {r.name.capitalize()}: FAILED - {r.error} ({dur})")
     print(f"  Total time: {_format_duration(total)}")
 
 
@@ -535,7 +579,7 @@ def _print_freshness(freshness: dict[str, Any]) -> None:
     for step, info in freshness.items():
         status = "STALE" if info["stale"] else "OK"
         ts = info["last_updated"] or "never"
-        marker = "\u26a0" if info["stale"] else "\u2713"
+        marker = "[!!]" if info["stale"] else "[OK]"
         print(f"  {marker} {step}: {ts} [{status}]")
 
 
@@ -552,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         0 on success, 1 on any step failure.
     """
-    valid_steps = PIPELINE_STEPS + list(STEP_ALIASES.keys())
+    valid_steps = list(_STEP_RUNNERS.keys()) + list(STEP_ALIASES.keys())
 
     parser = argparse.ArgumentParser(
         description="NHL daily data pipeline",

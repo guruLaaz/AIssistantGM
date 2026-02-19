@@ -1,11 +1,14 @@
-"""NHL Web API stats fetcher.
+"""NHL stats fetcher.
 
-Fetches player rosters, game logs, and team schedules from the NHL Web API.
+Fetches player rosters, game logs, and team schedules from the NHL APIs:
+- Web API (api-web.nhle.com/v1) — rosters, schedules
+- Stats API (api.nhle.com/stats/rest/en) — game logs, season totals (bulk)
 """
 
 from __future__ import annotations
 
 import argparse
+import calendar
 import logging
 import sqlite3
 import time
@@ -17,9 +20,10 @@ import requests
 from db.schema import PlayerDict, get_db, init_db, upsert_player
 from utils.time import toi_to_seconds
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pipeline.nhl_api")
 
 NHL_API_BASE = "https://api-web.nhle.com/v1"
+NHL_STATS_API_BASE = "https://api.nhle.com/stats/rest/en"
 
 ALL_TEAMS = [
     "ANA", "BOS", "BUF", "CGY", "CAR", "CHI", "COL", "CBJ", "DAL", "DET",
@@ -28,7 +32,400 @@ ALL_TEAMS = [
     "WSH", "WPG"
 ]
 
-DEFAULT_RATE_LIMIT = 0.5  # seconds between requests
+DEFAULT_RATE_LIMIT = 0.2  # seconds between requests
+
+_BACKOFF_MAX_RETRIES = 4
+_BACKOFF_BASE = 1  # seconds; doubles each retry: 1, 2, 4, 8
+
+
+def _api_get(
+    session: requests.Session,
+    url: str,
+    timeout: int = 30,
+) -> requests.Response:
+    """GET with adaptive retry on HTTP 429.
+
+    Retries up to ``_BACKOFF_MAX_RETRIES`` times with exponential backoff.
+    Respects the ``Retry-After`` header when present.  On success the caller
+    can assume the API is no longer rate-limiting.
+
+    Raises:
+        requests.HTTPError: On non-429 failures or after retries exhausted.
+    """
+    for attempt in range(_BACKOFF_MAX_RETRIES + 1):
+        response = session.get(url, timeout=timeout)
+        if response.status_code != 429:
+            response.raise_for_status()
+            return response
+
+        if attempt == _BACKOFF_MAX_RETRIES:
+            response.raise_for_status()  # raises HTTPError
+
+        retry_after = response.headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                wait = float(retry_after)
+            except ValueError:
+                wait = _BACKOFF_BASE * (2 ** attempt)
+        else:
+            wait = _BACKOFF_BASE * (2 ** attempt)
+
+        logger.warning(
+            "429 rate-limited on %s — retrying in %.1fs (attempt %d/%d)",
+            url, wait, attempt + 1, _BACKOFF_MAX_RETRIES,
+        )
+        time.sleep(wait)
+
+    # Unreachable, but keeps type checkers happy
+    raise requests.HTTPError("Max retries exhausted", response=response)  # pragma: no cover
+
+
+def _paginate_stats_api(
+    session: requests.Session,
+    url: str,
+    params: dict[str, str],
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    """Paginate through a Stats API endpoint, collecting all rows.
+
+    Args:
+        session: Requests session.
+        url: Full endpoint URL (without query params).
+        params: Base query parameters (cayenneExp, isAggregate, etc.).
+        page_size: Rows per page.
+
+    Returns:
+        List of all data dicts from all pages.
+    """
+    all_rows: list[dict[str, Any]] = []
+    start = 0
+
+    while True:
+        page_params = {**params, "start": str(start), "limit": str(page_size)}
+        query = "&".join(f"{k}={v}" for k, v in page_params.items())
+        full_url = f"{url}?{query}"
+
+        response = _api_get(session, full_url)
+        data = response.json()
+
+        rows = data.get("data", [])
+        all_rows.extend(rows)
+
+        logger.debug(
+            "Stats API page: start=%d, got=%d, total=%s",
+            start, len(rows), data.get("total"),
+        )
+
+        if len(rows) < page_size:
+            break
+
+        start += page_size
+        time.sleep(DEFAULT_RATE_LIMIT)
+
+    return all_rows
+
+
+# ---------------------------------------------------------------------------
+# Stats API bulk fetchers
+# ---------------------------------------------------------------------------
+
+
+def _season_month_ranges(season: str) -> list[tuple[str, str]]:
+    """Return (start_date, end_date) pairs covering each month of a season.
+
+    An NHL regular season runs Oct through Apr.  For season '20252026',
+    this returns 7 tuples covering 2025-10 through 2026-04.
+
+    Args:
+        season: 8-digit season string (e.g. '20252026').
+
+    Returns:
+        List of (start, end) ISO-date strings.
+    """
+    start_year = int(season[:4])
+    end_year = int(season[4:])
+
+    ranges: list[tuple[str, str]] = []
+
+    # Oct, Nov, Dec of start_year
+    for month in (10, 11, 12):
+        last_day = calendar.monthrange(start_year, month)[1]
+        ranges.append((
+            f"{start_year}-{month:02d}-01",
+            f"{start_year}-{month:02d}-{last_day:02d}",
+        ))
+
+    # Jan, Feb, Mar, Apr of end_year
+    for month in (1, 2, 3, 4):
+        last_day = calendar.monthrange(end_year, month)[1]
+        ranges.append((
+            f"{end_year}-{month:02d}-01",
+            f"{end_year}-{month:02d}-{last_day:02d}",
+        ))
+
+    return ranges
+
+
+def fetch_all_skater_gamelogs_bulk(
+    season: str,
+    session: requests.Session | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all skater per-game stats in bulk from the Stats API.
+
+    Fetches data month-by-month (Oct-Apr) to stay under the API's 10K-row
+    cap.  Each month yields ~6,300 rows (867 skaters * ~7 GP/month).
+    Paginates skater/summary and skater/realtime per month, then joins on
+    (playerId, gameId) to get complete per-game stats including hits
+    and blocks.
+
+    Args:
+        season: Season string (e.g. '20252026').
+        session: Optional requests session.
+
+    Returns:
+        List of stat dicts matching the format expected by save_skater_stats.
+    """
+    if session is None:
+        session = requests.Session()
+
+    month_ranges = _season_month_ranges(season)
+    all_summary_rows: list[dict[str, Any]] = []
+    all_realtime_rows: list[dict[str, Any]] = []
+
+    for start_date, end_date in month_ranges:
+        base_params = {
+            "isAggregate": "false",
+            "isGame": "true",
+            "cayenneExp": (
+                f'seasonId={season} and gameTypeId=2'
+                f' and gameDate>="{start_date}"'
+                f' and gameDate<="{end_date}"'
+            ),
+            "sort": '[{"property":"gameDate","direction":"DESC"}]',
+        }
+
+        logger.info(
+            "Fetching skater gamelogs (summary) for %s to %s...",
+            start_date, end_date,
+        )
+        summary_rows = _paginate_stats_api(
+            session, f"{NHL_STATS_API_BASE}/skater/summary", base_params,
+        )
+        logger.info("  Got %d summary rows", len(summary_rows))
+        all_summary_rows.extend(summary_rows)
+
+        logger.info(
+            "Fetching skater gamelogs (realtime) for %s to %s...",
+            start_date, end_date,
+        )
+        realtime_rows = _paginate_stats_api(
+            session, f"{NHL_STATS_API_BASE}/skater/realtime", base_params,
+        )
+        logger.info("  Got %d realtime rows", len(realtime_rows))
+        all_realtime_rows.extend(realtime_rows)
+
+    # Index realtime by (playerId, gameId) for fast lookup
+    realtime_index: dict[tuple[int, int], dict[str, Any]] = {}
+    for row in all_realtime_rows:
+        key = (row["playerId"], row["gameId"])
+        realtime_index[key] = row
+
+    # Join and convert to internal format
+    stats: list[dict[str, Any]] = []
+    for row in all_summary_rows:
+        pid = row["playerId"]
+        gid = row["gameId"]
+        rt = realtime_index.get((pid, gid), {})
+
+        stats.append({
+            "player_id": pid,
+            "game_date": row.get("gameDate"),
+            "toi": int(row.get("timeOnIcePerGame", 0)),
+            "pp_toi": 0,
+            "goals": int(row.get("goals", 0)),
+            "assists": int(row.get("assists", 0)),
+            "points": int(row.get("points", 0)),
+            "plus_minus": int(row.get("plusMinus", 0)),
+            "pim": int(row.get("penaltyMinutes", 0)),
+            "shots": int(row.get("shots", 0)),
+            "hits": int(rt.get("hits", 0)),
+            "blocks": int(rt.get("blockedShots", 0)),
+            "powerplay_goals": int(row.get("ppGoals", 0)),
+            "powerplay_points": int(row.get("ppPoints", 0)),
+            "shorthanded_goals": int(row.get("shGoals", 0)),
+            "shorthanded_points": int(row.get("shPoints", 0)),
+        })
+
+    logger.info("Combined %d skater game log rows", len(stats))
+    return stats
+
+
+def fetch_all_skater_seasontotals_bulk(
+    season: str,
+    session: requests.Session | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all skater season totals in bulk from the Stats API.
+
+    Args:
+        season: Season string (e.g. '20252026').
+        session: Optional requests session.
+
+    Returns:
+        List of stat dicts with player_id and season aggregate stats.
+    """
+    if session is None:
+        session = requests.Session()
+
+    base_params = {
+        "isAggregate": "true",
+        "isGame": "false",
+        "cayenneExp": f"seasonId={season} and gameTypeId=2",
+        "sort": '[{"property":"points","direction":"DESC"}]',
+    }
+
+    logger.info("Fetching all skater season totals (summary) from Stats API...")
+    summary_rows = _paginate_stats_api(
+        session, f"{NHL_STATS_API_BASE}/skater/summary", base_params,
+    )
+    logger.info("  Got %d summary rows", len(summary_rows))
+
+    # Realtime endpoint doesn't have "points" — sort by "hits" instead
+    realtime_params = {
+        **base_params,
+        "sort": '[{"property":"hits","direction":"DESC"}]',
+    }
+
+    logger.info("Fetching all skater season totals (realtime) from Stats API...")
+    realtime_rows = _paginate_stats_api(
+        session, f"{NHL_STATS_API_BASE}/skater/realtime", realtime_params,
+    )
+    logger.info("  Got %d realtime rows", len(realtime_rows))
+
+    # Index realtime by playerId
+    realtime_index: dict[int, dict[str, Any]] = {}
+    for row in realtime_rows:
+        realtime_index[row["playerId"]] = row
+
+    stats: list[dict[str, Any]] = []
+    for row in summary_rows:
+        pid = row["playerId"]
+        rt = realtime_index.get(pid, {})
+
+        stats.append({
+            "player_id": pid,
+            "game_date": None,
+            "toi": int(row.get("timeOnIcePerGame", 0)) * int(row.get("gamesPlayed", 0)),
+            "pp_toi": 0,
+            "goals": int(row.get("goals", 0)),
+            "assists": int(row.get("assists", 0)),
+            "points": int(row.get("points", 0)),
+            "plus_minus": int(row.get("plusMinus", 0)),
+            "pim": int(row.get("penaltyMinutes", 0)),
+            "shots": int(row.get("shots", 0)),
+            "hits": int(rt.get("hits", 0)),
+            "blocks": int(rt.get("blockedShots", 0)),
+            "powerplay_goals": int(row.get("ppGoals", 0)),
+            "powerplay_points": int(row.get("ppPoints", 0)),
+            "shorthanded_goals": int(row.get("shGoals", 0)),
+            "shorthanded_points": int(row.get("shPoints", 0)),
+        })
+
+    logger.info("Combined %d skater season total rows", len(stats))
+    return stats
+
+
+def fetch_all_goalie_gamelogs_bulk(
+    season: str,
+    session: requests.Session | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all goalie per-game stats in bulk from the Stats API.
+
+    Args:
+        season: Season string (e.g. '20252026').
+        session: Optional requests session.
+
+    Returns:
+        List of stat dicts matching the format expected by save_goalie_stats.
+    """
+    if session is None:
+        session = requests.Session()
+
+    base_params = {
+        "isAggregate": "false",
+        "isGame": "true",
+        "cayenneExp": f"seasonId={season} and gameTypeId=2",
+        "sort": '[{"property":"gameDate","direction":"DESC"}]',
+    }
+
+    logger.info("Fetching all goalie gamelogs from Stats API...")
+    rows = _paginate_stats_api(
+        session, f"{NHL_STATS_API_BASE}/goalie/summary", base_params,
+    )
+    logger.info("  Got %d goalie game log rows", len(rows))
+
+    stats: list[dict[str, Any]] = []
+    for row in rows:
+        stats.append({
+            "player_id": row["playerId"],
+            "game_date": row.get("gameDate"),
+            "toi": int(row.get("timeOnIce", 0)),
+            "saves": int(row.get("saves", 0)),
+            "goals_against": int(row.get("goalsAgainst", 0)),
+            "shots_against": int(row.get("shotsAgainst", 0)),
+            "wins": int(row.get("wins", 0)),
+            "losses": int(row.get("losses", 0)),
+            "ot_losses": int(row.get("otLosses", 0)),
+            "shutouts": int(row.get("shutouts", 0)),
+        })
+
+    return stats
+
+
+def fetch_all_goalie_seasontotals_bulk(
+    season: str,
+    session: requests.Session | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all goalie season totals in bulk from the Stats API.
+
+    Args:
+        season: Season string (e.g. '20252026').
+        session: Optional requests session.
+
+    Returns:
+        List of stat dicts with player_id and season aggregate stats.
+    """
+    if session is None:
+        session = requests.Session()
+
+    base_params = {
+        "isAggregate": "true",
+        "isGame": "false",
+        "cayenneExp": f"seasonId={season} and gameTypeId=2",
+        "sort": '[{"property":"wins","direction":"DESC"}]',
+    }
+
+    logger.info("Fetching all goalie season totals from Stats API...")
+    rows = _paginate_stats_api(
+        session, f"{NHL_STATS_API_BASE}/goalie/summary", base_params,
+    )
+    logger.info("  Got %d goalie season total rows", len(rows))
+
+    stats: list[dict[str, Any]] = []
+    for row in rows:
+        stats.append({
+            "player_id": row["playerId"],
+            "game_date": None,
+            "toi": int(row.get("timeOnIce", 0)),
+            "saves": int(row.get("saves", 0)),
+            "goals_against": int(row.get("goalsAgainst", 0)),
+            "shots_against": int(row.get("shotsAgainst", 0)),
+            "wins": int(row.get("wins", 0)),
+            "losses": int(row.get("losses", 0)),
+            "ot_losses": int(row.get("otLosses", 0)),
+            "shutouts": int(row.get("shutouts", 0)),
+        })
+
+    return stats
 
 
 def fetch_roster(
@@ -52,9 +449,9 @@ def fetch_roster(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching roster for %s", team_abbrev)
     url = f"{NHL_API_BASE}/roster/{team_abbrev}/current"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     data = response.json()
     players: list[PlayerDict] = []
@@ -119,7 +516,89 @@ def fetch_all_rosters(
         if i < len(ALL_TEAMS) - 1 and rate_limit > 0:
             time.sleep(rate_limit)
 
+    logger.info("Fetched rosters: %d players (%d teams failed)", total_count, len(failed_teams))
     return total_count, failed_teams
+
+
+def discover_missing_players(
+    conn: sqlite3.Connection,
+    season: str,
+    session: requests.Session | None = None,
+    rate_limit: float = DEFAULT_RATE_LIMIT,
+) -> int:
+    """Discover players who played this season but aren't in the players table.
+
+    Queries the Stats API aggregate endpoints to find all player IDs, then
+    fetches details for any missing ones from the player landing page.
+
+    Args:
+        conn: Database connection.
+        season: Season string (e.g. '20252026').
+        session: Optional requests session.
+        rate_limit: Seconds to sleep between individual lookups.
+
+    Returns:
+        Number of newly discovered players.
+    """
+    if session is None:
+        session = requests.Session()
+
+    known_ids = {
+        row["id"] for row in conn.execute("SELECT id FROM players").fetchall()
+    }
+
+    # Fetch all player IDs from Stats API aggregate endpoints
+    skater_rows = _paginate_stats_api(
+        session, f"{NHL_STATS_API_BASE}/skater/summary", {
+            "isAggregate": "true",
+            "isGame": "false",
+            "cayenneExp": f"seasonId={season} and gameTypeId=2",
+            "sort": '[{"property":"points","direction":"DESC"}]',
+        },
+    )
+    goalie_rows = _paginate_stats_api(
+        session, f"{NHL_STATS_API_BASE}/goalie/summary", {
+            "isAggregate": "true",
+            "isGame": "false",
+            "cayenneExp": f"seasonId={season} and gameTypeId=2",
+            "sort": '[{"property":"wins","direction":"DESC"}]',
+        },
+    )
+
+    all_ids = {r["playerId"] for r in skater_rows} | {r["playerId"] for r in goalie_rows}
+    missing = all_ids - known_ids
+
+    if not missing:
+        logger.info("No missing players to discover")
+        return 0
+
+    logger.info("Discovering %d players not on current rosters...", len(missing))
+
+    discovered = 0
+    for i, pid in enumerate(sorted(missing)):
+        try:
+            url = f"{NHL_API_BASE}/player/{pid}/landing"
+            data = _api_get(session, url).json()
+            first = data.get("firstName", {}).get("default", "")
+            last = data.get("lastName", {}).get("default", "")
+            upsert_player(conn, {
+                "id": pid,
+                "full_name": f"{first} {last}".strip(),
+                "first_name": first,
+                "last_name": last,
+                "team_abbrev": data.get("currentTeamAbbrev", ""),
+                "position": data.get("position", ""),
+            })
+            discovered += 1
+        except Exception as e:
+            logger.warning("Failed to discover player %d: %s", pid, e)
+
+        if i < len(missing) - 1 and rate_limit > 0:
+            time.sleep(rate_limit)
+
+    conn.commit()
+    logger.info("Discovered %d new players", discovered)
+    return discovered
 
 
 def fetch_skater_game_log(
@@ -141,9 +620,9 @@ def fetch_skater_game_log(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching skater game log for player %d", player_id)
     url = f"{NHL_API_BASE}/player/{player_id}/game-log/{season}/2"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     data = response.json()
     game_log = data.get("gameLog", [])
@@ -153,6 +632,7 @@ def fetch_skater_game_log(
         stats.append({
             "game_date": game.get("gameDate"),
             "toi": toi_to_seconds(game.get("toi")),
+            "pp_toi": toi_to_seconds(game.get("powerPlayToi")),
             "goals": int(game.get("goals", 0)),
             "assists": int(game.get("assists", 0)),
             "points": int(game.get("points", 0)),
@@ -189,9 +669,9 @@ def fetch_goalie_game_log(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching goalie game log for player %d", player_id)
     url = f"{NHL_API_BASE}/player/{player_id}/game-log/{season}/2"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     data = response.json()
     game_log = data.get("gameLog", [])
@@ -238,9 +718,9 @@ def fetch_player_landing(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching player landing for %d", player_id)
     url = f"{NHL_API_BASE}/player/{player_id}/landing"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     return response.json()
 
@@ -263,9 +743,9 @@ def fetch_team_schedule(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching schedule for %s", team_abbrev)
     url = f"{NHL_API_BASE}/club-schedule-season/{team_abbrev}/{season}"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     data = response.json()
     games_data = data.get("games", [])
@@ -327,11 +807,11 @@ def save_skater_stats(
         conn.execute(
             """
             INSERT OR REPLACE INTO skater_stats (
-                player_id, game_date, season, is_season_total, toi,
+                player_id, game_date, season, is_season_total, toi, pp_toi,
                 goals, assists, points, plus_minus, pim, shots,
                 hits, blocks, powerplay_goals, powerplay_points,
                 shorthanded_goals, shorthanded_points
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 player_id,
@@ -339,6 +819,7 @@ def save_skater_stats(
                 season,
                 1 if is_season_total else 0,
                 stat.get("toi", 0),
+                stat.get("pp_toi", 0),
                 stat.get("goals", 0),
                 stat.get("assists", 0),
                 stat.get("points", 0),
