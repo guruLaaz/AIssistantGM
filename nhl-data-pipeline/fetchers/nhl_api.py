@@ -17,7 +17,7 @@ import requests
 from db.schema import PlayerDict, get_db, init_db, upsert_player
 from utils.time import toi_to_seconds
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pipeline.nhl_api")
 
 NHL_API_BASE = "https://api-web.nhle.com/v1"
 
@@ -28,7 +28,52 @@ ALL_TEAMS = [
     "WSH", "WPG"
 ]
 
-DEFAULT_RATE_LIMIT = 0.5  # seconds between requests
+DEFAULT_RATE_LIMIT = 0.1  # seconds between requests
+
+_BACKOFF_MAX_RETRIES = 4
+_BACKOFF_BASE = 1  # seconds; doubles each retry: 1, 2, 4, 8
+
+
+def _api_get(
+    session: requests.Session,
+    url: str,
+    timeout: int = 30,
+) -> requests.Response:
+    """GET with adaptive retry on HTTP 429.
+
+    Retries up to ``_BACKOFF_MAX_RETRIES`` times with exponential backoff.
+    Respects the ``Retry-After`` header when present.  On success the caller
+    can assume the API is no longer rate-limiting.
+
+    Raises:
+        requests.HTTPError: On non-429 failures or after retries exhausted.
+    """
+    for attempt in range(_BACKOFF_MAX_RETRIES + 1):
+        response = session.get(url, timeout=timeout)
+        if response.status_code != 429:
+            response.raise_for_status()
+            return response
+
+        if attempt == _BACKOFF_MAX_RETRIES:
+            response.raise_for_status()  # raises HTTPError
+
+        retry_after = response.headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                wait = float(retry_after)
+            except ValueError:
+                wait = _BACKOFF_BASE * (2 ** attempt)
+        else:
+            wait = _BACKOFF_BASE * (2 ** attempt)
+
+        logger.warning(
+            "429 rate-limited on %s — retrying in %.1fs (attempt %d/%d)",
+            url, wait, attempt + 1, _BACKOFF_MAX_RETRIES,
+        )
+        time.sleep(wait)
+
+    # Unreachable, but keeps type checkers happy
+    raise requests.HTTPError("Max retries exhausted", response=response)  # pragma: no cover
 
 
 def fetch_roster(
@@ -52,9 +97,9 @@ def fetch_roster(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching roster for %s", team_abbrev)
     url = f"{NHL_API_BASE}/roster/{team_abbrev}/current"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     data = response.json()
     players: list[PlayerDict] = []
@@ -119,6 +164,7 @@ def fetch_all_rosters(
         if i < len(ALL_TEAMS) - 1 and rate_limit > 0:
             time.sleep(rate_limit)
 
+    logger.info("Fetched rosters: %d players (%d teams failed)", total_count, len(failed_teams))
     return total_count, failed_teams
 
 
@@ -141,9 +187,9 @@ def fetch_skater_game_log(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching skater game log for player %d", player_id)
     url = f"{NHL_API_BASE}/player/{player_id}/game-log/{season}/2"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     data = response.json()
     game_log = data.get("gameLog", [])
@@ -153,6 +199,7 @@ def fetch_skater_game_log(
         stats.append({
             "game_date": game.get("gameDate"),
             "toi": toi_to_seconds(game.get("toi")),
+            "pp_toi": toi_to_seconds(game.get("powerPlayToi")),
             "goals": int(game.get("goals", 0)),
             "assists": int(game.get("assists", 0)),
             "points": int(game.get("points", 0)),
@@ -189,9 +236,9 @@ def fetch_goalie_game_log(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching goalie game log for player %d", player_id)
     url = f"{NHL_API_BASE}/player/{player_id}/game-log/{season}/2"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     data = response.json()
     game_log = data.get("gameLog", [])
@@ -238,9 +285,9 @@ def fetch_player_landing(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching player landing for %d", player_id)
     url = f"{NHL_API_BASE}/player/{player_id}/landing"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     return response.json()
 
@@ -263,9 +310,9 @@ def fetch_team_schedule(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching schedule for %s", team_abbrev)
     url = f"{NHL_API_BASE}/club-schedule-season/{team_abbrev}/{season}"
-    response = session.get(url, timeout=30)
-    response.raise_for_status()
+    response = _api_get(session, url)
 
     data = response.json()
     games_data = data.get("games", [])
@@ -327,11 +374,11 @@ def save_skater_stats(
         conn.execute(
             """
             INSERT OR REPLACE INTO skater_stats (
-                player_id, game_date, season, is_season_total, toi,
+                player_id, game_date, season, is_season_total, toi, pp_toi,
                 goals, assists, points, plus_minus, pim, shots,
                 hits, blocks, powerplay_goals, powerplay_points,
                 shorthanded_goals, shorthanded_points
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 player_id,
@@ -339,6 +386,7 @@ def save_skater_stats(
                 season,
                 1 if is_season_total else 0,
                 stat.get("toi", 0),
+                stat.get("pp_toi", 0),
                 stat.get("goals", 0),
                 stat.get("assists", 0),
                 stat.get("points", 0),

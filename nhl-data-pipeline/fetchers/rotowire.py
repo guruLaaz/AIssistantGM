@@ -1,7 +1,7 @@
-"""Rotowire news and injuries fetcher.
+"""Rotowire injuries fetcher.
 
-Fetches player news (RSS), injury reports (JSON), and Rotowire player IDs
-from the Rotowire website.
+Fetches injury reports (JSON), Rotowire player IDs, and provides news
+storage utilities.
 """
 
 from __future__ import annotations
@@ -12,17 +12,22 @@ import re
 import sqlite3
 import time
 import unicodedata
-import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
 
+try:
+    from playwright.sync_api import sync_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+
 from db.schema import get_db, init_db, upsert_player
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pipeline.rotowire")
 
-RSS_URL = "https://www.rotowire.com/rss/news.php?sport=nhl"
 INJURY_URL = "https://www.rotowire.com/hockey/tables/injury-report.php?team=ALL&pos=ALL"
 SEARCH_URL = "https://www.rotowire.com/frontend/ajax/search-players.php"
 
@@ -42,15 +47,34 @@ def _strip_accents(text: str) -> str:
     return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
-def match_player_name(conn: sqlite3.Connection, name: str | None) -> int | None:
+def _pick_by_team(
+    rows: list[sqlite3.Row], team_abbrev: str | None
+) -> int:
+    """Return the best player id from *rows*, using *team_abbrev* to break ties."""
+    if len(rows) == 1 or team_abbrev is None:
+        return rows[0]["id"]
+    for r in rows:
+        if r["team_abbrev"] == team_abbrev:
+            return r["id"]
+    return rows[0]["id"]
+
+
+def match_player_name(
+    conn: sqlite3.Connection,
+    name: str | None,
+    team_abbrev: str | None = None,
+) -> int | None:
     """Match a Rotowire player name to a player_id in our players table.
 
     Tries in order: exact match, case-insensitive, accent-normalized,
-    first-initial + last-name pattern.
+    first-initial + last-name pattern.  When multiple players share the
+    same name, *team_abbrev* is used to disambiguate.
 
     Args:
         conn: Database connection.
         name: Player full name from Rotowire.
+        team_abbrev: Optional team abbreviation (e.g. "CAR") for
+            disambiguation when multiple players share a name.
 
     Returns:
         player_id or None if no match found.
@@ -64,92 +88,52 @@ def match_player_name(conn: sqlite3.Connection, name: str | None) -> int | None:
 
     # 1. Exact match
     cursor = conn.execute(
-        "SELECT id FROM players WHERE full_name = ?", (name,)
+        "SELECT id, team_abbrev FROM players WHERE full_name = ?", (name,)
     )
-    row = cursor.fetchone()
-    if row:
-        return row["id"]
+    rows = cursor.fetchall()
+    if rows:
+        return _pick_by_team(rows, team_abbrev)
 
     # 2. Case-insensitive match
     cursor = conn.execute(
-        "SELECT id FROM players WHERE LOWER(full_name) = LOWER(?)", (name,)
+        "SELECT id, team_abbrev FROM players WHERE LOWER(full_name) = LOWER(?)",
+        (name,),
     )
-    row = cursor.fetchone()
-    if row:
-        return row["id"]
+    rows = cursor.fetchall()
+    if rows:
+        return _pick_by_team(rows, team_abbrev)
 
     # 3. Accent-normalized match
     normalized_name = _strip_accents(name).lower()
-    cursor = conn.execute("SELECT id, full_name FROM players")
-    for row in cursor.fetchall():
-        if row["full_name"] and _strip_accents(row["full_name"]).lower() == normalized_name:
-            return row["id"]
+    cursor = conn.execute("SELECT id, full_name, team_abbrev FROM players")
+    matches = [
+        row
+        for row in cursor.fetchall()
+        if row["full_name"]
+        and _strip_accents(row["full_name"]).lower() == normalized_name
+    ]
+    if matches:
+        return _pick_by_team(matches, team_abbrev)
 
     # 4. First initial + last name (e.g. "C. McDavid")
-    match = re.match(r"^([A-Za-z])\.\s*(.+)$", name)
-    if match:
-        initial = match.group(1).upper()
-        last_name = match.group(2).strip()
+    m = re.match(r"^([A-Za-z])\.\s*(.+)$", name)
+    if m:
+        initial = m.group(1).upper()
+        last_name = m.group(2).strip()
         cursor = conn.execute(
-            "SELECT id, first_name FROM players WHERE LOWER(last_name) = LOWER(?)",
+            "SELECT id, first_name, team_abbrev FROM players "
+            "WHERE LOWER(last_name) = LOWER(?)",
             (last_name,),
         )
-        for row in cursor.fetchall():
-            if row["first_name"] and row["first_name"][0].upper() == initial:
-                return row["id"]
+        matches = [
+            row
+            for row in cursor.fetchall()
+            if row["first_name"] and row["first_name"][0].upper() == initial
+        ]
+        if matches:
+            return _pick_by_team(matches, team_abbrev)
 
     return None
-
-
-def fetch_news(
-    session: requests.Session | None = None,
-) -> list[dict[str, Any]]:
-    """Fetch the NHL RSS news feed from Rotowire.
-
-    Args:
-        session: Optional requests session for connection pooling.
-
-    Returns:
-        List of dicts with keys: rotowire_news_id, player_name, headline,
-        content, published_at.
-
-    Raises:
-        requests.HTTPError: On non-200 response.
-        requests.ConnectionError: On network failure.
-    """
-    if session is None:
-        session = requests.Session()
-
-    response = session.get(RSS_URL, timeout=30)
-    response.raise_for_status()
-
-    try:
-        root = ET.fromstring(response.text)
-    except ET.ParseError:
-        logger.warning("Failed to parse RSS XML")
-        return []
-
-    items: list[dict[str, Any]] = []
-    for item in root.iter("item"):
-        guid = item.findtext("guid", "")
-        title = item.findtext("title", "")
-        description = item.findtext("description", "")
-        pub_date = item.findtext("pubDate", "")
-
-        # Extract player name from title (text before the colon)
-        player_name = ""
-        if ":" in title:
-            player_name = title.split(":", 1)[0].strip()
-
-        items.append({
-            "rotowire_news_id": guid,
-            "player_name": player_name,
-            "headline": title,
-            "content": description.strip(),
-            "published_at": pub_date,
-        })
-
-    return items
 
 
 def save_news(
@@ -189,6 +173,42 @@ def save_news(
     return count
 
 
+def backfill_news_player_ids(conn: sqlite3.Connection) -> int:
+    """Re-match unlinked news items against the current players table.
+
+    Finds all player_news rows with player_id IS NULL, extracts the player
+    name from the headline (text before the colon), and attempts to match
+    using match_player_name().
+
+    Args:
+        conn: Database connection.
+
+    Returns:
+        Count of news items that were successfully matched.
+    """
+    cursor = conn.execute(
+        "SELECT id, headline FROM player_news WHERE player_id IS NULL"
+    )
+    unmatched = cursor.fetchall()
+
+    matched = 0
+    for row in unmatched:
+        headline = row["headline"] or ""
+        if ":" not in headline:
+            continue
+        player_name = headline.split(":", 1)[0].strip()
+        player_id = match_player_name(conn, player_name)
+        if player_id is not None:
+            conn.execute(
+                "UPDATE player_news SET player_id = ? WHERE id = ?",
+                (player_id, row["id"]),
+            )
+            matched += 1
+    conn.commit()
+    logger.info("Backfill matched %d news items", matched)
+    return matched
+
+
 def fetch_injuries(
     session: requests.Session | None = None,
 ) -> list[dict[str, Any]]:
@@ -207,10 +227,13 @@ def fetch_injuries(
     if session is None:
         session = requests.Session()
 
+    logger.debug("Fetching injuries from Rotowire")
     response = session.get(INJURY_URL, headers=BROWSER_HEADERS, timeout=30)
     response.raise_for_status()
 
-    return response.json()
+    data = response.json()
+    logger.info("Fetched %d injury records from Rotowire", len(data))
+    return data
 
 
 def save_injuries(
@@ -240,7 +263,9 @@ def save_injuries(
 
     for injury in injuries:
         player_name = injury.get("player", "")
-        player_id = match_player_name(conn, player_name)
+        player_id = match_player_name(
+            conn, player_name, team_abbrev=injury.get("team")
+        )
 
         if player_id is not None:
             # Update rotowire_id on matched player
@@ -362,27 +387,19 @@ def sync_rotowire(
     conn: sqlite3.Connection,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
-    """Run news and injury fetchers. Continues if one step fails.
+    """Run injury fetcher.
 
     Args:
         conn: Database connection.
         session: Optional requests session.
 
     Returns:
-        Summary dict with news_added, injuries_upserted, injuries_unmatched.
+        Summary dict with injuries_upserted, injuries_unmatched.
     """
     result: dict[str, Any] = {
-        "news_added": 0,
         "injuries_upserted": 0,
         "injuries_unmatched": 0,
     }
-
-    # News
-    try:
-        news_items = fetch_news(session)
-        result["news_added"] = save_news(conn, news_items)
-    except Exception as e:
-        logger.warning("News fetch/save failed: %s", e)
 
     # Injuries
     try:
@@ -399,13 +416,10 @@ def sync_rotowire(
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Rotowire news and injuries fetcher"
+        description="Rotowire injuries fetcher"
     )
     parser.add_argument(
-        "--all", action="store_true", help="Fetch news and injuries"
-    )
-    parser.add_argument(
-        "--news", action="store_true", help="Fetch RSS news only"
+        "--all", action="store_true", help="Fetch injuries"
     )
     parser.add_argument(
         "--injuries", action="store_true", help="Fetch injury report only"
@@ -430,11 +444,6 @@ def main() -> None:
     if args.all:
         result = sync_rotowire(conn, session)
         print(f"Sync complete: {result}")
-
-    elif args.news:
-        items = fetch_news(session)
-        count = save_news(conn, items)
-        print(f"Added {count} news items")
 
     elif args.injuries:
         injuries = fetch_injuries(session)
