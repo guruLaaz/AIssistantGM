@@ -19,7 +19,6 @@ from db.schema import get_db, init_db
 from fetchers.nhl_api import (
     ALL_TEAMS,
     DEFAULT_RATE_LIMIT,
-    calculate_games_benched,
     fetch_all_goalie_gamelogs_bulk,
     fetch_all_goalie_seasontotals_bulk,
     discover_missing_players,
@@ -34,6 +33,7 @@ from fetchers.nhl_api import (
     save_skater_stats,
     save_team_schedule,
 )
+from assistant.scoring import calc_skater_fpts
 from fetchers.fantrax_league import sync_fantrax_league
 from fetchers.fantrax_news import backfill_fantrax_news
 from fetchers.dailyfaceoff import fetch_all_lines
@@ -393,62 +393,60 @@ def generate_summary(db_path: Path, season: str) -> dict[str, Any]:
             "SELECT COUNT(*) as cnt FROM players WHERE position = 'G'"
         ).fetchone()["cnt"]
 
-        # Top 5 scorers from season totals
+        # Top 5 fantasy point producers (skaters)
         rows = conn.execute(
             """
-            SELECT p.full_name, p.team_abbrev, s.goals, s.assists, s.points
+            SELECT p.full_name, p.team_abbrev, p.position,
+                   s.goals, s.assists, s.points, s.hits, s.blocks,
+                   (SELECT COUNT(*) FROM skater_stats g
+                    WHERE g.player_id = s.player_id
+                      AND g.season = s.season
+                      AND g.is_season_total = 0) as gp
             FROM skater_stats s
             JOIN players p ON p.id = s.player_id
             WHERE s.season = ? AND s.is_season_total = 1
-            ORDER BY s.points DESC, s.goals DESC
-            LIMIT 5
             """,
             (season,),
         ).fetchall()
-        top_scorers = [
-            {
+        scored = []
+        for r in rows:
+            fpts = calc_skater_fpts(
+                goals=r["goals"] or 0, assists=r["assists"] or 0,
+                blocks=r["blocks"] or 0, hits=r["hits"] or 0,
+            )
+            gp = r["gp"] or 0
+            scored.append({
                 "name": r["full_name"],
                 "team": r["team_abbrev"],
+                "position": r["position"],
                 "goals": r["goals"],
                 "assists": r["assists"],
-                "points": r["points"],
-            }
-            for r in rows
-        ]
+                "hits": r["hits"],
+                "blocks": r["blocks"],
+                "fpts": round(fpts, 1),
+                "fpg": round(fpts / gp, 2) if gp else 0.0,
+                "gp": gp,
+            })
+        scored.sort(key=lambda x: x["fpts"], reverse=True)
+        top_fantasy = scored[:5]
 
         # Injury count
         injury_count = conn.execute(
             "SELECT COUNT(*) as cnt FROM player_injuries"
         ).fetchone()["cnt"]
 
-        # Games benched
-        all_players = conn.execute(
-            "SELECT id, full_name, team_abbrev FROM players"
-        ).fetchall()
-        games_benched_list: list[dict[str, Any]] = []
-        for p in all_players:
-            benched = calculate_games_benched(conn, p["id"], season)
-            if benched is not None and benched > 0:
-                team_gp = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM team_games "
-                    "WHERE team = ? AND season = ?",
-                    (p["team_abbrev"], season),
-                ).fetchone()["cnt"]
-                games_benched_list.append({
-                    "name": p["full_name"],
-                    "team": p["team_abbrev"],
-                    "games_benched": benched,
-                    "team_gp": team_gp,
-                })
-
-        # News count
-        news_count = conn.execute(
-            "SELECT COUNT(*) as cnt FROM player_news"
-        ).fetchone()["cnt"]
+        # News count and date range
+        news_row = conn.execute(
+            "SELECT COUNT(*) as cnt, MIN(published_at) as oldest, "
+            "MAX(published_at) as newest FROM player_news"
+        ).fetchone()
+        news_count = news_row["cnt"]
+        news_oldest = (news_row["oldest"] or "")[:10]
+        news_newest = (news_row["newest"] or "")[:10]
 
         # Fantasy standings
         standings_rows = conn.execute(
-            "SELECT ft.name, fs.rank, fs.wins, fs.losses, fs.points, "
+            "SELECT ft.name, fs.rank, "
             "fs.points_for, fs.fantasy_points_per_game "
             "FROM fantasy_standings fs "
             "JOIN fantasy_teams ft ON fs.team_id = ft.id "
@@ -458,29 +456,31 @@ def generate_summary(db_path: Path, season: str) -> dict[str, Any]:
             {
                 "name": r["name"],
                 "rank": r["rank"],
-                "wins": r["wins"],
-                "losses": r["losses"],
-                "points": r["points"],
                 "points_for": r["points_for"],
                 "fpg": r["fantasy_points_per_game"],
             }
             for r in standings_rows
         ]
 
-        # Fantasy roster count
-        roster_count = conn.execute(
-            "SELECT COUNT(DISTINCT team_id) as cnt FROM fantasy_roster_slots"
-        ).fetchone()["cnt"]
+        # Data freshness (inline, no separate call)
+        freshness: dict[str, str | None] = {}
+        for step in PIPELINE_STEPS:
+            row = conn.execute(
+                "SELECT last_run_at FROM pipeline_log WHERE step = ?",
+                (step,),
+            ).fetchone()
+            freshness[step] = row["last_run_at"] if row and row["last_run_at"] else None
 
         return {
             "skater_count": skater_count,
             "goalie_count": goalie_count,
-            "top_scorers": top_scorers,
+            "top_fantasy": top_fantasy,
             "injury_count": injury_count,
-            "games_benched": games_benched_list,
             "news_count": news_count,
+            "news_oldest": news_oldest,
+            "news_newest": news_newest,
             "standings": standings,
-            "roster_count": roster_count,
+            "freshness": freshness,
         }
     finally:
         conn.close()
@@ -605,29 +605,30 @@ def _print_summary(summary: dict[str, Any]) -> None:
     _safe_print(f"  Players: {summary['skater_count']} skaters, "
                 f"{summary['goalie_count']} goalies")
     _safe_print(f"  Injuries: {summary['injury_count']}")
+    oldest = summary.get("news_oldest", "")
+    newest = summary.get("news_newest", "")
+    date_range = f" ({oldest} to {newest})" if oldest and newest else ""
+    _safe_print(f"  News: {summary.get('news_count', 0)} articles{date_range}")
 
-    if summary["top_scorers"]:
-        _safe_print("\n  Top 5 Scorers:")
-        for i, s in enumerate(summary["top_scorers"], 1):
-            _safe_print(f"    {i}. {s['name']} ({s['team']}) - "
-                        f"{s['goals']}G {s['assists']}A {s['points']}P")
-
-    _safe_print(f"  News articles: {summary.get('news_count', 0)}")
+    if summary.get("top_fantasy"):
+        _safe_print("\n  Top 5 Fantasy Producers (Skaters):")
+        for i, s in enumerate(summary["top_fantasy"], 1):
+            _safe_print(f"    {i}. {s['name']} ({s['team']}, {s['position']}) - "
+                        f"{s['fpts']} FP ({s['fpg']} FP/G) | "
+                        f"{s['goals']}G {s['assists']}A {s['hits']}H {s['blocks']}B")
 
     if summary.get("standings"):
-        _safe_print(f"\n  Fantasy Standings ({summary.get('roster_count', 0)} teams rostered):")
+        _safe_print(f"\n  Fantasy Standings ({len(summary['standings'])} teams):")
         for s in summary["standings"]:
             _safe_print(f"    {s['rank']:>2}. {s['name']:<25} "
-                        f"{s['wins']}W-{s['losses']}L  "
-                        f"{s['points']:.0f}pts  "
-                        f"{s['points_for']:.1f}PF  "
+                        f"{s['points_for']:>7.1f} PF  "
                         f"{s['fpg']:.1f} FP/G")
 
-    if summary["games_benched"]:
-        _safe_print(f"\n  Players with games benched: {len(summary['games_benched'])}")
-        for b in summary["games_benched"][:10]:
-            _safe_print(f"    {b['name']} ({b['team']}): "
-                        f"{b['games_benched']} benched / {b['team_gp']} team GP")
+    if summary.get("freshness"):
+        _safe_print("\n  Data Freshness:")
+        for step, ts in summary["freshness"].items():
+            label = ts[:16].replace("T", " ") if ts else "never"
+            _safe_print(f"    {step:<16} {label}")
 
 
 def _print_freshness(freshness: dict[str, Any]) -> None:

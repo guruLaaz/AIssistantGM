@@ -16,6 +16,7 @@ from pipeline import (
     PIPELINE_STEPS,
     StepResult,
     _STEP_RUNNERS,
+    _safe_print,
     check_freshness,
     current_season,
     generate_summary,
@@ -570,56 +571,98 @@ class TestGenerateSummary:
         assert summary["skater_count"] == 7
         assert summary["goalie_count"] == 2
 
-    def test_top_scorers_sorted(
+    def test_top_fantasy_sorted_by_fpts(
         self, db_path: Path, db: sqlite3.Connection
     ) -> None:
-        """Top 5 scorers from is_season_total=1, sorted by points desc."""
+        """Top 5 fantasy producers sorted by fantasy points desc."""
         _insert_test_players(db)
-        # Insert season totals with known points (descending)
-        points_data = [
-            (1, 65, 65),   # McDavid: 130 pts
-            (2, 60, 60),   # Draisaitl: 120 pts
-            (3, 55, 55),   # MacKinnon: 110 pts
-            (4, 50, 50),   # Matthews: 100 pts
-            (5, 45, 45),   # Marner: 90 pts
-            (6, 40, 40),   # Crosby: 80 pts
-            (7, 35, 35),   # Ovechkin: 70 pts
+        # Insert season totals with known stats (descending FP)
+        # FP = goals + assists + hits*0.1 + blocks*0.1
+        stats_data = [
+            (1, 50, 60, 100, 50),  # McDavid: 50+60+10+5 = 125 FP
+            (2, 45, 55, 80, 40),   # Draisaitl: 45+55+8+4 = 112 FP
+            (3, 40, 50, 60, 30),   # MacKinnon: 40+50+6+3 = 99 FP
+            (4, 35, 45, 40, 20),   # Matthews: 35+45+4+2 = 86 FP
+            (5, 30, 40, 30, 10),   # Marner: 30+40+3+1 = 74 FP
+            (6, 25, 35, 20, 10),   # Crosby: 25+35+2+1 = 63 FP
+            (7, 20, 30, 10, 5),    # Ovechkin: 20+30+1+0.5 = 51.5 FP
         ]
-        for pid, goals, assists in points_data:
+        for pid, goals, assists, hits, blocks in stats_data:
             save_skater_stats(
                 db, pid, "20252026",
-                _make_season_total(goals, assists),
+                [{
+                    "game_date": None, "toi": 0, "pp_toi": 0,
+                    "goals": goals, "assists": assists, "points": goals + assists,
+                    "plus_minus": 0, "pim": 0, "shots": 0,
+                    "hits": hits, "blocks": blocks,
+                    "powerplay_goals": 0, "powerplay_points": 0,
+                    "shorthanded_goals": 0, "shorthanded_points": 0,
+                }],
                 is_season_total=True,
             )
 
         summary = generate_summary(db_path, "20252026")
-        top = summary["top_scorers"]
+        top = summary["top_fantasy"]
 
         assert len(top) == 5
         assert top[0]["name"] == "Connor McDavid"
-        assert top[0]["points"] == 130
-        assert top[4]["points"] == 90
-        # Verify sorted descending
+        assert top[0]["fpts"] == 125.0
+        assert top[4]["name"] == "Mitch Marner"
+        # Verify sorted descending by fpts
         for i in range(len(top) - 1):
-            assert top[i]["points"] >= top[i + 1]["points"]
+            assert top[i]["fpts"] >= top[i + 1]["fpts"]
 
-    def test_games_benched(
+    def test_top_fantasy_includes_all_fields(
         self, db_path: Path, db: sqlite3.Connection
     ) -> None:
-        """Team GP=10, player GP=5 -> games_benched=5."""
-        upsert_player(db, {
-            "id": 1, "full_name": "Test Player",
-            "team_abbrev": "EDM", "position": "C",
-        })
-        # Insert 10 team games
+        """Each top_fantasy entry includes name, team, position, goals, assists, hits, blocks, fpts, fpg, gp."""
+        _insert_test_players(db)
+        save_skater_stats(
+            db, 1, "20252026",
+            [{
+                "game_date": None, "toi": 0, "pp_toi": 0,
+                "goals": 30, "assists": 40, "points": 70,
+                "plus_minus": 0, "pim": 0, "shots": 0,
+                "hits": 50, "blocks": 20,
+                "powerplay_goals": 0, "powerplay_points": 0,
+                "shorthanded_goals": 0, "shorthanded_points": 0,
+            }],
+            is_season_total=True,
+        )
+
+        summary = generate_summary(db_path, "20252026")
+        entry = summary["top_fantasy"][0]
+
+        assert entry["name"] == "Connor McDavid"
+        assert entry["team"] == "EDM"
+        assert entry["position"] == "C"
+        assert entry["goals"] == 30
+        assert entry["assists"] == 40
+        assert entry["hits"] == 50
+        assert entry["blocks"] == 20
+        assert entry["fpts"] == 77.0  # 30+40+5.0+2.0
+        assert entry["gp"] == 0  # no per-game rows
+
+    def test_top_fantasy_fpg_with_games(
+        self, db_path: Path, db: sqlite3.Connection
+    ) -> None:
+        """FP/G is calculated from per-game row count (not a column)."""
+        _insert_test_players(db)
+        # Season total
+        save_skater_stats(
+            db, 1, "20252026",
+            [{
+                "game_date": None, "toi": 0, "pp_toi": 0,
+                "goals": 20, "assists": 30, "points": 50,
+                "plus_minus": 0, "pim": 0, "shots": 0,
+                "hits": 0, "blocks": 0,
+                "powerplay_goals": 0, "powerplay_points": 0,
+                "shorthanded_goals": 0, "shorthanded_points": 0,
+            }],
+            is_season_total=True,
+        )
+        # 10 per-game rows
         for i in range(1, 11):
-            db.execute(
-                "INSERT INTO team_games (team, season, game_date) "
-                "VALUES ('EDM', '20252026', ?)",
-                (f"2026-01-{i:02d}",),
-            )
-        # Player played 5 games
-        for i in range(1, 6):
             db.execute(
                 "INSERT INTO skater_stats "
                 "(player_id, game_date, season, is_season_total, toi) "
@@ -629,11 +672,11 @@ class TestGenerateSummary:
         db.commit()
 
         summary = generate_summary(db_path, "20252026")
-        benched = summary["games_benched"]
+        entry = summary["top_fantasy"][0]
 
-        assert len(benched) == 1
-        assert benched[0]["games_benched"] == 5
-        assert benched[0]["team_gp"] == 10
+        assert entry["gp"] == 10
+        assert entry["fpts"] == 50.0  # 20+30+0+0
+        assert entry["fpg"] == 5.0  # 50/10
 
     def test_injury_count(
         self, db_path: Path, db: sqlite3.Connection
@@ -653,6 +696,84 @@ class TestGenerateSummary:
 
         assert summary["injury_count"] == 3
 
+    def test_news_count_and_date_range(
+        self, db_path: Path, db: sqlite3.Connection
+    ) -> None:
+        """News count and date range from player_news."""
+        _insert_test_players(db)
+        db.execute(
+            "INSERT INTO player_news "
+            "(rotowire_news_id, player_id, headline, published_at) "
+            "VALUES ('rw_1', 1, 'Headline A', '2026-01-10 12:00:00')"
+        )
+        db.execute(
+            "INSERT INTO player_news "
+            "(rotowire_news_id, player_id, headline, published_at) "
+            "VALUES ('rw_2', 2, 'Headline B', '2026-02-15 14:00:00')"
+        )
+        db.commit()
+
+        summary = generate_summary(db_path, "20252026")
+
+        assert summary["news_count"] == 2
+        assert summary["news_oldest"] == "2026-01-10"
+        assert summary["news_newest"] == "2026-02-15"
+
+    def test_news_empty(self, db_path: Path) -> None:
+        """No news: count=0, empty date strings."""
+        init_db(db_path)
+
+        summary = generate_summary(db_path, "20252026")
+
+        assert summary["news_count"] == 0
+        assert summary["news_oldest"] == ""
+        assert summary["news_newest"] == ""
+
+    def test_standings(
+        self, db_path: Path, db: sqlite3.Connection
+    ) -> None:
+        """Standings include rank, points_for, fpg — no W/L/pts."""
+        db.execute(
+            "INSERT INTO fantasy_teams (id, league_id, name, short_name) "
+            "VALUES ('t1', 'league1', 'Team Alpha', 'ALP')"
+        )
+        db.execute(
+            "INSERT INTO fantasy_standings "
+            "(team_id, league_id, rank, points_for, fantasy_points_per_game) "
+            "VALUES ('t1', 'league1', 1, 1234.5, 6.78)"
+        )
+        db.commit()
+
+        summary = generate_summary(db_path, "20252026")
+
+        assert len(summary["standings"]) == 1
+        s = summary["standings"][0]
+        assert s["name"] == "Team Alpha"
+        assert s["rank"] == 1
+        assert s["points_for"] == 1234.5
+        assert s["fpg"] == 6.78
+        # No W/L/pts keys
+        assert "wins" not in s
+        assert "losses" not in s
+
+    def test_freshness_in_summary(
+        self, db_path: Path, db: sqlite3.Connection
+    ) -> None:
+        """Summary includes freshness timestamps per pipeline step."""
+        now = datetime.now(timezone.utc).isoformat()
+        db.execute(
+            "INSERT OR REPLACE INTO pipeline_log "
+            "(step, last_run_at, status) VALUES ('rosters', ?, 'ok')",
+            (now,),
+        )
+        db.commit()
+
+        summary = generate_summary(db_path, "20252026")
+
+        assert "freshness" in summary
+        assert summary["freshness"]["rosters"] is not None
+        assert summary["freshness"]["schedules"] is None  # never run
+
     def test_empty_database(self, db_path: Path) -> None:
         """Fresh DB: zero counts, empty lists, no crash."""
         init_db(db_path)
@@ -661,48 +782,16 @@ class TestGenerateSummary:
 
         assert summary["skater_count"] == 0
         assert summary["goalie_count"] == 0
-        assert summary["top_scorers"] == []
+        assert summary["top_fantasy"] == []
         assert summary["injury_count"] == 0
-        assert summary["games_benched"] == []
-
-    def test_top_scorers_with_ties(
-        self, db_path: Path, db: sqlite3.Connection
-    ) -> None:
-        """Players with identical points are ordered by goals DESC."""
-        _insert_test_players(db)
-        tie_data = [
-            (1, 60, 40),   # McDavid:    60G 40A = 100pts
-            (2, 50, 50),   # Draisaitl:  50G 50A = 100pts
-            (3, 40, 60),   # MacKinnon:  40G 60A = 100pts
-            (4, 30, 30),   # Matthews:   30G 30A = 60pts
-            (5, 20, 20),   # Marner:     20G 20A = 40pts
-        ]
-        for pid, goals, assists in tie_data:
-            save_skater_stats(
-                db, pid, "20252026",
-                _make_season_total(goals, assists),
-                is_season_total=True,
-            )
-
-        summary = generate_summary(db_path, "20252026")
-        top = summary["top_scorers"]
-
-        assert len(top) == 5
-        # First 3 all have 100 points, tiebreaker is goals DESC
-        assert top[0]["points"] == 100
-        assert top[1]["points"] == 100
-        assert top[2]["points"] == 100
-        assert top[0]["goals"] == 60
-        assert top[1]["goals"] == 50
-        assert top[2]["goals"] == 40
-        assert top[0]["name"] == "Connor McDavid"
-        assert top[1]["name"] == "Leon Draisaitl"
-        assert top[2]["name"] == "Nathan MacKinnon"
+        assert summary["news_count"] == 0
+        assert summary["standings"] == []
+        assert "freshness" in summary
 
     def test_single_player_in_database(
         self, db_path: Path, db: sqlite3.Connection
     ) -> None:
-        """Database with one skater returns top_scorers of length 1."""
+        """Database with one skater returns top_fantasy of length 1."""
         upsert_player(db, {
             "id": 1, "full_name": "Connor McDavid",
             "first_name": "Connor", "last_name": "McDavid",
@@ -710,7 +799,14 @@ class TestGenerateSummary:
         })
         save_skater_stats(
             db, 1, "20252026",
-            _make_season_total(50, 60),
+            [{
+                "game_date": None, "toi": 0, "pp_toi": 0,
+                "goals": 50, "assists": 60, "points": 110,
+                "plus_minus": 0, "pim": 0, "shots": 0,
+                "hits": 0, "blocks": 0,
+                "powerplay_goals": 0, "powerplay_points": 0,
+                "shorthanded_goals": 0, "shorthanded_points": 0,
+            }],
             is_season_total=True,
         )
 
@@ -718,24 +814,22 @@ class TestGenerateSummary:
 
         assert summary["skater_count"] == 1
         assert summary["goalie_count"] == 0
-        assert len(summary["top_scorers"]) == 1
-        assert summary["top_scorers"][0]["name"] == "Connor McDavid"
-        assert summary["top_scorers"][0]["points"] == 110
+        assert len(summary["top_fantasy"]) == 1
+        assert summary["top_fantasy"][0]["name"] == "Connor McDavid"
+        assert summary["top_fantasy"][0]["fpts"] == 110.0  # 50+60+0+0
         assert summary["injury_count"] == 0
-        assert summary["games_benched"] == []
 
     def test_players_with_zero_stats(
         self, db_path: Path, db: sqlite3.Connection
     ) -> None:
-        """Players exist but no season totals -> top_scorers is empty."""
+        """Players exist but no season totals -> top_fantasy is empty."""
         _insert_test_players(db)
 
         summary = generate_summary(db_path, "20252026")
 
         assert summary["skater_count"] == 7
         assert summary["goalie_count"] == 2
-        assert summary["top_scorers"] == []
-        assert summary["games_benched"] == []
+        assert summary["top_fantasy"] == []
 
 
 # =============================================================================
@@ -893,7 +987,9 @@ class TestCli:
         """--summary calls generate_summary."""
         mock_summary.return_value = {
             "skater_count": 0, "goalie_count": 0,
-            "top_scorers": [], "injury_count": 0, "games_benched": [],
+            "top_fantasy": [], "injury_count": 0,
+            "news_count": 0, "news_oldest": "", "news_newest": "",
+            "standings": [], "freshness": {},
         }
 
         result = main(["--summary"])
@@ -997,3 +1093,30 @@ class TestCli:
         main(["--step", "backfill-news"])
 
         assert pipeline._BACKFILL_MAX_SCROLLS == 50
+
+
+# =============================================================================
+# _safe_print Tests (3 tests)
+# =============================================================================
+
+
+class TestSafePrint:
+    """Tests for _safe_print Unicode fallback."""
+
+    def test_ascii_text(self, capsys) -> None:
+        """Normal ASCII text prints unchanged."""
+        _safe_print("Hello world")
+        assert capsys.readouterr().out == "Hello world\n"
+
+    def test_unicode_text(self, capsys) -> None:
+        """Unicode text prints when stdout supports it."""
+        _safe_print("Flame of Ud\u00fbn")
+        out = capsys.readouterr().out
+        assert "Flame of Ud" in out
+
+    def test_falls_back_on_encode_error(self) -> None:
+        """Falls back to ASCII replacement when UnicodeEncodeError occurs."""
+        err = UnicodeEncodeError("cp1252", "x", 0, 1, "")
+        with patch("builtins.print", side_effect=[err, None]) as mock_print:
+            _safe_print("Flame of Ud\u00fbn")
+            assert mock_print.call_count == 2
