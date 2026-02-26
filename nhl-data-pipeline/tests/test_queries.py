@@ -20,6 +20,7 @@ from assistant.queries import (
     get_trade_candidates,
     get_drop_candidates,
     get_pickup_recommendations,
+    suggest_trades,
     _get_skater_season_stats,
 )
 
@@ -817,7 +818,7 @@ class TestNewsIntegration:
     """Tests for news integration in drop and pickup recommendations."""
 
     def test_drop_candidate_recent_news(self, db: sqlite3.Connection) -> None:
-        """Drop candidates include recent_news when news exists within 7 days."""
+        """Drop candidates include recent_news when news exists within 42 days."""
         drops = get_drop_candidates(db, "team1", "20252026")
         # McDavid and Crosby both have recent news
         mcdavid = next((d for d in drops if d["player_name"] == "Connor McDavid"), None)
@@ -842,3 +843,263 @@ class TestNewsIntegration:
             if "News:" in r["reason"]:
                 # Verify the format
                 assert " | News: " in r["reason"]
+
+
+# ---- free agent enrichment (trend, news) ----
+
+
+class TestFreeAgentEnrichment:
+    """Tests for trend and news fields on search_free_agents results."""
+
+    def test_free_agent_has_trend_field(self, db: sqlite3.Connection) -> None:
+        """Free agents include a trend field (hot/cold/neutral)."""
+        results = search_free_agents(db, "20252026", min_games=1)
+        for fa in results:
+            assert "trend" in fa
+            assert fa["trend"] in ("hot", "cold", "neutral")
+
+    def test_free_agent_has_recent_14_fpg(self, db: sqlite3.Connection) -> None:
+        """Free agents include recent_14_fpg."""
+        results = search_free_agents(db, "20252026", min_games=1)
+        for fa in results:
+            assert "recent_14_fpg" in fa
+            assert isinstance(fa["recent_14_fpg"], float)
+
+    def test_free_agent_has_recent_news(self, db: sqlite3.Connection) -> None:
+        """Free agents include recent_news (None if no news)."""
+        results = search_free_agents(db, "20252026", min_games=1)
+        for fa in results:
+            assert "recent_news" in fa
+            # Draisaitl has no news in the fixture
+            if fa["player_name"] == "Leon Draisaitl":
+                assert fa["recent_news"] is None
+
+    def test_free_agent_has_line_context(self, db: sqlite3.Connection) -> None:
+        """Free agents include ev_line and pp_unit."""
+        results = search_free_agents(db, "20252026", min_games=1)
+        for fa in results:
+            assert "ev_line" in fa
+            assert "pp_unit" in fa
+
+    def test_free_agent_news_within_42_days(self, db: sqlite3.Connection) -> None:
+        """News older than 42 days is not included."""
+        # Insert old news for Draisaitl
+        db.execute(
+            "INSERT INTO player_news (rotowire_news_id, player_id, headline, content, published_at) "
+            "VALUES ('old_news', 8477934, 'Old headline', 'Old content.', '2025-12-01')"
+        )
+        db.commit()
+        results = search_free_agents(db, "20252026", min_games=1)
+        drai = next((fa for fa in results if fa["player_name"] == "Leon Draisaitl"), None)
+        assert drai is not None
+        assert drai["recent_news"] is None
+
+    def test_free_agent_news_within_window(self, db: sqlite3.Connection) -> None:
+        """News within 42 days is included."""
+        recent_date = (date.today() - timedelta(days=10)).isoformat()
+        db.execute(
+            "INSERT INTO player_news (rotowire_news_id, player_id, headline, content, published_at) "
+            f"VALUES ('recent_news', 8477934, 'Draisaitl: On fire', 'Hot streak.', '{recent_date}')"
+        )
+        db.commit()
+        results = search_free_agents(db, "20252026", min_games=1)
+        drai = next((fa for fa in results if fa["player_name"] == "Leon Draisaitl"), None)
+        assert drai is not None
+        assert drai["recent_news"] == "Draisaitl: On fire"
+
+
+# ---- trade candidates enrichment (injury, news, trend, line) ----
+
+
+class TestTradeCandidateEnrichment:
+    """Tests for enriched fields on get_trade_candidates results."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_opponent_roster(self, db: sqlite3.Connection) -> None:
+        """Add a trending-up player on team2 for trade candidate detection."""
+        upsert_player(db, {
+            "id": 7777777, "full_name": "Hot Streak",
+            "first_name": "Hot", "last_name": "Streak",
+            "team_abbrev": "TOR", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO fantasy_roster_slots (team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team2', 'Hot Streak', 'C', 'active', 3000000)"
+        )
+        # Season totals: low FP/G
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (7777777, NULL, '20252026', 1, 10, 15, 25, 50, 30, 100, 5, 4, 36000)"
+        )
+        # Recent games: much higher production (trending up)
+        for d in range(1, 21):
+            gd = (date.today() - timedelta(days=d)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (7777777, '{gd}', '20252026', 0, 3, 3, 6, 3, 1, 5, 0, 0, 960)"
+            )
+        # Add news for Hot Streak
+        recent = (date.today() - timedelta(days=3)).isoformat()
+        db.execute(
+            "INSERT INTO player_news (rotowire_news_id, player_id, headline, content, published_at) "
+            f"VALUES ('news_hot', 7777777, 'Hot Streak: Promoted to 1st line', 'New role.', '{recent}')"
+        )
+        # Add injury for Hot Streak
+        db.execute(
+            "INSERT INTO player_injuries (player_id, source, injury_type, status, updated_at) "
+            "VALUES (7777777, 'rotowire', 'Lower Body', 'Day-to-Day', '2026-02-20')"
+        )
+        db.commit()
+
+    def test_trade_candidate_has_injury(self, db: sqlite3.Connection) -> None:
+        """Trade candidates include injury status."""
+        candidates = get_trade_candidates(db, "team1", "20252026")
+        for c in candidates:
+            assert "injury" in c
+
+    def test_trade_candidate_has_news(self, db: sqlite3.Connection) -> None:
+        """Trade candidates include recent_news."""
+        candidates = get_trade_candidates(db, "team1", "20252026")
+        for c in candidates:
+            assert "recent_news" in c
+
+    def test_trade_candidate_has_trend(self, db: sqlite3.Connection) -> None:
+        """Trade candidates include trend and recent_14_fpg."""
+        candidates = get_trade_candidates(db, "team1", "20252026")
+        for c in candidates:
+            assert "trend" in c
+            assert c["trend"] in ("hot", "cold", "neutral")
+            assert "recent_14_fpg" in c
+
+    def test_trade_candidate_news_content(self, db: sqlite3.Connection) -> None:
+        """Trade candidate for Hot Streak has correct news headline."""
+        candidates = get_trade_candidates(db, "team1", "20252026")
+        hot = next((c for c in candidates if c["player_name"] == "Hot Streak"), None)
+        if hot:
+            assert hot["recent_news"] == "Hot Streak: Promoted to 1st line"
+            assert hot["injury"] is not None
+
+    def test_trade_candidate_line_info(self, db: sqlite3.Connection) -> None:
+        """Trade candidates include line_info with ev_line and pp_unit."""
+        candidates = get_trade_candidates(db, "team1", "20252026")
+        for c in candidates:
+            assert "line_info" in c
+            assert "ev_line" in c["line_info"]
+            assert "pp_unit" in c["line_info"]
+
+
+# ---- suggest_trades enrichment ----
+
+
+class TestSuggestTradesEnrichment:
+    """Tests for enriched fields on suggest_trades results."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_opponent_roster(self, db: sqlite3.Connection) -> None:
+        """Add tradeable players on team2."""
+        upsert_player(db, {
+            "id": 6666666, "full_name": "Trade Target",
+            "first_name": "Trade", "last_name": "Target",
+            "team_abbrev": "VAN", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO fantasy_roster_slots (team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team2', 'Trade Target', 'C', 'active', 5000000)"
+        )
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (6666666, NULL, '20252026', 1, 15, 25, 40, 60, 35, 120, 8, 6, 48000)"
+        )
+        for d in range(1, 21):
+            gd = (date.today() - timedelta(days=d)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (6666666, '{gd}', '20252026', 0, 1, 2, 3, 4, 2, 8, 1, 0, 1100)"
+            )
+        recent = (date.today() - timedelta(days=5)).isoformat()
+        db.execute(
+            "INSERT INTO player_news (rotowire_news_id, player_id, headline, content, published_at) "
+            f"VALUES ('news_tt', 6666666, 'Trade Target: PP1 deployment', 'New PP role.', '{recent}')"
+        )
+        db.commit()
+
+    def test_suggest_trades_returns_enriched_fields(self, db: sqlite3.Connection) -> None:
+        """Trade suggestions include trend, injury, news for both sides."""
+        result = suggest_trades(db, "team1", "Other Team", "20252026")
+        if result is None:
+            pytest.skip("No trade result returned")
+        for s in result["suggestions"]:
+            # Send side
+            assert "send_trend" in s
+            assert s["send_trend"] in ("hot", "cold", "neutral")
+            assert "send_recent_14_fpg" in s
+            assert "send_injury" in s
+            assert "send_news" in s
+            # Receive side
+            assert "receive_trend" in s
+            assert s["receive_trend"] in ("hot", "cold", "neutral")
+            assert "receive_recent_14_fpg" in s
+            assert "receive_injury" in s
+            assert "receive_news" in s
+            assert "receive_ev_line" in s
+            assert "receive_pp_unit" in s
+
+    def test_suggest_trades_news_content(self, db: sqlite3.Connection) -> None:
+        """Trade suggestion for Trade Target includes news headline."""
+        result = suggest_trades(db, "team1", "Other Team", "20252026")
+        if result is None:
+            pytest.skip("No trade result returned")
+        for s in result["suggestions"]:
+            if s["receive_player"] == "Trade Target":
+                assert s["receive_news"] == "Trade Target: PP1 deployment"
+
+    def test_suggest_trades_opponent_not_found(self, db: sqlite3.Connection) -> None:
+        """suggest_trades returns None for unknown opponent."""
+        result = suggest_trades(db, "team1", "Nonexistent Team", "20252026")
+        assert result is None
+
+
+# ---- pickup recommendations use recent FP/G ----
+
+
+class TestPickupRecentFPG:
+    """Tests for pickup recommendations using recent 14-game FP/G."""
+
+    def test_pickup_has_recent_fpg_fields(self, db: sqlite3.Connection) -> None:
+        """Pickup recs include season and recent FP/G for both sides."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")
+        for r in recs:
+            assert "pickup_season_fpg" in r
+            assert "pickup_recent_fpg" in r
+            assert "drop_season_fpg" in r
+            assert "drop_recent_fpg" in r
+
+    def test_pickup_has_trend(self, db: sqlite3.Connection) -> None:
+        """Pickup recs include pickup_trend."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")
+        for r in recs:
+            assert "pickup_trend" in r
+            assert r["pickup_trend"] in ("hot", "cold", "neutral")
+
+    def test_pickup_upgrade_based_on_recent(self, db: sqlite3.Connection) -> None:
+        """fpg_upgrade is calculated from recent 14-game FP/G, not season."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")
+        for r in recs:
+            expected = round(r["pickup_recent_fpg"] - r["drop_recent_fpg"], 2)
+            assert r["fpg_upgrade"] == expected
+
+    def test_pickup_reason_mentions_recent(self, db: sqlite3.Connection) -> None:
+        """Pickup reasons reference 'recent FP/G' not just 'FP/G'."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")
+        for r in recs:
+            reason = r["reason"]
+            if "IR stash" not in reason:
+                assert "recent FP/G" in reason

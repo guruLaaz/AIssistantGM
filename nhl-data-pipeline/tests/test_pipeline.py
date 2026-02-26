@@ -414,6 +414,21 @@ class TestRunStep:
         assert result.detail["new_inserted"] == 30
         mock_backfill.assert_called_once()
 
+    @patch("pipeline.backfill_fantrax_news")
+    def test_backfill_news_default_max_scrolls(
+        self,
+        mock_backfill: MagicMock,
+        db_path: Path,
+    ) -> None:
+        """run_step('backfill-news') passes default max_scrolls=50."""
+        mock_backfill.return_value = {
+            "total_fetched": 50, "new_inserted": 30, "duplicates_skipped": 20,
+        }
+        run_step("backfill-news", db_path, "20252026")
+        mock_backfill.assert_called_once_with(
+            mock_backfill.call_args[0][0], max_scrolls=50,
+        )
+
     @patch("pipeline.fetch_injuries")
     def test_step_raises_returns_error_result(
         self,
@@ -950,3 +965,35 @@ class TestCli:
         mock_step.assert_called_once()
         assert mock_step.call_args[0][0] == "backfill-news"
         assert result == 0
+
+    @patch("pipeline.run_step")
+    @patch("pipeline.setup_logging")
+    def test_max_scrolls_cli_arg(
+        self, mock_logging: MagicMock, mock_step: MagicMock
+    ) -> None:
+        """--max-scrolls sets _BACKFILL_MAX_SCROLLS before running step."""
+        import pipeline
+        mock_step.return_value = StepResult(
+            name="backfill-news", status="ok", duration_s=5.0,
+            detail={"new_inserted": 30},
+        )
+
+        main(["--step", "backfill-news", "--max-scrolls", "200"])
+
+        assert pipeline._BACKFILL_MAX_SCROLLS == 200
+
+    @patch("pipeline.run_step")
+    @patch("pipeline.setup_logging")
+    def test_max_scrolls_default(
+        self, mock_logging: MagicMock, mock_step: MagicMock
+    ) -> None:
+        """--max-scrolls defaults to 50."""
+        import pipeline
+        mock_step.return_value = StepResult(
+            name="backfill-news", status="ok", duration_s=5.0,
+            detail={"new_inserted": 30},
+        )
+
+        main(["--step", "backfill-news"])
+
+        assert pipeline._BACKFILL_MAX_SCROLLS == 50

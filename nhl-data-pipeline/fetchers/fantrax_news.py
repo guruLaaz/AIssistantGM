@@ -323,10 +323,15 @@ def fetch_news_page(
             viewport={"width": 1280, "height": 900},
         )
 
-        _load_cookies_for_playwright(context, config["cookie_file"])
+        cookie_loaded = _load_cookies_for_playwright(context, config["cookie_file"])
         page = context.new_page()
 
         try:
+            # If no cookies exist, log in first to establish a session
+            # (the news page is public, but we need cookies for fantrax-league)
+            if not cookie_loaded:
+                _login_fantrax(page, context, config)
+
             page.goto(
                 FANTRAX_NEWS_URL, wait_until="domcontentloaded", timeout=60_000,
             )

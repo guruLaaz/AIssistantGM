@@ -751,16 +751,19 @@ def format_roster_moves(drops: list[dict], pickups: list[dict]) -> str:
     lines.append("=== RECOMMENDED PICKUPS ===")
     lines.append("")
     if pickups:
-        lines.append(f"{'Pickup':<20} {'Pos':>3} {'FP/G':>5}  "
-                     f"{'Drop':<20} {'FP/G':>5} {'Upg':>7}  {'Reason':<40}")
-        lines.append(_divider(106))
+        lines.append(f"{'Pickup':<20} {'Pos':>3} {'Szn':>5} {'R14':>5}  "
+                     f"{'Drop':<20} {'Szn':>5} {'R14':>5} {'Upg':>7}  {'Reason':<40}")
+        lines.append(_divider(120))
         for r in pickups:
             pickup = (r.get("pickup_name") or "")[:19]
             drop = (r.get("drop_name") or "")[:19]
             lines.append(
                 f"{pickup:<20} {r.get('pickup_position', ''):>3} "
-                f"{r.get('pickup_fpg', 0.0):>5.2f}  "
-                f"{drop:<20} {r.get('drop_fpg', 0.0):>5.2f} "
+                f"{r.get('pickup_season_fpg', 0.0):>5.2f} "
+                f"{r.get('pickup_recent_fpg', 0.0):>5.2f}  "
+                f"{drop:<20} "
+                f"{r.get('drop_season_fpg', 0.0):>5.2f} "
+                f"{r.get('drop_recent_fpg', 0.0):>5.2f} "
                 f"{r.get('fpg_upgrade', 0.0):>+7.2f}  "
                 f"{(r.get('reason') or '')[:40]:<40}"
             )

@@ -476,11 +476,32 @@ def search_free_agents(
                 "toi_per_game": stats.get("toi_per_game", 0),
             })
 
+        # Hot/cold trend based on last 14 games vs season average
+        fpts_list = _get_recent_fpts_list(conn, pid, season, is_goalie=goalie)
+        recent_14 = fpts_list[:14]
+        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
+        entry["recent_14_fpg"] = recent_14_fpg
+        season_fpg = entry["fpts_per_game"]
+        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.15:
+            entry["trend"] = "hot"
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.85:
+            entry["trend"] = "cold"
+        else:
+            entry["trend"] = "neutral"
+
         entry["injury"] = _get_injury_status(conn, pid)
 
         line_ctx = _get_line_context(conn, pid)
         entry["ev_line"] = line_ctx["ev_line"] if line_ctx else None
         entry["pp_unit"] = line_ctx["pp_unit"] if line_ctx else None
+
+        recent_news_row = conn.execute(
+            "SELECT headline FROM player_news WHERE player_id = ? "
+            "AND published_at >= date('now', '-42 days') "
+            "ORDER BY published_at DESC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        entry["recent_news"] = recent_news_row["headline"] if recent_news_row else None
 
         results.append(entry)
 
@@ -975,19 +996,42 @@ def get_trade_candidates(
 
         trend_pct = round((last_7_fpg / season_fpg - 1) * 100, 1)
 
+        recent_14 = fpts_list[:14]
+        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
+        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.15:
+            trend = "hot"
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.85:
+            trend = "cold"
+        else:
+            trend = "neutral"
+
+        injury = _get_injury_status(conn, nhl_id)
+
         line_ctx = _get_line_context(conn, nhl_id)
+
+        news_row = conn.execute(
+            "SELECT headline FROM player_news WHERE player_id = ? "
+            "AND published_at >= date('now', '-42 days') "
+            "ORDER BY published_at DESC LIMIT 1",
+            (nhl_id,),
+        ).fetchone()
+
         candidates.append({
             "player_name": resolved["full_name"],
             "owner_team_name": row["owner_team_name"],
             "position": resolved["position"],
             "season_fpg": season_fpg,
             "recent_7_fpg": last_7_fpg,
+            "recent_14_fpg": recent_14_fpg,
+            "trend": trend,
             "trend_pct": trend_pct,
             "games_played": stats["games_played"],
             "owner_rank": row["owner_rank"],
             "toi_per_game": stats.get("toi_per_game", 0),
             "pp_toi": stats.get("pp_toi", 0),
             "signal": "trending_up",
+            "injury": injury,
+            "recent_news": news_row["headline"] if news_row else None,
             "line_info": {
                 "ev_line": line_ctx["ev_line"] if line_ctx else None,
                 "pp_unit": line_ctx["pp_unit"] if line_ctx else None,
@@ -1047,20 +1091,42 @@ def get_trade_candidates(
         all_fpts = _get_recent_fpts_list(conn, resolved["id"], season, False)
         last_7 = all_fpts[:7]
         last_7_fpg = round(sum(last_7) / len(last_7), 2) if last_7 else 0.0
+        recent_14 = all_fpts[:14]
+        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
+        if sfpg > 0 and recent_14_fpg > sfpg * 1.15:
+            trend = "hot"
+        elif sfpg > 0 and recent_14_fpg < sfpg * 0.85:
+            trend = "cold"
+        else:
+            trend = "neutral"
+
+        injury = _get_injury_status(conn, resolved["id"])
 
         line_ctx = _get_line_context(conn, resolved["id"])
+
+        news_row = conn.execute(
+            "SELECT headline FROM player_news WHERE player_id = ? "
+            "AND published_at >= date('now', '-42 days') "
+            "ORDER BY published_at DESC LIMIT 1",
+            (resolved["id"],),
+        ).fetchone()
+
         high_toi_candidates.append({
             "player_name": resolved["full_name"],
             "owner_team_name": row["owner_team_name"],
             "position": pos,
             "season_fpg": sfpg,
             "recent_7_fpg": last_7_fpg,
+            "recent_14_fpg": recent_14_fpg,
+            "trend": trend,
             "trend_pct": 0.0,
             "games_played": stats["games_played"],
             "owner_rank": row["owner_rank"],
             "toi_per_game": tpg,
             "pp_toi": stats.get("pp_toi", 0),
             "signal": "high_toi_underperformer",
+            "injury": injury,
+            "recent_news": news_row["headline"] if news_row else None,
             "line_info": {
                 "ev_line": line_ctx["ev_line"] if line_ctx else None,
                 "pp_unit": line_ctx["pp_unit"] if line_ctx else None,
@@ -1138,7 +1204,7 @@ def get_drop_candidates(
 
         recent_news_row = conn.execute(
             "SELECT headline FROM player_news WHERE player_id = ? "
-            "AND published_at >= date('now', '-7 days') "
+            "AND published_at >= date('now', '-42 days') "
             "ORDER BY published_at DESC LIMIT 1",
             (nhl_id,),
         ).fetchone()
@@ -1276,6 +1342,42 @@ def suggest_trades(
     my_avgs = {g: avg_fpg(ps) for g, ps in my_groups.items()}
     opp_avgs = {g: avg_fpg(ps) for g, ps in opp_groups.items()}
 
+    # Helper to enrich a player with trend, injury, news, and line context
+    def _enrich(player: dict) -> dict:
+        resolved = resolve_player(conn, player["player_name"])
+        if resolved is None:
+            return {"trend": "neutral", "recent_14_fpg": 0.0,
+                    "injury": None, "recent_news": None,
+                    "ev_line": None, "pp_unit": None}
+        nhl_id = resolved["id"]
+        goalie = resolved["position"] == "G"
+        fpts_list = _get_recent_fpts_list(conn, nhl_id, season, is_goalie=goalie)
+        recent_14 = fpts_list[:14]
+        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
+        season_fpg = player.get("fpts_per_game", 0.0)
+        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.15:
+            trend = "hot"
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.85:
+            trend = "cold"
+        else:
+            trend = "neutral"
+        injury = _get_injury_status(conn, nhl_id)
+        line_ctx = _get_line_context(conn, nhl_id)
+        news_row = conn.execute(
+            "SELECT headline FROM player_news WHERE player_id = ? "
+            "AND published_at >= date('now', '-42 days') "
+            "ORDER BY published_at DESC LIMIT 1",
+            (nhl_id,),
+        ).fetchone()
+        return {
+            "trend": trend,
+            "recent_14_fpg": recent_14_fpg,
+            "injury": injury,
+            "recent_news": news_row["headline"] if news_row else None,
+            "ev_line": line_ctx["ev_line"] if line_ctx else None,
+            "pp_unit": line_ctx["pp_unit"] if line_ctx else None,
+        }
+
     suggestions = []
 
     # For each position group, look for players I could send that
@@ -1297,20 +1399,29 @@ def suggest_trades(
 
         # Build cross-group and same-group swaps
         for my_p in my_sendable:
+            send_extra = _enrich(my_p)
             for opp_p in opp_sendable:
                 my_upgrade = round(opp_p["fpts_per_game"] - my_p["fpts_per_game"], 2)
                 opp_upgrade = round(my_p["fpts_per_game"] - opp_p["fpts_per_game"], 2)
-                # Both sides must benefit — opp_upgrade is measured against
-                # their existing player, so it should be > 0 from the
-                # candidate selection above
                 if my_upgrade > 0:
+                    recv_extra = _enrich(opp_p)
                     suggestions.append({
                         "send_player": my_p["player_name"],
                         "send_position": my_p.get("position", ""),
                         "send_fpg": my_p["fpts_per_game"],
+                        "send_recent_14_fpg": send_extra["recent_14_fpg"],
+                        "send_trend": send_extra["trend"],
+                        "send_injury": send_extra["injury"],
+                        "send_news": send_extra["recent_news"],
                         "receive_player": opp_p["player_name"],
                         "receive_position": opp_p.get("position", ""),
                         "receive_fpg": opp_p["fpts_per_game"],
+                        "receive_recent_14_fpg": recv_extra["recent_14_fpg"],
+                        "receive_trend": recv_extra["trend"],
+                        "receive_injury": recv_extra["injury"],
+                        "receive_news": recv_extra["recent_news"],
+                        "receive_ev_line": recv_extra["ev_line"],
+                        "receive_pp_unit": recv_extra["pp_unit"],
                         "my_upgrade": my_upgrade,
                         "opp_upgrade": opp_upgrade,
                         "position_group": group,
@@ -1322,16 +1433,13 @@ def suggest_trades(
         for recv_group in ("F", "D", "G"):
             if send_group == recv_group:
                 continue
-            # I send from my deep position (above avg), get from their
-            # deep position (above their avg)
             my_surplus = [
                 p for p in my_groups[send_group]
                 if p["fpts_per_game"] >= my_avgs[send_group]
                 and p["fpts_per_game"] > opp_avgs[send_group]
             ]
-            # Only the weaker surplus players — not my best
             my_surplus.sort(key=lambda p: p["fpts_per_game"])
-            my_surplus = my_surplus[:3]  # bottom of my surplus
+            my_surplus = my_surplus[:3]
 
             opp_surplus = [
                 p for p in opp_groups[recv_group]
@@ -1342,18 +1450,29 @@ def suggest_trades(
             opp_surplus = opp_surplus[:3]
 
             for my_p in my_surplus:
+                send_extra = _enrich(my_p)
                 for opp_p in opp_surplus:
-                    # This is a cross-position swap: value must be close
                     fpg_diff = abs(my_p["fpts_per_game"] - opp_p["fpts_per_game"])
                     if fpg_diff > 0.3:
-                        continue  # too unbalanced
+                        continue
+                    recv_extra = _enrich(opp_p)
                     suggestions.append({
                         "send_player": my_p["player_name"],
                         "send_position": my_p.get("position", ""),
                         "send_fpg": my_p["fpts_per_game"],
+                        "send_recent_14_fpg": send_extra["recent_14_fpg"],
+                        "send_trend": send_extra["trend"],
+                        "send_injury": send_extra["injury"],
+                        "send_news": send_extra["recent_news"],
                         "receive_player": opp_p["player_name"],
                         "receive_position": opp_p.get("position", ""),
                         "receive_fpg": opp_p["fpts_per_game"],
+                        "receive_recent_14_fpg": recv_extra["recent_14_fpg"],
+                        "receive_trend": recv_extra["trend"],
+                        "receive_injury": recv_extra["injury"],
+                        "receive_news": recv_extra["recent_news"],
+                        "receive_ev_line": recv_extra["ev_line"],
+                        "receive_pp_unit": recv_extra["pp_unit"],
                         "my_upgrade": round(opp_p["fpts_per_game"] - my_avgs.get(recv_group, 0), 2),
                         "opp_upgrade": round(my_p["fpts_per_game"] - opp_avgs.get(send_group, 0), 2),
                         "position_group": f"{send_group}->{recv_group}",
@@ -1428,7 +1547,7 @@ def get_pickup_recommendations(
         if resolved_fa:
             news_row = conn.execute(
                 "SELECT headline FROM player_news WHERE player_id = ? "
-                "AND published_at >= date('now', '-7 days') "
+                "AND published_at >= date('now', '-42 days') "
                 "ORDER BY published_at DESC LIMIT 1",
                 (resolved_fa["id"],),
             ).fetchone()
@@ -1439,25 +1558,32 @@ def get_pickup_recommendations(
     used_drops: set[str] = set()
     recommendations = []
 
-    # Build all possible (drop, pickup) pairs sorted by upgrade
+    # Build all possible (drop, pickup) pairs sorted by upgrade.
+    # Use recent 14-game FP/G for both sides so the comparison reflects
+    # current production, not season-long averages that mask role changes.
     pairs = []
     for drop in drops:
         drop_pg = _position_group(drop["position"])
-        drop_fpg = drop["season_fpg"]
+        drop_recent_fpg = drop["recent_14_fpg"]
+        drop_season_fpg = drop["season_fpg"]
         for fa in fa_by_pos.get(drop_pg, []):
-            fa_fpg = fa.get("fpts_per_game", 0.0)
-            upgrade = round(fa_fpg - drop_fpg, 2)
+            fa_recent_fpg = fa.get("recent_14_fpg", 0.0)
+            fa_season_fpg = fa.get("fpts_per_game", 0.0)
+            upgrade = round(fa_recent_fpg - drop_recent_fpg, 2)
             if upgrade <= 0:
                 continue
 
             # Determine reason
             fa_injury = fa.get("injury")
+            fa_trend = fa.get("trend", "neutral")
             if fa_injury:
                 reason = "IR stash candidate"
+            elif fa_trend == "hot":
+                reason = f"Trending up, +{upgrade:.2f} recent FP/G"
             elif drop["trend"] == "cold":
-                reason = f"Cold streak, +{upgrade:.2f} FP/G"
+                reason = f"Cold streak, +{upgrade:.2f} recent FP/G"
             else:
-                reason = f"+{upgrade:.2f} FP/G upgrade"
+                reason = f"+{upgrade:.2f} recent FP/G upgrade"
 
             # Add line context for FA
             fa_pp = fa.get("pp_unit")
@@ -1476,11 +1602,14 @@ def get_pickup_recommendations(
             pairs.append({
                 "pickup_name": fa["player_name"],
                 "pickup_position": fa.get("position", ""),
-                "pickup_fpg": round(fa_fpg, 2),
+                "pickup_season_fpg": round(fa_season_fpg, 2),
+                "pickup_recent_fpg": round(fa_recent_fpg, 2),
+                "pickup_trend": fa_trend,
                 "pickup_team": fa.get("team", ""),
                 "drop_name": drop["player_name"],
                 "drop_position": drop["position"],
-                "drop_fpg": drop_fpg,
+                "drop_season_fpg": drop_season_fpg,
+                "drop_recent_fpg": drop_recent_fpg,
                 "fpg_upgrade": upgrade,
                 "reason": reason,
             })

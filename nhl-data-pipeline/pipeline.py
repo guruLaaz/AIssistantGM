@@ -253,8 +253,11 @@ def _run_lines(conn, season):
     return fetch_all_lines(conn)
 
 
+_BACKFILL_MAX_SCROLLS = 50
+
+
 def _run_backfill_news(conn, season):
-    return backfill_fantrax_news(conn)
+    return backfill_fantrax_news(conn, max_scrolls=_BACKFILL_MAX_SCROLLS)
 
 
 def _run_fantrax_league(conn, season):
@@ -633,6 +636,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Database path (default: db/nhl_data.db)",
     )
+    parser.add_argument(
+        "--max-scrolls",
+        type=int,
+        default=50,
+        help="Max scroll iterations for backfill-news (default: 50)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -652,6 +661,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.step:
+        global _BACKFILL_MAX_SCROLLS
+        _BACKFILL_MAX_SCROLLS = args.max_scrolls
         step_names = STEP_ALIASES.get(args.step, [args.step])
         results = []
         for name in step_names:
