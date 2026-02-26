@@ -441,12 +441,46 @@ def generate_summary(db_path: Path, season: str) -> dict[str, Any]:
                     "team_gp": team_gp,
                 })
 
+        # News count
+        news_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM player_news"
+        ).fetchone()["cnt"]
+
+        # Fantasy standings
+        standings_rows = conn.execute(
+            "SELECT ft.name, fs.rank, fs.wins, fs.losses, fs.points, "
+            "fs.points_for, fs.fantasy_points_per_game "
+            "FROM fantasy_standings fs "
+            "JOIN fantasy_teams ft ON fs.team_id = ft.id "
+            "ORDER BY fs.rank"
+        ).fetchall()
+        standings = [
+            {
+                "name": r["name"],
+                "rank": r["rank"],
+                "wins": r["wins"],
+                "losses": r["losses"],
+                "points": r["points"],
+                "points_for": r["points_for"],
+                "fpg": r["fantasy_points_per_game"],
+            }
+            for r in standings_rows
+        ]
+
+        # Fantasy roster count
+        roster_count = conn.execute(
+            "SELECT COUNT(DISTINCT team_id) as cnt FROM fantasy_roster_slots"
+        ).fetchone()["cnt"]
+
         return {
             "skater_count": skater_count,
             "goalie_count": goalie_count,
             "top_scorers": top_scorers,
             "injury_count": injury_count,
             "games_benched": games_benched_list,
+            "news_count": news_count,
+            "standings": standings,
+            "roster_count": roster_count,
         }
     finally:
         conn.close()
@@ -558,23 +592,42 @@ def _print_results(results: list[StepResult]) -> None:
     print(f"  Total time: {_format_duration(total)}")
 
 
+def _safe_print(text: str) -> None:
+    """Print text, replacing unencodable characters for Windows consoles."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", errors="replace").decode("ascii"))
+
+
 def _print_summary(summary: dict[str, Any]) -> None:
-    print("\n=== Data Summary ===")
-    print(f"  Players: {summary['skater_count']} skaters, "
-          f"{summary['goalie_count']} goalies")
-    print(f"  Injuries: {summary['injury_count']}")
+    _safe_print("\n=== Data Summary ===")
+    _safe_print(f"  Players: {summary['skater_count']} skaters, "
+                f"{summary['goalie_count']} goalies")
+    _safe_print(f"  Injuries: {summary['injury_count']}")
 
     if summary["top_scorers"]:
-        print("\n  Top 5 Scorers:")
+        _safe_print("\n  Top 5 Scorers:")
         for i, s in enumerate(summary["top_scorers"], 1):
-            print(f"    {i}. {s['name']} ({s['team']}) - "
-                  f"{s['goals']}G {s['assists']}A {s['points']}P")
+            _safe_print(f"    {i}. {s['name']} ({s['team']}) - "
+                        f"{s['goals']}G {s['assists']}A {s['points']}P")
+
+    _safe_print(f"  News articles: {summary.get('news_count', 0)}")
+
+    if summary.get("standings"):
+        _safe_print(f"\n  Fantasy Standings ({summary.get('roster_count', 0)} teams rostered):")
+        for s in summary["standings"]:
+            _safe_print(f"    {s['rank']:>2}. {s['name']:<25} "
+                        f"{s['wins']}W-{s['losses']}L  "
+                        f"{s['points']:.0f}pts  "
+                        f"{s['points_for']:.1f}PF  "
+                        f"{s['fpg']:.1f} FP/G")
 
     if summary["games_benched"]:
-        print(f"\n  Players with games benched: {len(summary['games_benched'])}")
+        _safe_print(f"\n  Players with games benched: {len(summary['games_benched'])}")
         for b in summary["games_benched"][:10]:
-            print(f"    {b['name']} ({b['team']}): "
-                  f"{b['games_benched']} benched / {b['team_gp']} team GP")
+            _safe_print(f"    {b['name']} ({b['team']}): "
+                        f"{b['games_benched']} benched / {b['team_gp']} team GP")
 
 
 def _print_freshness(freshness: dict[str, Any]) -> None:
