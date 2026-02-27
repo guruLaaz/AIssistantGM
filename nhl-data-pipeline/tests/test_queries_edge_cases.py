@@ -178,7 +178,10 @@ class TestEmptyDB:
         assert get_drop_candidates(empty_db, "team1", "20252026") == []
 
     def test_get_pickup_recommendations_empty_db(self, empty_db: sqlite3.Connection) -> None:
-        assert get_pickup_recommendations(empty_db, "team1", "20252026") == []
+        data = get_pickup_recommendations(empty_db, "team1", "20252026")
+        assert isinstance(data, dict)
+        assert data["recommendations"] == []
+        assert data["claims_remaining"] is None
 
 
 # ---------------------------------------------------------------------------

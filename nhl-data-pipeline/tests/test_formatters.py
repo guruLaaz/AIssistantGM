@@ -744,6 +744,95 @@ class TestFormatRosterMoves:
         assert "Cold streak" in result
         assert "News:" in result
 
+    def test_claims_banner_dict_format(self) -> None:
+        """Claims remaining banner is shown when pickups is a dict."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "recommendations": [{
+                "pickup_name": "Pick", "pickup_position": "C",
+                "pickup_fpg": 1.5, "drop_name": "Drop",
+                "drop_fpg": 0.5, "fpg_upgrade": 1.0,
+                "reason": "upgrade",
+            }],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "CLAIMS REMAINING: 5/10" in result
+        assert "Pick" in result
+
+    def test_claims_scarce_warning(self) -> None:
+        """Warning shown when claims_remaining <= 2."""
+        pickup_data = {
+            "claims_remaining": 2,
+            "recommendations": [],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "CLAIMS ARE SCARCE" in result
+
+    def test_no_claims_banner_when_none(self) -> None:
+        """No claims banner when claims_remaining is None."""
+        pickup_data = {
+            "claims_remaining": None,
+            "recommendations": [],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "CLAIMS REMAINING" not in result
+
+    def test_legacy_list_format_still_works(self) -> None:
+        """Backward compatibility: plain list still works."""
+        pickups = [{
+            "pickup_name": "Pick", "pickup_position": "C",
+            "pickup_fpg": 1.5, "drop_name": "Drop",
+            "drop_fpg": 0.5, "fpg_upgrade": 1.0,
+            "reason": "upgrade",
+        }]
+        result = format_roster_moves([], pickups)
+        assert "Pick" in result
+        assert "CLAIMS REMAINING" not in result
+
+    def test_gp_remaining_banner(self) -> None:
+        """GP remaining banner is shown when gp_remaining is present."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "gp_remaining": {"F": 321, "D": 54, "G": 31},
+            "recommendations": [],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "GP Remaining:" in result
+        assert "F=321" in result
+        assert "D=54" in result
+        assert "G=31" in result
+
+    def test_total_value_columns(self) -> None:
+        """Pickup table shows ~GP and TotV columns."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "gp_remaining": {"F": 321, "D": 54, "G": 31},
+            "recommendations": [{
+                "pickup_name": "Pick", "pickup_position": "C",
+                "pickup_season_fpg": 1.0, "pickup_recent_fpg": 1.0,
+                "drop_name": "Drop", "drop_position": "D",
+                "drop_season_fpg": 0.5, "drop_recent_fpg": 0.3,
+                "fpg_upgrade": 0.70, "est_games": 25,
+                "total_value": 17.5,
+                "reason": "Cross-pos: drop D, add F",
+            }],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "~GP" in result
+        assert "TotV" in result
+        assert "25" in result
+        assert "+17.5" in result
+
+    def test_no_gp_banner_when_none(self) -> None:
+        """No GP remaining banner when gp_remaining is None."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "gp_remaining": None,
+            "recommendations": [],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "GP Remaining" not in result
+
 
 # ---------------------------------------------------------------------------
 # New formatter tests for TOI, trends, and news
@@ -862,17 +951,18 @@ class TestFormatTradeTargetsHighToi:
     """Tests for high-TOI underperformer tag in format_trade_targets."""
 
     def test_high_toi_tag(self) -> None:
-        """High-TOI underperformer shows [HIGH TOI] instead of trend pct."""
+        """High-TOI underperformer shows [TOI] badge with trend pct."""
         data = [{
             "player_name": "Slow Starter", "owner_team_name": "Other Team",
             "position": "LW", "games_played": 50,
             "season_fpg": 0.80, "recent_7_fpg": 0.0,
-            "trend_pct": 0.0, "owner_rank": 10,
+            "trend_pct": -15.0, "owner_rank": 10,
             "toi_per_game": 1200, "pp_toi": 300,
             "signal": "high_toi_underperformer",
         }]
         result = format_trade_targets(data)
-        assert "[HIGH TOI]" in result
+        assert "[TOI]" in result
+        assert "-15%" in result
         assert "20:00" in result  # 1200s = 20:00
 
     def test_trending_up_shows_pct(self) -> None:
@@ -1163,3 +1253,101 @@ class TestFormatDropCandidatesLines:
         lines = result.strip().split("\n")
         # data row shouldn't have L#
         assert "L1" not in lines[-1]
+
+
+# ---------------------------------------------------------------------------
+# Fix 7: trade targets trend_pct display
+# ---------------------------------------------------------------------------
+
+
+class TestFormatTradeTargetsTrendPct:
+    """Tests for trend_pct display in format_trade_targets."""
+
+    def test_high_toi_shows_toi_badge_and_pct(self) -> None:
+        """High-TOI underperformer shows [TOI] badge with actual trend_pct."""
+        data = [{
+            "player_name": "Buy Low Player", "owner_team_name": "Other Team",
+            "position": "LW", "games_played": 50,
+            "season_fpg": 0.80, "recent_7_fpg": 0.60,
+            "trend_pct": -25.0, "owner_rank": 10,
+            "toi_per_game": 1200, "pp_toi": 300,
+            "signal": "high_toi_underperformer",
+        }]
+        result = format_trade_targets(data)
+        assert "[TOI]" in result
+        assert "-25%" in result
+
+    def test_positive_trending_player_uses_plus_sign(self) -> None:
+        """Trending-up player shows +pct% with format spec."""
+        data = [{
+            "player_name": "Hot Player", "owner_team_name": "Other Team",
+            "position": "C", "games_played": 50,
+            "season_fpg": 1.20, "recent_7_fpg": 1.60,
+            "trend_pct": 33.3, "owner_rank": 5,
+            "toi_per_game": 1100, "pp_toi": 250,
+            "signal": "trending_up",
+        }]
+        result = format_trade_targets(data)
+        assert "+33%" in result
+
+    def test_negative_trend_pct_shows_minus(self) -> None:
+        """High-TOI underperformer with negative trend shows minus sign."""
+        data = [{
+            "player_name": "Cold But Talented", "owner_team_name": "Rebuilders",
+            "position": "C", "games_played": 60,
+            "season_fpg": 1.00, "recent_7_fpg": 0.70,
+            "trend_pct": -30.0, "owner_rank": 15,
+            "toi_per_game": 1100, "pp_toi": 200,
+            "signal": "high_toi_underperformer",
+        }]
+        result = format_trade_targets(data)
+        assert "-30%" in result
+        assert "[TOI]" in result
+
+
+# ---------------------------------------------------------------------------
+# Fix 9: peripheral_fpg in format_free_agents
+# ---------------------------------------------------------------------------
+
+
+class TestFormatFreeAgentsPeripherals:
+    """Tests for peripheral_fpg column in format_free_agents."""
+
+    def test_peri_column_in_header(self) -> None:
+        """Free agents table has Peri column header."""
+        data = [{
+            "player_name": "Physical Player", "team": "BOS",
+            "position": "D", "games_played": 50,
+            "goals": 3, "assists": 10, "hits": 150, "blocks": 100,
+            "fpts_per_game": 0.76, "peripheral_fpg": 0.50,
+            "injury": None,
+        }]
+        result = format_free_agents(data)
+        assert "Peri" in result
+
+    def test_skater_peripheral_value_shown(self) -> None:
+        """Skater shows peripheral_fpg value."""
+        data = [{
+            "player_name": "Physical Player", "team": "BOS",
+            "position": "D", "games_played": 50,
+            "goals": 3, "assists": 10, "hits": 150, "blocks": 100,
+            "fpts_per_game": 0.76, "peripheral_fpg": 0.50,
+            "injury": None,
+        }]
+        result = format_free_agents(data)
+        assert "0.50" in result
+
+    def test_goalie_shows_dash_for_peripherals(self) -> None:
+        """Goalie shows dash instead of peripheral value."""
+        data = [{
+            "player_name": "Test Goalie", "team": "NYR",
+            "position": "G", "games_played": 30,
+            "wins": 18, "shutouts": 2, "gaa": 2.45,
+            "fpts_per_game": 1.20, "peripheral_fpg": 0.0,
+            "injury": None,
+        }]
+        result = format_free_agents(data)
+        # Goalie row should have dash in Peri column
+        lines = result.strip().split("\n")
+        goalie_line = [l for l in lines if "Test Goalie" in l][0]
+        assert "-" in goalie_line

@@ -25,9 +25,10 @@ TOOLS = [
     {
         "name": "get_my_roster",
         "description": (
-            "Get the user's fantasy roster with player stats and calculated "
-            "fantasy points. Returns every rostered player with GP, key stats, "
-            "FP, FP/G, and injury status."
+            "Get the user's fantasy roster with player stats, calculated "
+            "fantasy points, hot/cold trends (last 14 games), and line deployment. "
+            "Returns every rostered player with GP, key stats, "
+            "FP, FP/G, recent 14-game FP/G, trend, line/PP info, and injury status."
         ),
         "input_schema": {
             "type": "object",
@@ -45,7 +46,8 @@ TOOLS = [
         "name": "get_roster_analysis",
         "description": (
             "Analyze the user's roster: position breakdown, average FP/G by "
-            "position group (F/D/G), bottom 3 performers, and injured players."
+            "position group (F/D/G), bottom 3 performers, injured players, "
+            "and GP limits used/remaining per position group (F=984, D=492, G=82)."
         ),
         "input_schema": {
             "type": "object",
@@ -57,7 +59,8 @@ TOOLS = [
         "name": "search_free_agents",
         "description": (
             "Search for the best available free agents not on any fantasy roster. "
-            "Can filter by position and minimum games played."
+            "Can filter by position and minimum games played. Includes peripheral "
+            "FP/G (hits+blocks contribution) to identify high-volume physical players."
         ),
         "input_schema": {
             "type": "object",
@@ -370,6 +373,28 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
             else:
                 lines.append("")
                 lines.append("No injured players on roster.")
+            if "gp_limits" in data:
+                lines.append("")
+                lines.append("GP Limits:")
+                warnings = []
+                for g in ("F", "D", "G"):
+                    gl = data["gp_limits"].get(g, {})
+                    used = gl.get("used", 0)
+                    limit = gl.get("limit", 0)
+                    remaining = gl.get("remaining", 0)
+                    pct = gl.get("pct", 0.0)
+                    lines.append(
+                        f"  {g}: {used}/{limit} used "
+                        f"({remaining} remaining) [{pct:.1f}%]"
+                    )
+                    if pct >= 85:
+                        warnings.append(g)
+                if warnings:
+                    groups = ", ".join(warnings)
+                    lines.append(
+                        f"  *** {groups} slots nearly full — "
+                        f"consider benching! ***"
+                    )
             return "\n".join(lines)
 
         if tool_name == "search_free_agents":
@@ -471,8 +496,8 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
 
         if tool_name == "get_roster_moves":
             drops = queries.get_drop_candidates(conn, team_id, season)
-            pickups = queries.get_pickup_recommendations(conn, team_id, season)
-            return formatters.format_roster_moves(drops, pickups)
+            pickup_data = queries.get_pickup_recommendations(conn, team_id, season)
+            return formatters.format_roster_moves(drops, pickup_data)
 
         return f"Unknown tool: {tool_name}"
 

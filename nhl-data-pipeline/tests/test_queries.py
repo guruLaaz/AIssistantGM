@@ -837,7 +837,7 @@ class TestNewsIntegration:
 
     def test_pickup_reason_includes_news(self, db: sqlite3.Connection) -> None:
         """Pickup recommendations append news to reason when available."""
-        recs = get_pickup_recommendations(db, "team1", "20252026")
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
         # Draisaitl is a free agent (C) — no news for him, so reason won't have News:
         for r in recs:
             if "News:" in r["reason"]:
@@ -1075,7 +1075,7 @@ class TestPickupRecentFPG:
 
     def test_pickup_has_recent_fpg_fields(self, db: sqlite3.Connection) -> None:
         """Pickup recs include season and recent FP/G for both sides."""
-        recs = get_pickup_recommendations(db, "team1", "20252026")
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
         for r in recs:
             assert "pickup_season_fpg" in r
             assert "pickup_recent_fpg" in r
@@ -1084,22 +1084,120 @@ class TestPickupRecentFPG:
 
     def test_pickup_has_trend(self, db: sqlite3.Connection) -> None:
         """Pickup recs include pickup_trend."""
-        recs = get_pickup_recommendations(db, "team1", "20252026")
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
         for r in recs:
             assert "pickup_trend" in r
             assert r["pickup_trend"] in ("hot", "cold", "neutral")
 
     def test_pickup_upgrade_based_on_recent(self, db: sqlite3.Connection) -> None:
         """fpg_upgrade is calculated from recent 14-game FP/G, not season."""
-        recs = get_pickup_recommendations(db, "team1", "20252026")
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
         for r in recs:
             expected = round(r["pickup_recent_fpg"] - r["drop_recent_fpg"], 2)
             assert r["fpg_upgrade"] == expected
 
     def test_pickup_reason_mentions_recent(self, db: sqlite3.Connection) -> None:
         """Pickup reasons reference 'recent FP/G' not just 'FP/G'."""
-        recs = get_pickup_recommendations(db, "team1", "20252026")
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
         for r in recs:
             reason = r["reason"]
             if "IR stash" not in reason:
                 assert "recent FP/G" in reason
+
+
+# ---- roster analysis GP limits ----
+
+
+class TestRosterAnalysisGPLimits:
+    """Tests for GP limits in get_roster_analysis."""
+
+    def test_gp_limits_present(self, db: sqlite3.Connection) -> None:
+        """Roster analysis includes gp_limits key."""
+        analysis = get_roster_analysis(db, "team1", "20252026")
+        assert "gp_limits" in analysis
+        for g in ("F", "D", "G"):
+            assert g in analysis["gp_limits"]
+            gl = analysis["gp_limits"][g]
+            assert "used" in gl
+            assert "limit" in gl
+            assert "remaining" in gl
+            assert "pct" in gl
+
+    def test_gp_limits_values(self, db: sqlite3.Connection) -> None:
+        """GP limits have correct max values."""
+        analysis = get_roster_analysis(db, "team1", "20252026")
+        assert analysis["gp_limits"]["F"]["limit"] == 984
+        assert analysis["gp_limits"]["D"]["limit"] == 492
+        assert analysis["gp_limits"]["G"]["limit"] == 82
+
+    def test_gp_remaining_equals_limit_minus_used(self, db: sqlite3.Connection) -> None:
+        """remaining = limit - used."""
+        analysis = get_roster_analysis(db, "team1", "20252026")
+        for g in ("F", "D", "G"):
+            gl = analysis["gp_limits"][g]
+            assert gl["remaining"] == gl["limit"] - gl["used"]
+
+    def test_gp_pct_calculation(self, db: sqlite3.Connection) -> None:
+        """pct = used / limit * 100."""
+        analysis = get_roster_analysis(db, "team1", "20252026")
+        for g in ("F", "D", "G"):
+            gl = analysis["gp_limits"][g]
+            expected_pct = round(gl["used"] / gl["limit"] * 100, 1)
+            assert gl["pct"] == expected_pct
+
+
+# ---- free agent peripheral_fpg ----
+
+
+class TestFreeAgentPeripheralFPG:
+    """Tests for peripheral_fpg in search_free_agents."""
+
+    def test_skater_has_peripheral_fpg(self, db: sqlite3.Connection) -> None:
+        """Free agent skaters include peripheral_fpg field."""
+        fas = search_free_agents(db, "20252026", min_games=1)
+        skaters = [f for f in fas if f["position"] != "G"]
+        for f in skaters:
+            assert "peripheral_fpg" in f
+            assert f["peripheral_fpg"] >= 0.0
+
+    def test_peripheral_fpg_calculation(self, db: sqlite3.Connection) -> None:
+        """peripheral_fpg = (hits + blocks) * 0.1 / GP."""
+        fas = search_free_agents(db, "20252026", min_games=1)
+        skaters = [f for f in fas if f["position"] != "G"]
+        for f in skaters:
+            gp = f["games_played"]
+            if gp > 0:
+                expected = round((f["hits"] + f["blocks"]) * 0.1 / gp, 2)
+                assert f["peripheral_fpg"] == expected
+
+
+# ---- pickup recommendations GP-aware total value ----
+
+
+class TestPickupTotalValue:
+    """Tests for GP-aware total value in pickup recommendations."""
+
+    def test_recommendations_have_total_value(self, db: sqlite3.Connection) -> None:
+        """Each recommendation includes est_games and total_value."""
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        for r in data["recommendations"]:
+            assert "est_games" in r
+            assert "total_value" in r
+            assert r["est_games"] >= 0
+            assert r["total_value"] == round(r["fpg_upgrade"] * r["est_games"], 1)
+
+    def test_gp_remaining_in_result(self, db: sqlite3.Connection) -> None:
+        """Result dict includes gp_remaining."""
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        gp = data.get("gp_remaining")
+        # May be None for very sparse test DBs, or a dict
+        if gp is not None:
+            for g in ("F", "D", "G"):
+                assert g in gp
+
+    def test_sorted_by_total_value(self, db: sqlite3.Connection) -> None:
+        """Recommendations are sorted by total_value descending."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        if len(recs) >= 2:
+            vals = [r["total_value"] for r in recs]
+            assert vals == sorted(vals, reverse=True)

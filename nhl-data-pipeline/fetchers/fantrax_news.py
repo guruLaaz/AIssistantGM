@@ -539,15 +539,27 @@ def backfill_fantrax_news(
     Primary entry point for the pipeline.  Uses page scraping with
     infinite scroll to collect historical news items.
 
+    When *stop_date* is not provided, automatically detects the most
+    recent news already in the database and stops scrolling once older
+    items are reached — avoiding redundant re-fetching.
+
     Args:
         conn: Database connection.
         max_scrolls: Maximum scroll iterations.
         scroll_delay: Seconds between scrolls.
-        stop_date: ISO date to stop at.
+        stop_date: ISO date to stop at.  Auto-detected from DB if None.
 
     Returns:
         Summary dict with total_fetched, new_inserted, duplicates_skipped.
     """
+    if stop_date is None:
+        row = conn.execute(
+            "SELECT MAX(published_at) FROM player_news"
+        ).fetchone()
+        if row and row[0]:
+            stop_date = row[0][:10]  # ISO date portion
+            logger.info("Auto stop_date from DB: %s", stop_date)
+
     items = fetch_news_page(
         max_scrolls=max_scrolls,
         scroll_delay=scroll_delay,

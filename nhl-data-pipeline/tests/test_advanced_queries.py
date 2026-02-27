@@ -351,30 +351,33 @@ class TestGetPickupRecommendations:
 
     def test_returns_recommendations(self, db: sqlite3.Connection) -> None:
         """Should return at least one recommendation (Kucherov is a free agent F)."""
-        results = get_pickup_recommendations(db, "team1", SEASON)
-        assert len(results) > 0
+        data = get_pickup_recommendations(db, "team1", SEASON)
+        assert isinstance(data, dict)
+        assert "recommendations" in data
+        assert "claims_remaining" in data
+        assert len(data["recommendations"]) > 0
 
     def test_only_upgrades(self, db: sqlite3.Connection) -> None:
         """All recommendations should have positive FP/G upgrade."""
-        results = get_pickup_recommendations(db, "team1", SEASON)
+        results = get_pickup_recommendations(db, "team1", SEASON)["recommendations"]
         for r in results:
             assert r["fpg_upgrade"] > 0
 
     def test_no_duplicate_pickups(self, db: sqlite3.Connection) -> None:
         """Same free agent should not be recommended twice."""
-        results = get_pickup_recommendations(db, "team1", SEASON)
+        results = get_pickup_recommendations(db, "team1", SEASON)["recommendations"]
         pickup_names = [r["pickup_name"] for r in results]
         assert len(pickup_names) == len(set(pickup_names))
 
     def test_no_duplicate_drops(self, db: sqlite3.Connection) -> None:
         """Same drop candidate should not appear twice."""
-        results = get_pickup_recommendations(db, "team1", SEASON)
+        results = get_pickup_recommendations(db, "team1", SEASON)["recommendations"]
         drop_names = [r["drop_name"] for r in results]
         assert len(drop_names) == len(set(drop_names))
 
     def test_matches_position_group(self, db: sqlite3.Connection) -> None:
         """Pickup and drop should share position group (F/D/G)."""
-        results = get_pickup_recommendations(db, "team1", SEASON)
+        results = get_pickup_recommendations(db, "team1", SEASON)["recommendations"]
         pos_groups = {"C": "F", "LW": "F", "RW": "F", "F": "F", "D": "D", "G": "G"}
         for r in results:
             pickup_pg = pos_groups.get(r["pickup_position"], "F")
@@ -383,11 +386,12 @@ class TestGetPickupRecommendations:
 
     def test_includes_reason(self, db: sqlite3.Connection) -> None:
         """Each recommendation should have a reason string."""
-        results = get_pickup_recommendations(db, "team1", SEASON)
+        results = get_pickup_recommendations(db, "team1", SEASON)["recommendations"]
         for r in results:
             assert r["reason"]
 
     def test_empty_when_no_drops(self, db: sqlite3.Connection) -> None:
-        """Returns empty for a team with no roster."""
-        results = get_pickup_recommendations(db, "team_nonexistent", SEASON)
-        assert results == []
+        """Returns empty recommendations for a team with no roster."""
+        data = get_pickup_recommendations(db, "team_nonexistent", SEASON)
+        assert isinstance(data, dict)
+        assert data["recommendations"] == []

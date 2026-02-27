@@ -30,6 +30,9 @@ from assistant.player_match import (
 
 _FORWARD_POSITIONS = {"C", "L", "R"}
 
+# League GP limits per position group (roster slots × 82 games)
+GP_LIMITS = {"F": 984, "D": 492, "G": 82}
+
 
 def _is_goalie(conn: sqlite3.Connection, player_id: int) -> bool:
     """Check if a player is a goalie."""
@@ -296,6 +299,10 @@ def get_my_roster(
                 "injury": None,
                 "salary": slot["salary"],
                 "roster_status": slot["status_id"],
+                "recent_14_fpg": 0.0,
+                "trend": "neutral",
+                "ev_line": None,
+                "pp_unit": None,
             })
             continue
 
@@ -342,6 +349,23 @@ def get_my_roster(
                 "toi_per_game": stats.get("toi_per_game", 0),
             })
 
+        # Recent trend and line context
+        fpts_list = _get_recent_fpts_list(conn, nhl_id, season, is_goalie=goalie)
+        recent_14 = fpts_list[:14]
+        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
+        entry["recent_14_fpg"] = recent_14_fpg
+        season_fpg = entry["fpts_per_game"]
+        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.15:
+            entry["trend"] = "hot"
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.85:
+            entry["trend"] = "cold"
+        else:
+            entry["trend"] = "neutral"
+
+        line_ctx = _get_line_context(conn, nhl_id)
+        entry["ev_line"] = line_ctx["ev_line"] if line_ctx else None
+        entry["pp_unit"] = line_ctx["pp_unit"] if line_ctx else None
+
         roster.append(entry)
 
     return roster
@@ -359,24 +383,38 @@ def get_roster_analysis(
 
     Returns:
         Dict with position_counts, avg_fpts_by_position,
-        bottom_performers, injured_players.
+        bottom_performers, injured_players, gp_limits.
     """
     roster = get_my_roster(conn, team_id, season)
 
     counts: dict[str, int] = {"F": 0, "D": 0, "G": 0}
     fpts_sums: dict[str, float] = {"F": 0.0, "D": 0.0, "G": 0.0}
+    gp_used: dict[str, int] = {"F": 0, "D": 0, "G": 0}
     injured = []
 
     for p in roster:
         group = _position_group(p.get("position"))
         counts[group] = counts.get(group, 0) + 1
         fpts_sums[group] = fpts_sums.get(group, 0.0) + p["fpts_per_game"]
+        gp_used[group] = gp_used.get(group, 0) + p.get("games_played", 0)
         if p.get("injury"):
             injured.append(p)
 
     avg_fpts = {}
     for g in ("F", "D", "G"):
         avg_fpts[g] = round(fpts_sums[g] / counts[g], 2) if counts[g] > 0 else 0.0
+
+    # GP limits per position group
+    gp_limits = {}
+    for g in ("F", "D", "G"):
+        limit = GP_LIMITS[g]
+        used = gp_used[g]
+        gp_limits[g] = {
+            "used": used,
+            "limit": limit,
+            "remaining": limit - used,
+            "pct": round(used / limit * 100, 1) if limit > 0 else 0.0,
+        }
 
     # Bottom 3 by FP/G (players with at least 1 game)
     with_games = [p for p in roster if p["games_played"] > 0]
@@ -388,6 +426,7 @@ def get_roster_analysis(
         "avg_fpts_by_position": avg_fpts,
         "bottom_performers": bottom,
         "injured_players": injured,
+        "gp_limits": gp_limits,
     }
 
 
@@ -465,15 +504,20 @@ def search_free_agents(
                 "shutouts": stats.get("shutouts", 0),
                 "gaa": stats.get("gaa", 0.0),
                 "sv_pct": stats.get("sv_pct", 0.0),
+                "peripheral_fpg": 0.0,
             })
         else:
+            hits = stats.get("hits", 0)
+            blocks = stats.get("blocks", 0)
+            peripheral_fpg = round((hits + blocks) * 0.1 / gp, 2) if gp > 0 else 0.0
             entry.update({
                 "goals": stats.get("goals", 0),
                 "assists": stats.get("assists", 0),
                 "points": stats.get("points", 0),
-                "hits": stats.get("hits", 0),
-                "blocks": stats.get("blocks", 0),
+                "hits": hits,
+                "blocks": blocks,
                 "toi_per_game": stats.get("toi_per_game", 0),
+                "peripheral_fpg": peripheral_fpg,
             })
 
         # Hot/cold trend based on last 14 games vs season average
@@ -504,6 +548,19 @@ def search_free_agents(
         entry["recent_news"] = recent_news_row["headline"] if recent_news_row else None
 
         results.append(entry)
+
+    # When searching all positions, cap goalies to prevent them from
+    # dominating results due to inflated FP/G from 2pts/win scoring.
+    if pos_filter is None:
+        skaters = [r for r in results if r["position"] != "G"]
+        goalies = [r for r in results if r["position"] == "G"]
+        skaters.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
+        goalies.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
+        goalie_cap = min(3, limit)
+        skater_cap = limit - goalie_cap
+        merged = skaters[:skater_cap] + goalies[:goalie_cap]
+        merged.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
+        return merged[:limit]
 
     results.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
     return results[:limit]
@@ -1119,7 +1176,7 @@ def get_trade_candidates(
             "recent_7_fpg": last_7_fpg,
             "recent_14_fpg": recent_14_fpg,
             "trend": trend,
-            "trend_pct": 0.0,
+            "trend_pct": round((last_7_fpg / sfpg - 1) * 100, 1) if sfpg > 0 else 0.0,
             "games_played": stats["games_played"],
             "owner_rank": row["owner_rank"],
             "toi_per_game": tpg,
@@ -1332,8 +1389,11 @@ def suggest_trades(
             groups[g].append(p)
         return groups
 
+    def _recent_fpg(p: dict) -> float:
+        return p.get("recent_14_fpg", p["fpts_per_game"])
+
     def avg_fpg(players: list[dict]) -> float:
-        vals = [p["fpts_per_game"] for p in players if p["fpts_per_game"] > 0]
+        vals = [_recent_fpg(p) for p in players if _recent_fpg(p) > 0]
         return round(sum(vals) / len(vals), 2) if vals else 0.0
 
     my_groups = roster_by_group(my_roster)
@@ -1387,22 +1447,22 @@ def suggest_trades(
         # (I'm upgrading by dropping them, opponent is upgrading by gaining)
         my_sendable = [
             p for p in my_groups[group]
-            if p["fpts_per_game"] < my_avgs[group]
-            and p["fpts_per_game"] > opp_avgs[group]
+            if _recent_fpg(p) < my_avgs[group]
+            and _recent_fpg(p) > opp_avgs[group]
         ]
         # Opponent players below their avg but above my avg
         opp_sendable = [
             p for p in opp_groups[group]
-            if p["fpts_per_game"] < opp_avgs[group]
-            and p["fpts_per_game"] > my_avgs[group]
+            if _recent_fpg(p) < opp_avgs[group]
+            and _recent_fpg(p) > my_avgs[group]
         ]
 
-        # Build cross-group and same-group swaps
+        # Build same-position swaps
         for my_p in my_sendable:
             send_extra = _enrich(my_p)
             for opp_p in opp_sendable:
-                my_upgrade = round(opp_p["fpts_per_game"] - my_p["fpts_per_game"], 2)
-                opp_upgrade = round(my_p["fpts_per_game"] - opp_p["fpts_per_game"], 2)
+                my_upgrade = round(_recent_fpg(opp_p) - _recent_fpg(my_p), 2)
+                opp_upgrade = round(_recent_fpg(my_p) - _recent_fpg(opp_p), 2)
                 if my_upgrade > 0:
                     recv_extra = _enrich(opp_p)
                     suggestions.append({
@@ -1435,26 +1495,36 @@ def suggest_trades(
                 continue
             my_surplus = [
                 p for p in my_groups[send_group]
-                if p["fpts_per_game"] >= my_avgs[send_group]
-                and p["fpts_per_game"] > opp_avgs[send_group]
+                if _recent_fpg(p) >= my_avgs[send_group]
+                and _recent_fpg(p) > opp_avgs[send_group]
             ]
-            my_surplus.sort(key=lambda p: p["fpts_per_game"])
+            my_surplus.sort(key=lambda p: _recent_fpg(p))
             my_surplus = my_surplus[:3]
 
             opp_surplus = [
                 p for p in opp_groups[recv_group]
-                if p["fpts_per_game"] >= opp_avgs[recv_group]
-                and p["fpts_per_game"] > my_avgs[recv_group]
+                if _recent_fpg(p) >= opp_avgs[recv_group]
+                and _recent_fpg(p) > my_avgs[recv_group]
             ]
-            opp_surplus.sort(key=lambda p: p["fpts_per_game"])
+            opp_surplus.sort(key=lambda p: _recent_fpg(p))
             opp_surplus = opp_surplus[:3]
 
             for my_p in my_surplus:
                 send_extra = _enrich(my_p)
                 for opp_p in opp_surplus:
-                    fpg_diff = abs(my_p["fpts_per_game"] - opp_p["fpts_per_game"])
+                    fpg_diff = abs(_recent_fpg(my_p) - _recent_fpg(opp_p))
                     if fpg_diff > 0.3:
                         continue
+                    # Net upgrade: what I gain at recv position minus
+                    # what I lose at send position (and vice versa)
+                    my_gain = _recent_fpg(opp_p) - my_avgs.get(recv_group, 0)
+                    my_loss = _recent_fpg(my_p) - my_avgs.get(send_group, 0)
+                    my_upgrade = round(my_gain - my_loss, 2)
+                    if my_upgrade <= 0:
+                        continue
+                    opp_gain = _recent_fpg(my_p) - opp_avgs.get(send_group, 0)
+                    opp_loss = _recent_fpg(opp_p) - opp_avgs.get(recv_group, 0)
+                    opp_upgrade = round(opp_gain - opp_loss, 2)
                     recv_extra = _enrich(opp_p)
                     suggestions.append({
                         "send_player": my_p["player_name"],
@@ -1473,20 +1543,26 @@ def suggest_trades(
                         "receive_news": recv_extra["recent_news"],
                         "receive_ev_line": recv_extra["ev_line"],
                         "receive_pp_unit": recv_extra["pp_unit"],
-                        "my_upgrade": round(opp_p["fpts_per_game"] - my_avgs.get(recv_group, 0), 2),
-                        "opp_upgrade": round(my_p["fpts_per_game"] - opp_avgs.get(send_group, 0), 2),
+                        "my_upgrade": my_upgrade,
+                        "opp_upgrade": opp_upgrade,
                         "position_group": f"{send_group}->{recv_group}",
                     })
 
-    # Sort by my upgrade desc, deduplicate
+    # Sort by my upgrade desc, deduplicate, cap each send player to 2 slots
     suggestions.sort(key=lambda s: s["my_upgrade"], reverse=True)
     seen = set()
+    send_count: dict[str, int] = {}
     deduped = []
     for s in suggestions:
         key = (s["send_player"], s["receive_player"])
-        if key not in seen:
-            seen.add(key)
-            deduped.append(s)
+        if key in seen:
+            continue
+        sender = s["send_player"]
+        if send_count.get(sender, 0) >= 2:
+            continue
+        seen.add(key)
+        send_count[sender] = send_count.get(sender, 0) + 1
+        deduped.append(s)
 
     return {
         "my_team": {
@@ -1521,20 +1597,30 @@ def get_pickup_recommendations(
         limit: Max recommendations to return.
 
     Returns:
-        List of dicts sorted by fpg_upgrade descending.
+        Dict with claims_remaining and recommendations list.
     """
+    # Look up how many claims the user has left
+    claims_row = conn.execute(
+        "SELECT claims_remaining FROM fantasy_standings WHERE team_id = ?",
+        (team_id,),
+    ).fetchone()
+    claims_remaining = claims_row["claims_remaining"] if claims_row else None
+
     drops = get_drop_candidates(conn, team_id, season)
     if not drops:
-        return []
+        return {"claims_remaining": claims_remaining,
+                "gp_remaining": None, "recommendations": []}
 
     free_agents = search_free_agents(
         conn, season, position="any", sort_by="fpts_per_game",
         min_games=10, limit=50,
     )
+    empty = {"claims_remaining": claims_remaining,
+             "gp_remaining": None, "recommendations": []}
     if not free_agents:
-        return []
+        return empty
 
-    # Group by position group
+    # Group FAs by position group
     fa_by_pos: dict[str, list[dict]] = {}
     for fa in free_agents:
         pg = _position_group(fa.get("position"))
@@ -1554,68 +1640,119 @@ def get_pickup_recommendations(
             if news_row:
                 fa_news[fa["player_name"]] = news_row["headline"]
 
-    used_pickups: set[str] = set()
-    used_drops: set[str] = set()
-    recommendations = []
+    # Compute GP remaining per position group
+    roster = get_my_roster(conn, team_id, season)
+    gp_used: dict[str, int] = {"F": 0, "D": 0, "G": 0}
+    roster_count: dict[str, int] = {"F": 0, "D": 0, "G": 0}
+    for p in roster:
+        pg = _position_group(p.get("position"))
+        gp_used[pg] += p.get("games_played", 0)
+        roster_count[pg] += 1
 
-    # Build all possible (drop, pickup) pairs sorted by upgrade.
+    gp_remaining = {g: GP_LIMITS[g] - gp_used[g] for g in ("F", "D", "G")}
+    # Approximate games left per player at each position
+    games_per_player = {
+        g: round(gp_remaining[g] / roster_count[g]) if roster_count[g] > 0 else 0
+        for g in ("F", "D", "G")
+    }
+
+    def _build_reason(fa: dict, drop: dict, upgrade: float,
+                      cross_pos: bool = False,
+                      drop_pg: str = "", target_pg: str = "") -> str:
+        """Build reason string for a pickup recommendation."""
+        fa_injury = fa.get("injury")
+        fa_trend = fa.get("trend", "neutral")
+        if cross_pos:
+            reason = (f"Cross-pos: drop {drop_pg}, add {target_pg} "
+                      f"({gp_remaining[target_pg]}GP left vs "
+                      f"{gp_remaining[drop_pg]})")
+        elif fa_injury:
+            reason = "IR stash candidate"
+        elif fa_trend == "hot":
+            reason = f"Trending up, +{upgrade:.2f} recent FP/G"
+        elif drop["trend"] == "cold":
+            reason = f"Cold streak, +{upgrade:.2f} recent FP/G"
+        else:
+            reason = f"+{upgrade:.2f} recent FP/G upgrade"
+
+        fa_pp = fa.get("pp_unit")
+        fa_ev = fa.get("ev_line")
+        if fa_pp == 1:
+            reason += " | PP1"
+        elif fa_pp == 2:
+            reason += " | PP2"
+        if fa_ev and fa_ev <= 2:
+            reason += f" | Line {fa_ev}"
+
+        recent_news = fa_news.get(fa["player_name"])
+        if recent_news:
+            reason += f" | News: {recent_news}"
+        return reason
+
+    def _make_pair(fa: dict, drop: dict, upgrade: float, reason: str,
+                   est_games: int) -> dict:
+        return {
+            "pickup_name": fa["player_name"],
+            "pickup_position": fa.get("position", ""),
+            "pickup_season_fpg": round(fa.get("fpts_per_game", 0.0), 2),
+            "pickup_recent_fpg": round(fa.get("recent_14_fpg", 0.0), 2),
+            "pickup_trend": fa.get("trend", "neutral"),
+            "pickup_team": fa.get("team", ""),
+            "drop_name": drop["player_name"],
+            "drop_position": drop["position"],
+            "drop_season_fpg": drop["season_fpg"],
+            "drop_recent_fpg": drop["recent_14_fpg"],
+            "fpg_upgrade": upgrade,
+            "est_games": est_games,
+            "total_value": round(upgrade * est_games, 1),
+            "reason": reason,
+        }
+
+    # Build all possible (drop, pickup) pairs.
     # Use recent 14-game FP/G for both sides so the comparison reflects
     # current production, not season-long averages that mask role changes.
     pairs = []
+
+    # Phase 1: same-position pairs
     for drop in drops:
         drop_pg = _position_group(drop["position"])
         drop_recent_fpg = drop["recent_14_fpg"]
-        drop_season_fpg = drop["season_fpg"]
+        est_games = games_per_player.get(drop_pg, 10)
         for fa in fa_by_pos.get(drop_pg, []):
             fa_recent_fpg = fa.get("recent_14_fpg", 0.0)
-            fa_season_fpg = fa.get("fpts_per_game", 0.0)
             upgrade = round(fa_recent_fpg - drop_recent_fpg, 2)
             if upgrade <= 0:
                 continue
+            reason = _build_reason(fa, drop, upgrade)
+            pairs.append(_make_pair(fa, drop, upgrade, reason, est_games))
 
-            # Determine reason
-            fa_injury = fa.get("injury")
-            fa_trend = fa.get("trend", "neutral")
-            if fa_injury:
-                reason = "IR stash candidate"
-            elif fa_trend == "hot":
-                reason = f"Trending up, +{upgrade:.2f} recent FP/G"
-            elif drop["trend"] == "cold":
-                reason = f"Cold streak, +{upgrade:.2f} recent FP/G"
-            else:
-                reason = f"+{upgrade:.2f} recent FP/G upgrade"
+    # Phase 2: cross-position pairs when drop group GP is tight (>=75%)
+    for drop in drops:
+        drop_pg = _position_group(drop["position"])
+        drop_gp_pct = gp_used[drop_pg] / GP_LIMITS[drop_pg] * 100
+        if drop_gp_pct < 75:
+            continue
+        drop_recent_fpg = drop["recent_14_fpg"]
+        for target_pg in ("F", "D", "G"):
+            if target_pg == drop_pg:
+                continue
+            if gp_remaining[target_pg] <= gp_remaining[drop_pg]:
+                continue
+            est_games = games_per_player.get(target_pg, 10)
+            for fa in fa_by_pos.get(target_pg, []):
+                fa_recent_fpg = fa.get("recent_14_fpg", 0.0)
+                upgrade = round(fa_recent_fpg - drop_recent_fpg, 2)
+                if upgrade <= 0:
+                    continue
+                reason = _build_reason(fa, drop, upgrade, cross_pos=True,
+                                       drop_pg=drop_pg, target_pg=target_pg)
+                pairs.append(_make_pair(fa, drop, upgrade, reason, est_games))
 
-            # Add line context for FA
-            fa_pp = fa.get("pp_unit")
-            fa_ev = fa.get("ev_line")
-            if fa_pp == 1:
-                reason += " | PP1"
-            elif fa_pp == 2:
-                reason += " | PP2"
-            if fa_ev and fa_ev <= 2:
-                reason += f" | Line {fa_ev}"
-
-            recent_news = fa_news.get(fa["player_name"])
-            if recent_news:
-                reason += f" | News: {recent_news}"
-
-            pairs.append({
-                "pickup_name": fa["player_name"],
-                "pickup_position": fa.get("position", ""),
-                "pickup_season_fpg": round(fa_season_fpg, 2),
-                "pickup_recent_fpg": round(fa_recent_fpg, 2),
-                "pickup_trend": fa_trend,
-                "pickup_team": fa.get("team", ""),
-                "drop_name": drop["player_name"],
-                "drop_position": drop["position"],
-                "drop_season_fpg": drop_season_fpg,
-                "drop_recent_fpg": drop_recent_fpg,
-                "fpg_upgrade": upgrade,
-                "reason": reason,
-            })
-
-    # Greedy assignment: best upgrade first, no reuse
-    pairs.sort(key=lambda p: p["fpg_upgrade"], reverse=True)
+    # Greedy assignment: best total value first, no reuse
+    pairs.sort(key=lambda p: p["total_value"], reverse=True)
+    used_pickups: set[str] = set()
+    used_drops: set[str] = set()
+    recommendations = []
     for pair in pairs:
         if pair["pickup_name"] in used_pickups:
             continue
@@ -1625,4 +1762,8 @@ def get_pickup_recommendations(
         used_drops.add(pair["drop_name"])
         recommendations.append(pair)
 
-    return recommendations[:limit]
+    return {
+        "claims_remaining": claims_remaining,
+        "gp_remaining": gp_remaining,
+        "recommendations": recommendations[:limit],
+    }

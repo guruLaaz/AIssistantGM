@@ -50,7 +50,7 @@ LOG_DIR = Path(__file__).parent / "logs"
 
 PIPELINE_STEPS = [
     "rosters", "schedules", "gamelogs", "seasontotals", "injuries",
-    "lines", "fantrax-league",
+    "lines", "backfill-news", "fantrax-league",
 ]
 STEP_ALIASES: dict[str, list[str]] = {
     "stats": ["gamelogs", "seasontotals"],
@@ -253,7 +253,7 @@ def _run_lines(conn, season):
     return fetch_all_lines(conn)
 
 
-_BACKFILL_MAX_SCROLLS = 50
+_BACKFILL_MAX_SCROLLS = 5000
 
 
 def _run_backfill_news(conn, season):
