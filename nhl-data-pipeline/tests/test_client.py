@@ -12,6 +12,16 @@ from assistant.tools import SessionContext
 from assistant.client import AssistantClient, MAX_TOKENS
 
 
+def _make_stream_cm(response):
+    """Create a mock context manager that mimics messages.stream()."""
+    stream = MagicMock()
+    stream.get_final_message.return_value = response
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=stream)
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
 @pytest.fixture
 def db_path(tmp_path: Path) -> Path:
     return tmp_path / "test.db"
@@ -49,7 +59,7 @@ class TestAssistantClientInit:
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
             os.environ.pop("ASSISTANT_MODEL", None)
             client = AssistantClient(context=ctx, team_name="My Team")
-            assert client.model == "claude-sonnet-4-20250514"
+            assert client.model == "claude-opus-4-6"
 
     @patch("assistant.client.anthropic.Anthropic")
     def test_custom_model(self, mock_anthropic, ctx: SessionContext) -> None:
@@ -164,7 +174,9 @@ class TestChat:
                 content=[text_block],
                 stop_reason="end_turn",
             )
-            client.client.messages.create = MagicMock(return_value=mock_response)
+            client.client.messages.stream = MagicMock(
+                return_value=_make_stream_cm(mock_response)
+            )
 
             result = client.chat("Show me my roster")
             assert result == "Here is your roster!"
@@ -192,8 +204,11 @@ class TestChat:
                 stop_reason="end_turn",
             )
 
-            client.client.messages.create = MagicMock(
-                side_effect=[tool_response, text_response]
+            client.client.messages.stream = MagicMock(
+                side_effect=[
+                    _make_stream_cm(tool_response),
+                    _make_stream_cm(text_response),
+                ]
             )
 
             result = client.chat("What are the standings?")
@@ -216,7 +231,9 @@ class TestChat:
             mock_response = SimpleNamespace(
                 content=[text_block], stop_reason="end_turn",
             )
-            client.client.messages.create = MagicMock(return_value=mock_response)
+            client.client.messages.stream = MagicMock(
+                return_value=_make_stream_cm(mock_response)
+            )
 
             client.chat("new message")
 
@@ -236,7 +253,9 @@ class TestChat:
                 SimpleNamespace(type="text", text="Line 2"),
             ]
             mock_response = SimpleNamespace(content=blocks, stop_reason="end_turn")
-            client.client.messages.create = MagicMock(return_value=mock_response)
+            client.client.messages.stream = MagicMock(
+                return_value=_make_stream_cm(mock_response)
+            )
 
             result = client.chat("Hello")
             assert result == "Line 1\nLine 2"
@@ -249,4 +268,4 @@ class TestChat:
 
 class TestConstants:
     def test_max_tokens(self) -> None:
-        assert MAX_TOKENS == 4096
+        assert MAX_TOKENS == 48_000

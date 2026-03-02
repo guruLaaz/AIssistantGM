@@ -191,6 +191,7 @@ def fetch_all_skater_gamelogs_bulk(
     month_ranges = _season_month_ranges(season)
     all_summary_rows: list[dict[str, Any]] = []
     all_realtime_rows: list[dict[str, Any]] = []
+    all_powerplay_rows: list[dict[str, Any]] = []
 
     for start_date, end_date in month_ranges:
         base_params = {
@@ -224,11 +225,27 @@ def fetch_all_skater_gamelogs_bulk(
         logger.info("  Got %d realtime rows", len(realtime_rows))
         all_realtime_rows.extend(realtime_rows)
 
+        logger.info(
+            "Fetching skater gamelogs (powerplay) for %s to %s...",
+            start_date, end_date,
+        )
+        powerplay_rows = _paginate_stats_api(
+            session, f"{NHL_STATS_API_BASE}/skater/powerplay", base_params,
+        )
+        logger.info("  Got %d powerplay rows", len(powerplay_rows))
+        all_powerplay_rows.extend(powerplay_rows)
+
     # Index realtime by (playerId, gameId) for fast lookup
     realtime_index: dict[tuple[int, int], dict[str, Any]] = {}
     for row in all_realtime_rows:
         key = (row["playerId"], row["gameId"])
         realtime_index[key] = row
+
+    # Index powerplay by (playerId, gameId) for PP TOI lookup
+    pp_index: dict[tuple[int, int], dict[str, Any]] = {}
+    for row in all_powerplay_rows:
+        key = (row["playerId"], row["gameId"])
+        pp_index[key] = row
 
     # Join and convert to internal format
     stats: list[dict[str, Any]] = []
@@ -236,12 +253,13 @@ def fetch_all_skater_gamelogs_bulk(
         pid = row["playerId"]
         gid = row["gameId"]
         rt = realtime_index.get((pid, gid), {})
+        pp = pp_index.get((pid, gid), {})
 
         stats.append({
             "player_id": pid,
             "game_date": row.get("gameDate"),
             "toi": int(row.get("timeOnIcePerGame", 0)),
-            "pp_toi": 0,
+            "pp_toi": int(pp.get("ppTimeOnIce", 0)),
             "goals": int(row.get("goals", 0)),
             "assists": int(row.get("assists", 0)),
             "points": int(row.get("points", 0)),
@@ -301,21 +319,39 @@ def fetch_all_skater_seasontotals_bulk(
     )
     logger.info("  Got %d realtime rows", len(realtime_rows))
 
+    # Powerplay endpoint for PP TOI — sort by ppTimeOnIce
+    pp_params = {
+        **base_params,
+        "sort": '[{"property":"ppTimeOnIce","direction":"DESC"}]',
+    }
+
+    logger.info("Fetching all skater season totals (powerplay) from Stats API...")
+    powerplay_rows = _paginate_stats_api(
+        session, f"{NHL_STATS_API_BASE}/skater/powerplay", pp_params,
+    )
+    logger.info("  Got %d powerplay rows", len(powerplay_rows))
+
     # Index realtime by playerId
     realtime_index: dict[int, dict[str, Any]] = {}
     for row in realtime_rows:
         realtime_index[row["playerId"]] = row
 
+    # Index powerplay by playerId
+    pp_index: dict[int, dict[str, Any]] = {}
+    for row in powerplay_rows:
+        pp_index[row["playerId"]] = row
+
     stats: list[dict[str, Any]] = []
     for row in summary_rows:
         pid = row["playerId"]
         rt = realtime_index.get(pid, {})
+        pp = pp_index.get(pid, {})
 
         stats.append({
             "player_id": pid,
             "game_date": None,
             "toi": int(row.get("timeOnIcePerGame", 0)) * int(row.get("gamesPlayed", 0)),
-            "pp_toi": 0,
+            "pp_toi": int(pp.get("ppTimeOnIce", 0)),
             "goals": int(row.get("goals", 0)),
             "assists": int(row.get("assists", 0)),
             "points": int(row.get("points", 0)),

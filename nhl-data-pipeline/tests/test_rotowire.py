@@ -468,6 +468,43 @@ class TestFetchInjuries:
         assert row_car is not None
         assert row_nyi is not None
 
+    def test_save_injuries_full_refresh_clears_recovered(
+        self, db: sqlite3.Connection
+    ) -> None:
+        """Recovered players are removed on second save_injuries call.
+
+        If a player was on the injury list in run 1 but not in run 2,
+        their injury record should be deleted (full refresh behavior).
+        """
+        # Run 1: Both McDavid and Suzuki injured
+        save_injuries(db, MOCK_INJURY_JSON)
+        cnt = db.execute(
+            "SELECT COUNT(*) as cnt FROM player_injuries WHERE source = 'rotowire'"
+        ).fetchone()["cnt"]
+        assert cnt == 2
+
+        # Run 2: Only Suzuki still injured (McDavid recovered)
+        second_run = [MOCK_INJURY_JSON[1]]  # just Suzuki
+        save_injuries(db, second_run)
+
+        # McDavid's injury should be gone
+        mcd = db.execute(
+            "SELECT * FROM player_injuries WHERE player_id = 8478402 AND source = 'rotowire'"
+        ).fetchone()
+        assert mcd is None
+
+        # Suzuki's injury should still be there
+        suz = db.execute(
+            "SELECT * FROM player_injuries WHERE player_id = 8480018 AND source = 'rotowire'"
+        ).fetchone()
+        assert suz is not None
+
+        # Total should be 1
+        cnt2 = db.execute(
+            "SELECT COUNT(*) as cnt FROM player_injuries WHERE source = 'rotowire'"
+        ).fetchone()["cnt"]
+        assert cnt2 == 1
+
 
 # =============================================================================
 # Player Name Matching Tests (6 tests)

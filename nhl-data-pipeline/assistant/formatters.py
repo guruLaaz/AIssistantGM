@@ -17,6 +17,16 @@ def _injury_tag(injury: dict | None) -> str:
     return f"[{injury.get('status', 'INJ')}]"
 
 
+def _deploy_tag(ev_line: int | None, pp_unit: int | None) -> str:
+    """Compact deployment string like 'L1/PP2', 'L3', or '-'."""
+    parts: list[str] = []
+    if ev_line is not None:
+        parts.append(f"L{ev_line}")
+    if pp_unit is not None:
+        parts.append(f"PP{pp_unit}")
+    return "/".join(parts) if parts else "-"
+
+
 def _line_tag(line_info: dict | None) -> str:
     """Build a compact line descriptor like 'L1/PP1' from line info dict."""
     if not line_info:
@@ -50,9 +60,9 @@ def format_roster(data: list[dict]) -> str:
 
     lines = []
     lines.append(f"{'Player':<22} {'Pos':>3} {'GP':>3} {'Key Stats':<20} "
-                 f"{'FP':>6} {'FP/G':>5} {'R14':>5} {'Trend':<7} "
+                 f"{'FP':>6} {'FP/G':>5} {'R14':>5} {'Sal':>6} {'Trend':<7} "
                  f"{'Line':>7} {'Injury':<12}")
-    lines.append(_divider(98))
+    lines.append(_divider(105))
 
     for p in data:
         name = (p["player_name"] or "")[:21]
@@ -61,6 +71,8 @@ def format_roster(data: list[dict]) -> str:
         fp = p.get("fantasy_points", 0.0)
         fpg = p.get("fpts_per_game", 0.0)
         r14 = p.get("recent_14_fpg", 0.0)
+        salary = p.get("salary", 0) or 0
+        sal_str = f"${salary / 1_000_000:.1f}M" if salary > 0 else "    -"
         inj = _injury_tag(p.get("injury"))
 
         trend = p.get("trend", "neutral")
@@ -84,7 +96,7 @@ def format_roster(data: list[dict]) -> str:
             key_stats = f"{g}G {a}A {h}H {b}B"
 
         lines.append(f"{name:<22} {pos:>3} {gp:>3} {key_stats:<20} "
-                     f"{fp:>6.1f} {fpg:>5.2f} {r14:>5.2f} {trend_str:<7} "
+                     f"{fp:>6.1f} {fpg:>5.2f} {r14:>5.2f} {sal_str:>6} {trend_str:<7} "
                      f"{lt:>7} {inj:<12}")
 
     return "\n".join(lines)
@@ -176,10 +188,15 @@ def format_player_card(data: dict) -> str:
         ev = line_ctx.get("ev_line")
         pp = line_ctx.get("pp_unit")
         line_parts = []
-        pos = p.get("position", "")
+        deployed_pos = line_ctx.get("deployed_position", "")
         if ev:
-            label = "Forward" if pos in ("C", "L", "R") else "Defense"
-            line_parts.append(f"{label} Line {ev}")
+            pos_label = deployed_pos.upper() if deployed_pos else ""
+            if pos_label:
+                line_parts.append(f"Line {ev} ({pos_label})")
+            else:
+                pos = p.get("position", "")
+                label = "Forward" if pos in ("C", "L", "R") else "Defense"
+                line_parts.append(f"{label} Line {ev}")
         if pp:
             line_parts.append(f"PP{pp}")
         if line_parts:
@@ -421,11 +438,11 @@ def format_standings(data: list[dict]) -> str:
     for s in data:
         name = (s.get("team_name") or s.get("short_name") or "")[:21]
         gb = s.get("games_back", 0.0)
-        gb_str = "  -" if gb == 0.0 else f"{gb:.1f}"
+        gb_str = "  -" if gb == 0.0 else f"{gb:.2f}"
         lines.append(
             f"{s.get('rank', 0):>3} {name:<22} "
             f"{s.get('games_played', 0):>4} "
-            f"{s.get('points_for', 0.0):>8.1f} "
+            f"{s.get('points_for', 0.0):>8.2f} "
             f"{s.get('fantasy_points_per_game', 0.0):>6.2f} "
             f"{gb_str:>6} "
             f"{s.get('streak', ''):>6}"
@@ -791,19 +808,35 @@ def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
     lines.append("=== RECOMMENDED PICKUPS ===")
     lines.append("")
     if pickup_list:
-        lines.append(f"{'Pickup':<20} {'Pos':>3} {'Szn':>5} {'R14':>5}  "
+        lines.append(f"{'Pickup':<20} {'Pos':>3} {'Tm':>3} {'Line':>4} {'PP/G':>5} "
+                     f"{'GP':>3} {'Szn':>5} {'R14':>5} "
+                     f"{'Reg':>5}  "
                      f"{'Drop':<20} {'Szn':>5} {'R14':>5} "
                      f"{'Upg':>7} {'~GP':>4} {'TotV':>6}  {'Reason'}")
-        lines.append(_divider(132))
+        lines.append(_divider(155))
         for r in pickup_list:
-            pickup = (r.get("pickup_name") or "")[:19]
+            inj_tag = ""
+            if r.get("pickup_injury"):
+                inj_tag = f" [{r['pickup_injury'].get('status', 'INJ')}]"
+            pickup = ((r.get("pickup_name") or "")[:19 - len(inj_tag)] + inj_tag)
             drop = (r.get("drop_name") or "")[:19]
             est_games = r.get("est_games", 0)
             total_val = r.get("total_value", 0.0)
+            pickup_gp = r.get("pickup_games_played", 0)
+            regressed = r.get("pickup_regressed_fpg",
+                              r.get("pickup_recent_fpg", 0.0))
+            team = r.get("pickup_team", "")[:3]
+            ev_line = r.get("pickup_ev_line")
+            line_str = f"L{ev_line}" if ev_line is not None else "-"
+            pp_pg = r.get("pickup_pp_toi_per_game", 0)
+            pp_str = f"{pp_pg // 60}:{pp_pg % 60:02d}"
             lines.append(
                 f"{pickup:<20} {r.get('pickup_position', ''):>3} "
+                f"{team:>3} {line_str:>4} {pp_str:>5} "
+                f"{pickup_gp:>3} "
                 f"{r.get('pickup_season_fpg', 0.0):>5.2f} "
-                f"{r.get('pickup_recent_fpg', 0.0):>5.2f}  "
+                f"{r.get('pickup_recent_fpg', 0.0):>5.2f} "
+                f"{regressed:>5.2f}  "
                 f"{drop:<20} "
                 f"{r.get('drop_season_fpg', 0.0):>5.2f} "
                 f"{r.get('drop_recent_fpg', 0.0):>5.2f} "
@@ -814,5 +847,91 @@ def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
             )
     else:
         lines.append("  No clear pickup recommendations.")
+
+    # Section 3: IR Stash Candidates
+    ir_stash: list[dict] = []
+    ir_slot_open = False
+    if isinstance(pickups, dict):
+        ir_stash = pickups.get("ir_stash", [])
+        ir_slot_open = pickups.get("ir_slot_open", False)
+
+    if ir_slot_open:
+        lines.append("")
+        lines.append("=== IR STASH CANDIDATES (no drop needed) ===")
+        lines.append("")
+        if ir_stash:
+            lines.append(
+                f"{'Player':<20} {'Pos':>3} {'Tm':>3} "
+                f"{'GP':>3} {'Szn':>5} {'R14':>5} "
+                f"{'Reg':>5}  {'~GP':>4} {'TotV':>6}  {'Reason'}")
+            lines.append(_divider(85))
+            for r in ir_stash:
+                inj_tag = ""
+                if r.get("pickup_injury"):
+                    inj_tag = (
+                        f" [{r['pickup_injury'].get('status', 'INJ')}]")
+                name = ((r.get("pickup_name") or "")[:19 - len(inj_tag)]
+                        + inj_tag)
+                team = r.get("pickup_team", "")[:3]
+                lines.append(
+                    f"{name:<20} {r.get('pickup_position', ''):>3} "
+                    f"{team:>3} "
+                    f"{r.get('pickup_games_played', 0):>3} "
+                    f"{r.get('pickup_season_fpg', 0.0):>5.2f} "
+                    f"{r.get('pickup_recent_fpg', 0.0):>5.2f} "
+                    f"{r.get('pickup_regressed_fpg', 0.0):>5.2f}  "
+                    f"{r.get('est_games', 0):>4} "
+                    f"{r.get('total_value', 0.0):>+6.1f}  "
+                    f"{r.get('reason', '')}"
+                )
+                for news_item in (r.get("pickup_recent_news") or []):
+                    lines.append(f"{'':>28}^ {news_item}")
+        else:
+            lines.append("  No IR-eligible free agents worth stashing.")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Web search results
+# ---------------------------------------------------------------------------
+
+
+def format_web_search_results(data: dict, query: str) -> str:
+    """Format Brave Search API response as readable text.
+
+    Args:
+        data: Raw JSON response from Brave Search API.
+        query: Original search query (for header context).
+
+    Returns:
+        Formatted search results string.
+    """
+    results = data.get("web", {}).get("results", [])
+
+    if not results:
+        return f"No web results found for: '{query}'"
+
+    lines = []
+    lines.append(f"=== Web Search: {query} ===")
+    lines.append("")
+
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "Untitled")
+        url = r.get("url", "")
+        snippet = r.get("description", "")
+        snippet = snippet.replace("&amp;", "&").replace("&#x27;", "'")
+        age = r.get("age", "")
+
+        lines.append(f"{i}. {title}")
+        if age:
+            lines.append(f"   [{age}] {url}")
+        else:
+            lines.append(f"   {url}")
+        if snippet:
+            if len(snippet) > 200:
+                snippet = snippet[:197].rsplit(" ", 1)[0] + "..."
+            lines.append(f"   {snippet}")
+        lines.append("")
 
     return "\n".join(lines)

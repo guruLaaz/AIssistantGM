@@ -22,6 +22,7 @@ from assistant.queries import (
     get_pickup_recommendations,
     suggest_trades,
     _get_skater_season_stats,
+    _get_recent_pp_toi,
 )
 
 
@@ -1089,11 +1090,11 @@ class TestPickupRecentFPG:
             assert "pickup_trend" in r
             assert r["pickup_trend"] in ("hot", "cold", "neutral")
 
-    def test_pickup_upgrade_based_on_recent(self, db: sqlite3.Connection) -> None:
-        """fpg_upgrade is calculated from recent 14-game FP/G, not season."""
+    def test_pickup_upgrade_based_on_regressed(self, db: sqlite3.Connection) -> None:
+        """fpg_upgrade is calculated from regressed FP/G, not raw recent."""
         recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
         for r in recs:
-            expected = round(r["pickup_recent_fpg"] - r["drop_recent_fpg"], 2)
+            expected = round(r["pickup_regressed_fpg"] - r["drop_recent_fpg"], 2)
             assert r["fpg_upgrade"] == expected
 
     def test_pickup_reason_mentions_recent(self, db: sqlite3.Connection) -> None:
@@ -1201,3 +1202,323 @@ class TestPickupTotalValue:
         if len(recs) >= 2:
             vals = [r["total_value"] for r in recs]
             assert vals == sorted(vals, reverse=True)
+
+
+# ---- roster analysis salary ----
+
+
+class TestRosterAnalysisSalary:
+    """Tests for salary data in get_roster_analysis."""
+
+    def test_salary_dict_present(self, db: sqlite3.Connection) -> None:
+        """Roster analysis includes salary key with total/cap/space."""
+        analysis = get_roster_analysis(db, "team1", "20252026")
+        assert "salary" in analysis
+        sal = analysis["salary"]
+        assert "total" in sal
+        assert "cap" in sal
+        assert "space" in sal
+
+    def test_salary_total_correct(self, db: sqlite3.Connection) -> None:
+        """Salary total matches sum of roster salaries."""
+        analysis = get_roster_analysis(db, "team1", "20252026")
+        # McDavid 12.5M + Crosby 8.7M + Makar 9M + Saros 5M = 35.2M
+        expected = 12_500_000 + 8_700_000 + 9_000_000 + 5_000_000
+        assert analysis["salary"]["total"] == expected
+
+    def test_salary_cap_constant(self, db: sqlite3.Connection) -> None:
+        """Cap uses the SALARY_CAP constant."""
+        from assistant.queries import SALARY_CAP
+        analysis = get_roster_analysis(db, "team1", "20252026")
+        assert analysis["salary"]["cap"] == SALARY_CAP
+
+    def test_salary_space_equals_cap_minus_total(self, db: sqlite3.Connection) -> None:
+        """space = cap - total."""
+        analysis = get_roster_analysis(db, "team1", "20252026")
+        sal = analysis["salary"]
+        assert sal["space"] == sal["cap"] - sal["total"]
+
+
+# ---- pickup recommendations injury-aware est_games ----
+
+
+class TestPickupInjuryAdjustment:
+    """Tests for injury-adjusted est_games in pickup recommendations."""
+
+    def test_long_term_injury_zero_est_games(self, db: sqlite3.Connection) -> None:
+        """FA with days_out > 60 and injury gets est_games=0."""
+        # Add a free agent with an injury and very old last game
+        upsert_player(db, {
+            "id": 9999901, "full_name": "Injured LongTerm",
+            "first_name": "Injured", "last_name": "LongTerm",
+            "team_abbrev": "TOR", "position": "C",
+        })
+        # Season totals — high FP/G so he'd rank well if not injured
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (9999901, NULL, '20252026', 1, 30, 30, 60, 50, 20, 150, 10, 4, 60000)"
+        )
+        # Per-game rows 90 days ago (so days_out > 60)
+        old_date = (date.today() - timedelta(days=90)).isoformat()
+        for i in range(15):
+            gd = (date.today() - timedelta(days=90 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (9999901, '{gd}', '20252026', 0, 2, 2, 4, 3, 1, 10, 1, 0, 1200)"
+            )
+        # Add injury
+        db.execute(
+            "INSERT INTO player_injuries (player_id, source, injury_type, status, updated_at) "
+            "VALUES (9999901, 'rotowire', 'ACL', 'IR-LT', '2026-01-01')"
+        )
+        db.commit()
+
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        # Find our injured player if present
+        long_term = [r for r in recs if r["pickup_name"] == "Injured LongTerm"]
+        if long_term:
+            assert long_term[0]["est_games"] == 0
+            assert long_term[0]["total_value"] == 0.0
+
+    def test_recently_active_ir_normal_est_games(self, db: sqlite3.Connection) -> None:
+        """FA with injury but played recently keeps normal est_games."""
+        upsert_player(db, {
+            "id": 9999902, "full_name": "Active IRPlayer",
+            "first_name": "Active", "last_name": "IRPlayer",
+            "team_abbrev": "NYR", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (9999902, NULL, '20252026', 1, 25, 35, 60, 80, 30, 160, 8, 6, 58000)"
+        )
+        # Per-game rows very recent (days_out < 5)
+        for i in range(15):
+            gd = (date.today() - timedelta(days=1 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (9999902, '{gd}', '20252026', 0, 2, 2, 4, 5, 2, 11, 1, 0, 1200)"
+            )
+        # IR but recently active (cap management)
+        db.execute(
+            "INSERT INTO player_injuries (player_id, source, injury_type, status, updated_at) "
+            "VALUES (9999902, 'rotowire', 'Lower Body', 'IR-LT', '2026-02-20')"
+        )
+        db.commit()
+
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        active_ir = [r for r in recs if r["pickup_name"] == "Active IRPlayer"]
+        if active_ir:
+            # Should have normal est_games (> 0) since he played yesterday
+            assert active_ir[0]["est_games"] > 0
+
+    def test_pickup_injury_fields_present(self, db: sqlite3.Connection) -> None:
+        """Each recommendation includes pickup_injury and pickup_days_out."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            assert "pickup_injury" in r
+            assert "pickup_days_out" in r
+
+
+# ---- pickup recommendations Bayesian regression ----
+
+
+class TestPickupBayesianRegression:
+    """Tests for Bayesian regression to mean in pickup recommendations."""
+
+    def test_regressed_fpg_field_present(self, db: sqlite3.Connection) -> None:
+        """Each recommendation includes pickup_regressed_fpg."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            assert "pickup_regressed_fpg" in r
+            assert isinstance(r["pickup_regressed_fpg"], float)
+
+    def test_regressed_fpg_less_than_or_equal_raw(self, db: sqlite3.Connection) -> None:
+        """Regressed FP/G <= raw for above-median players (all pickups are above median)."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            assert r["pickup_regressed_fpg"] <= r["pickup_recent_fpg"] + 0.01
+
+    def test_deployment_fields_present(self, db: sqlite3.Connection) -> None:
+        """Each recommendation includes GP, TOI/G, PP TOI, ev_line, pp_unit."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            assert "pickup_games_played" in r
+            assert "pickup_toi_per_game" in r
+            assert "pickup_pp_toi" in r
+            assert "pickup_ev_line" in r
+            assert "pickup_pp_unit" in r
+
+    def test_small_sample_warning_in_reason(self, db: sqlite3.Connection) -> None:
+        """Players with GP < REGRESSION_K get small sample warning."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            gp = r.get("pickup_games_played", 0)
+            if gp < 25:
+                assert "small sample" in r["reason"]
+                assert f"{gp} GP" in r["reason"]
+
+    def test_upgrade_uses_regressed_fpg(self, db: sqlite3.Connection) -> None:
+        """fpg_upgrade matches regressed_fpg - drop_recent_fpg."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            expected = round(r["pickup_regressed_fpg"] - r["drop_recent_fpg"], 2)
+            assert r["fpg_upgrade"] == expected
+
+
+# ---- IR stash recommendations ----
+
+
+class TestPickupIRStash:
+    """Tests for IR stash candidates in pickup recommendations."""
+
+    def test_ir_stash_present_when_slot_open(self, db: sqlite3.Connection) -> None:
+        """With no status_id='3' rows, ir_slot_open=True and ir_stash exists."""
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        assert "ir_slot_open" in data
+        assert "ir_stash" in data
+        assert data["ir_slot_open"] is True
+        assert isinstance(data["ir_stash"], list)
+
+    def test_ir_stash_closed_when_slot_occupied(self, db: sqlite3.Connection) -> None:
+        """With a status_id='3' row, ir_slot_open=False."""
+        # Occupy the IR slot
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team1', 'IR Player', 'C', '3', 0)"
+        )
+        db.commit()
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        assert data["ir_slot_open"] is False
+        assert data["ir_stash"] == []
+
+    def test_ir_stash_only_ir_eligible(self, db: sqlite3.Connection) -> None:
+        """All IR stash candidates have injury status containing 'IR'."""
+        # Add an IR-eligible FA
+        upsert_player(db, {
+            "id": 9999910, "full_name": "IR Stash Guy",
+            "first_name": "IR", "last_name": "Stash Guy",
+            "team_abbrev": "MTL", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (9999910, NULL, '20252026', 1, 20, 20, 40, 50, 20, 100, 5, 4, 40000)"
+        )
+        for i in range(15):
+            gd = (date.today() - timedelta(days=15 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (9999910, '{gd}', '20252026', 0, 1, 1, 2, 3, 1, 7, 0, 0, 1100)"
+            )
+        db.execute(
+            "INSERT INTO player_injuries (player_id, source, injury_type, status, updated_at) "
+            "VALUES (9999910, 'rotowire', 'Knee', 'IR', '2026-02-15')"
+        )
+        db.commit()
+
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        for candidate in data["ir_stash"]:
+            inj = candidate.get("pickup_injury", {})
+            assert "IR" in inj.get("status", "").upper()
+
+    def test_ir_stash_excludes_season_ending(self, db: sqlite3.Connection) -> None:
+        """Players with days_out > 60 are excluded from IR stash."""
+        upsert_player(db, {
+            "id": 9999911, "full_name": "Season Ender",
+            "first_name": "Season", "last_name": "Ender",
+            "team_abbrev": "BOS", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (9999911, NULL, '20252026', 1, 25, 25, 50, 40, 15, 120, 8, 2, 50000)"
+        )
+        # Last game 90 days ago
+        for i in range(15):
+            gd = (date.today() - timedelta(days=90 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (9999911, '{gd}', '20252026', 0, 2, 2, 4, 3, 1, 8, 1, 0, 1100)"
+            )
+        db.execute(
+            "INSERT INTO player_injuries (player_id, source, injury_type, status, updated_at) "
+            "VALUES (9999911, 'rotowire', 'ACL', 'IR-LT', '2025-12-01')"
+        )
+        db.commit()
+
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        names = [c["pickup_name"] for c in data["ir_stash"]]
+        assert "Season Ender" not in names
+
+    def test_ir_stash_includes_recent_news(self, db: sqlite3.Connection) -> None:
+        """IR stash candidates include pickup_recent_news list."""
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        for candidate in data["ir_stash"]:
+            assert "pickup_recent_news" in candidate
+            assert isinstance(candidate["pickup_recent_news"], list)
+
+
+# ---- Per-game PP TOI ----
+
+
+class TestRecentPpToi:
+    """Tests for _get_recent_pp_toi helper."""
+
+    def test_returns_per_game_pp_toi(self, db: sqlite3.Connection) -> None:
+        """Returns a list of per-game PP TOI values, newest first."""
+        # Use an existing FA player (id=9999901 from fixture has per-game rows)
+        result = _get_recent_pp_toi(db, 9999901, "20252026")
+        assert isinstance(result, list)
+        for val in result:
+            assert isinstance(val, int)
+
+    def test_empty_for_nonexistent_player(self, db: sqlite3.Connection) -> None:
+        """Returns empty list for player with no stats."""
+        result = _get_recent_pp_toi(db, 99999999, "20252026")
+        assert result == []
+
+    def test_limit_param(self, db: sqlite3.Connection) -> None:
+        """Respects the n limit parameter."""
+        result = _get_recent_pp_toi(db, 9999901, "20252026", n=3)
+        assert len(result) <= 3
+
+
+class TestPickupPpToiInOutput:
+    """Pickup recommendations include per-game PP TOI data."""
+
+    def test_pickup_team_present(self, db: sqlite3.Connection) -> None:
+        """Each recommendation has pickup_team field."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            assert "pickup_team" in r
+            assert isinstance(r["pickup_team"], str)
+            assert len(r["pickup_team"]) > 0
+
+    def test_pp_toi_per_game_present(self, db: sqlite3.Connection) -> None:
+        """Each recommendation has pickup_pp_toi_per_game field."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            assert "pickup_pp_toi_per_game" in r
+            assert isinstance(r["pickup_pp_toi_per_game"], (int, float))
+
+    def test_pp_toi_recent_present(self, db: sqlite3.Connection) -> None:
+        """Each recommendation has pickup_pp_toi_recent list."""
+        recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
+        for r in recs:
+            assert "pickup_pp_toi_recent" in r
+            assert isinstance(r["pickup_pp_toi_recent"], list)

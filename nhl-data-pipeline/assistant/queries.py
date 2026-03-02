@@ -33,6 +33,15 @@ _FORWARD_POSITIONS = {"C", "L", "R"}
 # League GP limits per position group (roster slots × 82 games)
 GP_LIMITS = {"F": 984, "D": 492, "G": 82}
 
+# Salary cap: NHL cap ($95.5M) + 15%
+SALARY_CAP = 109_825_000
+
+# Bayesian regression: at K games, 50/50 weight on observed vs prior (pool median).
+REGRESSION_K = 25
+
+# Fantrax roster slot status IDs
+IR_SLOT_STATUS = "3"  # Fantrax status_id for IR slot
+IR_SLOT_LIMIT = 1     # League has 1 IR slot per team
 
 def _is_goalie(conn: sqlite3.Connection, player_id: int) -> bool:
     """Check if a player is a goalie."""
@@ -51,6 +60,22 @@ def _position_group(position: str | None) -> str:
     if position == "D":
         return "D"
     return "F"
+
+
+def _get_recent_pp_toi(
+    conn: sqlite3.Connection,
+    player_id: int,
+    season: str,
+    n: int = 30,
+) -> list[int]:
+    """Return per-game PP TOI (seconds) for the last *n* games, newest first."""
+    rows = conn.execute(
+        "SELECT pp_toi FROM skater_stats "
+        "WHERE player_id = ? AND season = ? AND is_season_total = 0 "
+        "ORDER BY game_date DESC LIMIT ?",
+        (player_id, season, n),
+    ).fetchall()
+    return [r["pp_toi"] for r in rows]
 
 
 def _get_recent_fpts_list(
@@ -251,6 +276,7 @@ def _get_line_context(
         "ev_line": row["ev_line"],
         "pp_unit": row["pp_unit"],
         "pk_unit": row["pk_unit"],
+        "deployed_position": row["position"],
         "ev_linemates": json.loads(row["ev_linemates"]) if row["ev_linemates"] else [],
         "pp_linemates": json.loads(row["pp_linemates"]) if row["pp_linemates"] else [],
         "rating": row["rating"],
@@ -390,6 +416,7 @@ def get_roster_analysis(
     counts: dict[str, int] = {"F": 0, "D": 0, "G": 0}
     fpts_sums: dict[str, float] = {"F": 0.0, "D": 0.0, "G": 0.0}
     gp_used: dict[str, int] = {"F": 0, "D": 0, "G": 0}
+    total_salary = 0.0
     injured = []
 
     for p in roster:
@@ -397,6 +424,7 @@ def get_roster_analysis(
         counts[group] = counts.get(group, 0) + 1
         fpts_sums[group] = fpts_sums.get(group, 0.0) + p["fpts_per_game"]
         gp_used[group] = gp_used.get(group, 0) + p.get("games_played", 0)
+        total_salary += p.get("salary", 0) or 0
         if p.get("injury"):
             injured.append(p)
 
@@ -427,6 +455,11 @@ def get_roster_analysis(
         "bottom_performers": bottom,
         "injured_players": injured,
         "gp_limits": gp_limits,
+        "salary": {
+            "total": total_salary,
+            "cap": SALARY_CAP,
+            "space": SALARY_CAP - total_salary,
+        },
     }
 
 
@@ -517,6 +550,7 @@ def search_free_agents(
                 "hits": hits,
                 "blocks": blocks,
                 "toi_per_game": stats.get("toi_per_game", 0),
+                "pp_toi": stats.get("pp_toi", 0),
                 "peripheral_fpg": peripheral_fpg,
             })
 
@@ -538,6 +572,18 @@ def search_free_agents(
         line_ctx = _get_line_context(conn, pid)
         entry["ev_line"] = line_ctx["ev_line"] if line_ctx else None
         entry["pp_unit"] = line_ctx["pp_unit"] if line_ctx else None
+
+        # Per-game PP TOI for recent games (AI can reason about actual usage)
+        if not goalie:
+            pp_toi_recent = _get_recent_pp_toi(conn, pid, season)
+            entry["pp_toi_recent"] = pp_toi_recent
+            entry["pp_toi_per_game"] = (
+                round(sum(pp_toi_recent) / len(pp_toi_recent))
+                if pp_toi_recent else 0
+            )
+        else:
+            entry["pp_toi_recent"] = []
+            entry["pp_toi_per_game"] = 0
 
         recent_news_row = conn.execute(
             "SELECT headline FROM player_news WHERE player_id = ? "
@@ -1606,17 +1652,27 @@ def get_pickup_recommendations(
     ).fetchone()
     claims_remaining = claims_row["claims_remaining"] if claims_row else None
 
+    # Check if IR slot is open (can stash injured FA without dropping)
+    ir_count = conn.execute(
+        "SELECT COUNT(*) as cnt FROM fantasy_roster_slots "
+        "WHERE team_id = ? AND status_id = ?",
+        (team_id, IR_SLOT_STATUS),
+    ).fetchone()["cnt"]
+    ir_slot_open = ir_count < IR_SLOT_LIMIT
+
     drops = get_drop_candidates(conn, team_id, season)
     if not drops:
         return {"claims_remaining": claims_remaining,
-                "gp_remaining": None, "recommendations": []}
+                "gp_remaining": None, "recommendations": [],
+                "ir_slot_open": ir_slot_open, "ir_stash": []}
 
     free_agents = search_free_agents(
         conn, season, position="any", sort_by="fpts_per_game",
         min_games=10, limit=50,
     )
     empty = {"claims_remaining": claims_remaining,
-             "gp_remaining": None, "recommendations": []}
+             "gp_remaining": None, "recommendations": [],
+             "ir_slot_open": ir_slot_open, "ir_stash": []}
     if not free_agents:
         return empty
 
@@ -1626,19 +1682,52 @@ def get_pickup_recommendations(
         pg = _position_group(fa.get("position"))
         fa_by_pos.setdefault(pg, []).append(fa)
 
-    # Pre-build news lookup for free agents
-    fa_news: dict[str, str] = {}
+    # Positional priors for Bayesian regression (median R14 FP/G of FA pool)
+    fa_pool_median: dict[str, float] = {}
+    for pg, fas_in_group in fa_by_pos.items():
+        r14_vals = [f.get("recent_14_fpg", 0.0) for f in fas_in_group
+                    if f.get("recent_14_fpg", 0.0) > 0]
+        fa_pool_median[pg] = (statistics.median(r14_vals)
+                              if r14_vals else 0.0)
+
+    def _regress_fpg(observed: float, gp: int, prior: float) -> float:
+        """Bayesian regression to mean: small samples pulled toward prior."""
+        return round(
+            (observed * gp + prior * REGRESSION_K) / (gp + REGRESSION_K), 2
+        )
+
+    # Pre-build news lookup and days_out for free agents
+    fa_news: dict[str, str] = {}  # single headline for regular pickups
+    fa_news_all: dict[str, list[str]] = {}  # multiple headlines for IR stash
+    today = date.today()
     for fa in free_agents:
         resolved_fa = resolve_player(conn, fa["player_name"])
         if resolved_fa:
-            news_row = conn.execute(
+            news_rows = conn.execute(
                 "SELECT headline FROM player_news WHERE player_id = ? "
                 "AND published_at >= date('now', '-42 days') "
-                "ORDER BY published_at DESC LIMIT 1",
+                "ORDER BY published_at DESC LIMIT 3",
+                (resolved_fa["id"],),
+            ).fetchall()
+            if news_rows:
+                fa_news[fa["player_name"]] = news_rows[0]["headline"]
+                fa_news_all[fa["player_name"]] = [
+                    r["headline"] for r in news_rows
+                ]
+            # Compute days since last game for injury-aware est_games
+            table = ("goalie_stats" if fa.get("position") == "G"
+                     else "skater_stats")
+            lg_row = conn.execute(
+                f"SELECT MAX(game_date) as lg FROM {table} "
+                f"WHERE player_id = ?",
                 (resolved_fa["id"],),
             ).fetchone()
-            if news_row:
-                fa_news[fa["player_name"]] = news_row["headline"]
+            if lg_row and lg_row["lg"]:
+                fa["days_out"] = (today - date.fromisoformat(lg_row["lg"])).days
+            else:
+                fa["days_out"] = 999
+        else:
+            fa["days_out"] = 0
 
     # Compute GP remaining per position group
     roster = get_my_roster(conn, team_id, season)
@@ -1687,24 +1776,48 @@ def get_pickup_recommendations(
         recent_news = fa_news.get(fa["player_name"])
         if recent_news:
             reason += f" | News: {recent_news}"
+
+        fa_gp = fa.get("games_played", 0)
+        if fa_gp < REGRESSION_K:
+            reason += f" (small sample: {fa_gp} GP)"
         return reason
 
     def _make_pair(fa: dict, drop: dict, upgrade: float, reason: str,
-                   est_games: int) -> dict:
+                   est_games: int, regressed_fpg: float = 0.0) -> dict:
+        # Adjust est_games for injured FAs based on days since last game
+        fa_est_games = est_games
+        injury = fa.get("injury")
+        if injury:
+            days_out = fa.get("days_out", 0)
+            if days_out > 60:
+                fa_est_games = 0  # likely season-ending
+            elif days_out > 30:
+                fa_est_games = max(0, est_games - int(days_out / 3))
+            # DTD / recently played: no reduction
         return {
             "pickup_name": fa["player_name"],
             "pickup_position": fa.get("position", ""),
             "pickup_season_fpg": round(fa.get("fpts_per_game", 0.0), 2),
             "pickup_recent_fpg": round(fa.get("recent_14_fpg", 0.0), 2),
+            "pickup_regressed_fpg": regressed_fpg,
+            "pickup_games_played": fa.get("games_played", 0),
+            "pickup_toi_per_game": fa.get("toi_per_game", 0),
+            "pickup_pp_toi": fa.get("pp_toi", 0),
+            "pickup_pp_toi_per_game": fa.get("pp_toi_per_game", 0),
+            "pickup_pp_toi_recent": fa.get("pp_toi_recent", []),
+            "pickup_ev_line": fa.get("ev_line"),
+            "pickup_pp_unit": fa.get("pp_unit"),
             "pickup_trend": fa.get("trend", "neutral"),
             "pickup_team": fa.get("team", ""),
+            "pickup_injury": injury,
+            "pickup_days_out": fa.get("days_out", 0),
             "drop_name": drop["player_name"],
             "drop_position": drop["position"],
             "drop_season_fpg": drop["season_fpg"],
             "drop_recent_fpg": drop["recent_14_fpg"],
             "fpg_upgrade": upgrade,
-            "est_games": est_games,
-            "total_value": round(upgrade * est_games, 1),
+            "est_games": fa_est_games,
+            "total_value": round(upgrade * fa_est_games, 1),
             "reason": reason,
         }
 
@@ -1719,12 +1832,16 @@ def get_pickup_recommendations(
         drop_recent_fpg = drop["recent_14_fpg"]
         est_games = games_per_player.get(drop_pg, 10)
         for fa in fa_by_pos.get(drop_pg, []):
-            fa_recent_fpg = fa.get("recent_14_fpg", 0.0)
-            upgrade = round(fa_recent_fpg - drop_recent_fpg, 2)
+            fa_gp = fa.get("games_played", 0)
+            prior = fa_pool_median.get(drop_pg, 0.0)
+            fa_regressed = _regress_fpg(
+                fa.get("recent_14_fpg", 0.0), fa_gp, prior)
+            upgrade = round(fa_regressed - drop_recent_fpg, 2)
             if upgrade <= 0:
                 continue
             reason = _build_reason(fa, drop, upgrade)
-            pairs.append(_make_pair(fa, drop, upgrade, reason, est_games))
+            pairs.append(_make_pair(fa, drop, upgrade, reason, est_games,
+                                    fa_regressed))
 
     # Phase 2: cross-position pairs when drop group GP is tight (>=75%)
     for drop in drops:
@@ -1740,13 +1857,17 @@ def get_pickup_recommendations(
                 continue
             est_games = games_per_player.get(target_pg, 10)
             for fa in fa_by_pos.get(target_pg, []):
-                fa_recent_fpg = fa.get("recent_14_fpg", 0.0)
-                upgrade = round(fa_recent_fpg - drop_recent_fpg, 2)
+                fa_gp = fa.get("games_played", 0)
+                prior = fa_pool_median.get(target_pg, 0.0)
+                fa_regressed = _regress_fpg(
+                    fa.get("recent_14_fpg", 0.0), fa_gp, prior)
+                upgrade = round(fa_regressed - drop_recent_fpg, 2)
                 if upgrade <= 0:
                     continue
                 reason = _build_reason(fa, drop, upgrade, cross_pos=True,
                                        drop_pg=drop_pg, target_pg=target_pg)
-                pairs.append(_make_pair(fa, drop, upgrade, reason, est_games))
+                pairs.append(_make_pair(fa, drop, upgrade, reason, est_games,
+                                        fa_regressed))
 
     # Greedy assignment: best total value first, no reuse
     pairs.sort(key=lambda p: p["total_value"], reverse=True)
@@ -1762,8 +1883,77 @@ def get_pickup_recommendations(
         used_drops.add(pair["drop_name"])
         recommendations.append(pair)
 
+    # IR stash candidates: injured FAs that can go straight to IR slot
+    ir_stash: list[dict] = []
+    if ir_slot_open:
+        for fa in free_agents:
+            injury = fa.get("injury")
+            if not injury:
+                continue
+            inj_status = injury.get("status", "")
+            if "IR" not in inj_status.upper():
+                continue
+            if fa["player_name"] in used_pickups:
+                continue
+
+            fa_gp = fa.get("games_played", 0)
+            fa_pg = _position_group(fa.get("position"))
+            prior = fa_pool_median.get(fa_pg, 0.0)
+            fa_regressed = _regress_fpg(
+                fa.get("recent_14_fpg", 0.0), fa_gp, prior)
+
+            days_out = fa.get("days_out", 0)
+            est = games_per_player.get(fa_pg, 10)
+            if days_out > 60:
+                ir_est_games = 0
+            elif days_out > 30:
+                ir_est_games = max(0, est - int(days_out / 3))
+            else:
+                ir_est_games = est
+
+            if ir_est_games <= 0:
+                continue
+
+            total_value = round(fa_regressed * ir_est_games, 1)
+
+            reason = (f"IR stash: {inj_status} "
+                      f"({injury.get('injury_type', 'unknown')})")
+            if days_out > 0:
+                reason += f", {days_out}d out"
+            if fa_gp < REGRESSION_K:
+                reason += f" (small sample: {fa_gp} GP)"
+
+            recent_news = fa_news_all.get(fa["player_name"], [])
+
+            ir_stash.append({
+                "pickup_name": fa["player_name"],
+                "pickup_position": fa.get("position", ""),
+                "pickup_season_fpg": round(fa.get("fpts_per_game", 0.0), 2),
+                "pickup_recent_fpg": round(fa.get("recent_14_fpg", 0.0), 2),
+                "pickup_regressed_fpg": fa_regressed,
+                "pickup_games_played": fa_gp,
+                "pickup_toi_per_game": fa.get("toi_per_game", 0),
+                "pickup_pp_toi": fa.get("pp_toi", 0),
+                "pickup_pp_toi_per_game": fa.get("pp_toi_per_game", 0),
+                "pickup_pp_toi_recent": fa.get("pp_toi_recent", []),
+                "pickup_ev_line": fa.get("ev_line"),
+                "pickup_pp_unit": fa.get("pp_unit"),
+                "pickup_team": fa.get("team", ""),
+                "pickup_injury": injury,
+                "pickup_days_out": days_out,
+                "pickup_recent_news": recent_news,
+                "est_games": ir_est_games,
+                "total_value": total_value,
+                "reason": reason,
+            })
+
+        ir_stash.sort(key=lambda x: x["total_value"], reverse=True)
+        ir_stash = ir_stash[:5]
+
     return {
         "claims_remaining": claims_remaining,
         "gp_remaining": gp_remaining,
         "recommendations": recommendations[:limit],
+        "ir_slot_open": ir_slot_open,
+        "ir_stash": ir_stash,
     }

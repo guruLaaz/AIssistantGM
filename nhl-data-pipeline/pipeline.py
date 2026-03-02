@@ -621,18 +621,18 @@ def _print_summary(summary: dict[str, Any]) -> None:
         _safe_print(f"\n  Fantasy Standings ({len(summary['standings'])} teams):")
         for s in summary["standings"]:
             _safe_print(f"    {s['rank']:>2}. {s['name']:<25} "
-                        f"{s['points_for']:>7.1f} PF  "
-                        f"{s['fpg']:.1f} FP/G")
+                        f"{s['points_for']:>7.2f} PF  "
+                        f"{s['fpg']:.2f} FP/G")
 
     if summary.get("freshness"):
-        _safe_print("\n  Data Freshness:")
+        _safe_print("\n  Data Freshness (UTC / EST -5):")
         for step, ts in summary["freshness"].items():
             label = ts[:16].replace("T", " ") if ts else "never"
             _safe_print(f"    {step:<16} {label}")
 
 
 def _print_freshness(freshness: dict[str, Any]) -> None:
-    print("\n=== Data Freshness ===")
+    print("\n=== Data Freshness (UTC / EST -5) ===")
     for step, info in freshness.items():
         status = "STALE" if info["stale"] else "OK"
         ts = info["last_updated"] or "never"

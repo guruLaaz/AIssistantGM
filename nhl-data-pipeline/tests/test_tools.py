@@ -1,9 +1,12 @@
 """Tests for assistant/tools.py — tool definitions and dispatch."""
 
+import os
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
+import requests as req
 from db.schema import init_db, get_db, upsert_player
 from assistant.tools import TOOLS, SessionContext, dispatch_tool
 
@@ -173,7 +176,7 @@ class TestToolDefinitions:
     """Tests for the TOOLS list structure."""
 
     def test_correct_tool_count(self) -> None:
-        assert len(TOOLS) == 14
+        assert len(TOOLS) == 15
 
     def test_all_tools_have_required_fields(self) -> None:
         for tool in TOOLS:
@@ -195,6 +198,7 @@ class TestToolDefinitions:
             "get_league_standings", "get_injuries",
             "get_trade_targets", "get_roster_moves",
             "get_team_roster", "suggest_trades",
+            "web_search",
         }
         assert names == expected
 
@@ -369,3 +373,90 @@ class TestDispatchToolEdgeCases:
         for tool in TOOLS:
             result = dispatch_tool(tool["name"], {}, ctx)
             assert isinstance(result, str), f"{tool['name']} returned {type(result)}"
+
+
+# ---------------------------------------------------------------------------
+# dispatch_tool — web_search
+# ---------------------------------------------------------------------------
+
+
+class TestWebSearchDispatch:
+    """Tests for web_search tool dispatch."""
+
+    def test_missing_api_key(self, ctx: SessionContext) -> None:
+        """Returns helpful message when BRAVE_SEARCH_API_KEY is not set."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BRAVE_SEARCH_API_KEY", None)
+            result = dispatch_tool("web_search", {"query": "NHL trades"}, ctx)
+            assert "not configured" in result.lower()
+            assert "BRAVE_SEARCH_API_KEY" in result
+
+    @patch("assistant.tools.requests.get")
+    def test_successful_search(self, mock_get: MagicMock, ctx: SessionContext) -> None:
+        """Returns formatted results on successful API call."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "web": {
+                "results": [
+                    {
+                        "title": "NHL Trade Deadline Updates",
+                        "url": "https://example.com/trades",
+                        "description": "Latest trade deadline news.",
+                        "age": "2 hours ago",
+                    }
+                ]
+            }
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key"}):
+            result = dispatch_tool("web_search", {"query": "NHL trades"}, ctx)
+            assert "NHL Trade Deadline Updates" in result
+            assert "example.com" in result
+            assert "2 hours ago" in result
+
+    @patch("assistant.tools.requests.get")
+    def test_timeout(self, mock_get: MagicMock, ctx: SessionContext) -> None:
+        """Returns timeout message on request timeout."""
+        mock_get.side_effect = req.Timeout("timed out")
+
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key"}):
+            result = dispatch_tool("web_search", {"query": "NHL trades"}, ctx)
+            assert "timed out" in result.lower()
+
+    @patch("assistant.tools.requests.get")
+    def test_401_invalid_key(self, mock_get: MagicMock, ctx: SessionContext) -> None:
+        """Returns clear message on invalid API key."""
+        resp = MagicMock()
+        resp.status_code = 401
+        mock_get.side_effect = req.HTTPError(response=resp)
+
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "bad-key"}):
+            result = dispatch_tool("web_search", {"query": "NHL trades"}, ctx)
+            assert "invalid" in result.lower()
+
+    @patch("assistant.tools.requests.get")
+    def test_429_rate_limit(self, mock_get: MagicMock, ctx: SessionContext) -> None:
+        """Returns rate limit message on 429."""
+        resp = MagicMock()
+        resp.status_code = 429
+        mock_get.side_effect = req.HTTPError(response=resp)
+
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key"}):
+            result = dispatch_tool("web_search", {"query": "NHL trades"}, ctx)
+            assert "rate limit" in result.lower()
+
+    @patch("assistant.tools.requests.get")
+    def test_no_results(self, mock_get: MagicMock, ctx: SessionContext) -> None:
+        """Returns 'no results' message when API returns empty results."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"web": {"results": []}}
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "test-key"}):
+            result = dispatch_tool("web_search", {"query": "xyzzy"}, ctx)
+            assert "no web results" in result.lower()

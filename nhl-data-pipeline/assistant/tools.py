@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
 from dataclasses import dataclass
 
+import requests
+
 from assistant import queries, formatters
+
+logger = logging.getLogger("pipeline.tools")
 
 
 @dataclass
@@ -28,7 +34,7 @@ TOOLS = [
             "Get the user's fantasy roster with player stats, calculated "
             "fantasy points, hot/cold trends (last 14 games), and line deployment. "
             "Returns every rostered player with GP, key stats, "
-            "FP, FP/G, recent 14-game FP/G, trend, line/PP info, and injury status."
+            "FP, FP/G, recent 14-game FP/G, salary, trend, line/PP info, and injury status."
         ),
         "input_schema": {
             "type": "object",
@@ -47,6 +53,7 @@ TOOLS = [
         "description": (
             "Analyze the user's roster: position breakdown, average FP/G by "
             "position group (F/D/G), bottom 3 performers, injured players, "
+            "salary cap usage (total/cap/space), "
             "and GP limits used/remaining per position group (F=984, D=492, G=82)."
         ),
         "input_schema": {
@@ -306,7 +313,20 @@ TOOLS = [
             "Get combined drop candidates and pickup recommendations. "
             "Shows the weakest players on the user's roster (based on "
             "last 14 games) and the best available free agent replacements "
-            "at each position, with the FP/G upgrade for each swap."
+            "at each position, with the FP/G upgrade for each swap. "
+            "Pickup FP/G is sample-size adjusted (Bayesian regression toward "
+            "the FA pool median) — players with fewer games are regressed "
+            "more toward the mean. Both raw R14 and regressed FP/G are shown, "
+            "along with GP, team, EV line, and PP/G (avg PP time per game over "
+            "last 30 games in M:SS format — use this to judge real PP usage, "
+            "not just depth chart projections). "
+            "Total value is injury-adjusted: players out 60+ days get 0 est games. "
+            "Injured pickups show [IR]/[IR-LT] tags. "
+            "If the user's IR slot is empty, also shows IR stash candidates — "
+            "injured FAs that can be picked up without dropping anyone. "
+            "Each IR stash candidate includes up to 3 recent news headlines "
+            "for return timeline analysis — use these to assess when the "
+            "player will actually return and contribute fantasy points."
         ),
         "input_schema": {
             "type": "object",
@@ -314,7 +334,90 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web for current NHL news, trade rumors, injury updates, "
+            "lineup changes, or any hockey information not available in the "
+            "database. Use this when the user asks about very recent events, "
+            "breaking news, or when database tools return stale or missing "
+            "information. Returns the top web results with titles, snippets, "
+            "and URLs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Search query. Be specific and include 'NHL' or "
+                        "'hockey' for better results. Example: "
+                        "'NHL trade rumors February 2026'"
+                    ),
+                },
+                "num_results": {
+                    "type": "integer",
+                    "description": "Number of results to return (1-10). Default: 5.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Web search helper
+# ---------------------------------------------------------------------------
+
+BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+
+
+def _web_search(query: str, num_results: int = 5) -> str:
+    """Execute a web search via the Brave Search API."""
+    api_key = os.environ.get("BRAVE_SEARCH_API_KEY")
+    if not api_key:
+        return (
+            "Web search is not configured. "
+            "Set BRAVE_SEARCH_API_KEY in your .env file to enable web search. "
+            "Get a free API key at https://brave.com/search/api/"
+        )
+
+    num_results = max(1, min(10, num_results))
+
+    try:
+        response = requests.get(
+            BRAVE_SEARCH_URL,
+            headers={
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": api_key,
+            },
+            params={
+                "q": query,
+                "count": num_results,
+                "search_lang": "en",
+                "freshness": "pw",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except requests.Timeout:
+        return "Web search timed out. Try again or rephrase your query."
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "unknown"
+        if status == 401:
+            return "Web search API key is invalid. Check BRAVE_SEARCH_API_KEY."
+        if status == 429:
+            return "Web search rate limit reached. Try again in a moment."
+        logger.warning("Brave Search API error: %s", e)
+        return f"Web search failed (HTTP {status}). Try again later."
+    except requests.RequestException as e:
+        logger.warning("Brave Search API request failed: %s", e)
+        return "Web search is temporarily unavailable. Try again later."
+
+    return formatters.format_web_search_results(data, query)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +476,14 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
             else:
                 lines.append("")
                 lines.append("No injured players on roster.")
+            sal = data.get("salary", {})
+            if sal:
+                lines.append("")
+                lines.append(
+                    f"Salary Cap: ${sal['total']/1e6:.1f}M / "
+                    f"${sal['cap']/1e6:.1f}M "
+                    f"(${sal['space']/1e6:.1f}M space)"
+                )
             if "gp_limits" in data:
                 lines.append("")
                 lines.append("GP Limits:")
@@ -498,6 +609,11 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
             drops = queries.get_drop_candidates(conn, team_id, season)
             pickup_data = queries.get_pickup_recommendations(conn, team_id, season)
             return formatters.format_roster_moves(drops, pickup_data)
+
+        if tool_name == "web_search":
+            query = tool_input["query"]
+            num_results = tool_input.get("num_results", 5)
+            return _web_search(query, num_results)
 
         return f"Unknown tool: {tool_name}"
 

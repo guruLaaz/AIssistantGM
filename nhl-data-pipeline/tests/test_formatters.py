@@ -14,6 +14,7 @@ from assistant.formatters import (
     format_trade_targets,
     format_drop_candidates,
     format_roster_moves,
+    format_web_search_results,
 )
 
 
@@ -833,6 +834,147 @@ class TestFormatRosterMoves:
         result = format_roster_moves([], pickup_data)
         assert "GP Remaining" not in result
 
+    def test_gp_and_regressed_columns(self) -> None:
+        """Pickup table shows GP and Reg columns with correct values."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "gp_remaining": {"F": 300, "D": 50, "G": 30},
+            "recommendations": [{
+                "pickup_name": "Small Sample", "pickup_position": "C",
+                "pickup_season_fpg": 0.80, "pickup_recent_fpg": 1.00,
+                "pickup_regressed_fpg": 0.69,
+                "pickup_games_played": 11,
+                "pickup_toi_per_game": 900, "pickup_pp_toi": 0,
+                "pickup_ev_line": 3, "pickup_pp_unit": None,
+                "pickup_team": "BOS",
+                "drop_name": "Drop Me", "drop_position": "C",
+                "drop_season_fpg": 0.50, "drop_recent_fpg": 0.40,
+                "fpg_upgrade": 0.29, "est_games": 25,
+                "total_value": 7.3,
+                "reason": "+0.29 recent FP/G upgrade (small sample: 11 GP)",
+            }],
+        }
+        result = format_roster_moves([], pickup_data)
+        header = result.split("\n")[0] if result else ""
+        # Header has new columns
+        assert "GP" in result
+        assert "Reg" in result
+        # Values rendered
+        assert " 11 " in result  # GP value
+        assert "0.69" in result  # regressed FP/G
+
+    def test_team_and_line_columns(self) -> None:
+        """Pickup table shows Tm, Line, and PP/G columns."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "gp_remaining": {"F": 300, "D": 50, "G": 30},
+            "recommendations": [{
+                "pickup_name": "Top Liner", "pickup_position": "C",
+                "pickup_season_fpg": 1.20, "pickup_recent_fpg": 1.50,
+                "pickup_regressed_fpg": 1.10,
+                "pickup_games_played": 50,
+                "pickup_toi_per_game": 1100, "pickup_pp_toi": 5000,
+                "pickup_pp_toi_per_game": 120,  # 2:00 per game
+                "pickup_pp_toi_recent": [120, 130, 110],
+                "pickup_ev_line": 1, "pickup_pp_unit": 1,
+                "pickup_team": "TOR",
+                "drop_name": "Drop Me", "drop_position": "C",
+                "drop_season_fpg": 0.50, "drop_recent_fpg": 0.40,
+                "fpg_upgrade": 0.70, "est_games": 25,
+                "total_value": 17.5,
+                "reason": "upgrade",
+            }],
+        }
+        result = format_roster_moves([], pickup_data)
+        # Header columns
+        assert "Tm" in result
+        assert "Line" in result
+        assert "PP/G" in result
+        # Team abbreviation shown
+        assert "TOR" in result
+        # Line: L1
+        assert "L1" in result
+        # PP/G: 2:00 (120 seconds)
+        assert "2:00" in result
+
+    def test_pp_per_game_zero(self) -> None:
+        """PP/G shows 0:00 when player has no PP time."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "recommendations": [{
+                "pickup_name": "No PP Guy", "pickup_position": "C",
+                "pickup_ev_line": 3, "pickup_pp_unit": None,
+                "pickup_pp_toi_per_game": 0,
+                "pickup_team": "BOS",
+                "drop_name": "Drop", "drop_position": "C",
+                "fpg_upgrade": 0.5, "reason": "test",
+            }],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "L3" in result
+        assert "0:00" in result
+
+
+class TestFormatIRStash:
+    """Tests for IR stash section in format_roster_moves."""
+
+    def test_ir_stash_section_shown(self) -> None:
+        """IR stash section appears when ir_slot_open=True."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "gp_remaining": {"F": 300, "D": 50, "G": 30},
+            "recommendations": [],
+            "ir_slot_open": True,
+            "ir_stash": [{
+                "pickup_name": "Hurt Player",
+                "pickup_position": "C",
+                "pickup_team": "MTL",
+                "pickup_season_fpg": 0.80,
+                "pickup_recent_fpg": 0.90,
+                "pickup_regressed_fpg": 0.75,
+                "pickup_games_played": 30,
+                "pickup_injury": {"status": "IR", "injury_type": "Knee"},
+                "pickup_days_out": 20,
+                "pickup_recent_news": [
+                    "Hurt Player: Expected back next week",
+                    "Hurt Player: Placed on IR with knee injury",
+                ],
+                "est_games": 15,
+                "total_value": 11.3,
+                "reason": "IR stash: IR (Knee), 20d out",
+            }],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "IR STASH CANDIDATES" in result
+        assert "no drop needed" in result
+        assert "Hurt Player" in result
+        assert "MTL" in result
+        assert "Expected back next week" in result
+        assert "Placed on IR" in result
+
+    def test_ir_stash_section_hidden_when_closed(self) -> None:
+        """IR stash section not shown when ir_slot_open=False."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "recommendations": [],
+            "ir_slot_open": False,
+            "ir_stash": [],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "IR STASH" not in result
+
+    def test_ir_stash_empty_message(self) -> None:
+        """Shows 'no IR-eligible' message when slot open but no candidates."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "recommendations": [],
+            "ir_slot_open": True,
+            "ir_stash": [],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "IR STASH CANDIDATES" in result
+        assert "No IR-eligible" in result
+
 
 # ---------------------------------------------------------------------------
 # New formatter tests for TOI, trends, and news
@@ -1351,3 +1493,152 @@ class TestFormatFreeAgentsPeripherals:
         lines = result.strip().split("\n")
         goalie_line = [l for l in lines if "Test Goalie" in l][0]
         assert "-" in goalie_line
+
+
+# ---------------------------------------------------------------------------
+# format_roster — salary column
+# ---------------------------------------------------------------------------
+
+
+class TestFormatRosterSalary:
+    """Tests for salary column in format_roster."""
+
+    def test_salary_displayed_with_dollar_and_m(self) -> None:
+        """Salary shows as $X.XM format."""
+        data = [{
+            "player_name": "Connor McDavid", "position": "C",
+            "games_played": 50, "goals": 30, "assists": 40,
+            "hits": 20, "blocks": 10,
+            "fantasy_points": 73.0, "fpts_per_game": 1.46,
+            "salary": 12_500_000, "injury": None,
+        }]
+        result = format_roster(data)
+        assert "$12.5M" in result
+
+    def test_zero_salary_shows_dash(self) -> None:
+        """Player with salary=0 shows dash."""
+        data = [{
+            "player_name": "No Salary", "position": "C",
+            "games_played": 10, "goals": 1, "assists": 2,
+            "hits": 5, "blocks": 3,
+            "fantasy_points": 3.8, "fpts_per_game": 0.38,
+            "salary": 0, "injury": None,
+        }]
+        result = format_roster(data)
+        lines = result.strip().split("\n")
+        player_line = [l for l in lines if "No Salary" in l][0]
+        assert "$" not in player_line or "-" in player_line
+
+    def test_none_salary_shows_dash(self) -> None:
+        """Player with salary=None shows dash."""
+        data = [{
+            "player_name": "None Salary", "position": "D",
+            "games_played": 10, "goals": 1, "assists": 2,
+            "hits": 5, "blocks": 8,
+            "fantasy_points": 4.3, "fpts_per_game": 0.43,
+            "salary": None, "injury": None,
+        }]
+        result = format_roster(data)
+        lines = result.strip().split("\n")
+        player_line = [l for l in lines if "None Salary" in l][0]
+        assert "-" in player_line
+
+    def test_header_contains_sal(self) -> None:
+        """Header row contains 'Sal' column."""
+        data = [{
+            "player_name": "Test", "position": "C",
+            "games_played": 1, "goals": 0, "assists": 0,
+            "hits": 0, "blocks": 0,
+            "fantasy_points": 0.0, "fpts_per_game": 0.0,
+            "salary": 1_000_000, "injury": None,
+        }]
+        result = format_roster(data)
+        header = result.split("\n")[0]
+        assert "Sal" in header
+
+
+# ---------------------------------------------------------------------------
+# format_web_search_results
+# ---------------------------------------------------------------------------
+
+
+class TestFormatWebSearchResults:
+    """Tests for format_web_search_results."""
+
+    def test_no_results(self) -> None:
+        data = {"web": {"results": []}}
+        result = format_web_search_results(data, "NHL trades")
+        assert "no web results" in result.lower()
+
+    def test_missing_web_key(self) -> None:
+        data = {}
+        result = format_web_search_results(data, "NHL trades")
+        assert "no web results" in result.lower()
+
+    def test_single_result(self) -> None:
+        data = {
+            "web": {
+                "results": [
+                    {
+                        "title": "Test Title",
+                        "url": "https://example.com",
+                        "description": "Test snippet.",
+                        "age": "1 hour ago",
+                    }
+                ]
+            }
+        }
+        result = format_web_search_results(data, "test query")
+        assert "Web Search: test query" in result
+        assert "1. Test Title" in result
+        assert "1 hour ago" in result
+        assert "example.com" in result
+        assert "Test snippet" in result
+
+    def test_long_snippet_truncated(self) -> None:
+        data = {
+            "web": {
+                "results": [
+                    {
+                        "title": "Title",
+                        "url": "https://example.com",
+                        "description": "word " * 50,
+                    }
+                ]
+            }
+        }
+        result = format_web_search_results(data, "test")
+        # Snippet line should be truncated
+        snippet_lines = [l for l in result.split("\n") if l.startswith("   word")]
+        assert all(len(l) <= 210 for l in snippet_lines)
+
+    def test_html_entity_cleanup(self) -> None:
+        data = {
+            "web": {
+                "results": [
+                    {
+                        "title": "Title",
+                        "url": "https://example.com",
+                        "description": "Rock &amp; Roll &#x27;s best",
+                    }
+                ]
+            }
+        }
+        result = format_web_search_results(data, "test")
+        assert "Rock & Roll" in result
+        assert "'s best" in result
+
+    def test_multiple_results_numbered(self) -> None:
+        data = {
+            "web": {
+                "results": [
+                    {"title": f"Result {i}", "url": f"https://example.com/{i}",
+                     "description": f"Snippet {i}"}
+                    for i in range(3)
+                ]
+            }
+        }
+        result = format_web_search_results(data, "test")
+        assert "1. Result 0" in result
+        assert "2. Result 1" in result
+        assert "3. Result 2" in result

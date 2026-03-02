@@ -421,13 +421,13 @@ class TestRunStep:
         mock_backfill: MagicMock,
         db_path: Path,
     ) -> None:
-        """run_step('backfill-news') passes default max_scrolls=50."""
+        """run_step('backfill-news') passes default max_scrolls=5000."""
         mock_backfill.return_value = {
             "total_fetched": 50, "new_inserted": 30, "duplicates_skipped": 20,
         }
         run_step("backfill-news", db_path, "20252026")
         mock_backfill.assert_called_once_with(
-            mock_backfill.call_args[0][0], max_scrolls=50,
+            mock_backfill.call_args[0][0], max_scrolls=5000,
         )
 
     @patch("pipeline.fetch_injuries")

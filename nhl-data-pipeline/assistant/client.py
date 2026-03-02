@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import anthropic
 
 from assistant.tools import TOOLS, SessionContext, dispatch_tool
 
-MAX_TOKENS = 4096
+MAX_TOKENS = 48_000
 _PROMPT_PATH = Path(__file__).parent / "system_prompt.txt"
 
 
@@ -29,7 +30,7 @@ class AssistantClient:
             )
 
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = os.environ.get("ASSISTANT_MODEL", "claude-sonnet-4-20250514")
+        self.model = os.environ.get("ASSISTANT_MODEL", "claude-opus-4-6")
         self.context = context
         self.messages: list[dict] = []
 
@@ -86,13 +87,22 @@ class AssistantClient:
                 self.messages = [self.messages[0]] + self.messages[-20:]
                 print("[Context trimmed to stay within limits]")
 
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=MAX_TOKENS,
-                system=self.system_prompt,
-                tools=TOOLS,
-                messages=self.messages,
-            )
+            for attempt in range(3):
+                try:
+                    with self.client.messages.stream(
+                        model=self.model,
+                        max_tokens=MAX_TOKENS,
+                        thinking={"type": "adaptive"},
+                        system=self.system_prompt,
+                        tools=TOOLS,
+                        messages=self.messages,
+                    ) as stream:
+                        response = stream.get_final_message()
+                    break
+                except anthropic.RateLimitError:
+                    wait = 30 * (attempt + 1)
+                    print(f"[Rate limited — waiting {wait}s before retrying...]")
+                    time.sleep(wait)
 
             # Collect all content blocks from the response
             assistant_content = response.content

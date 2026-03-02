@@ -321,11 +321,10 @@ def save_injuries(
     upserted = 0
     unmatched = 0
 
-    # Clear previous unmatched injuries from rotowire so re-runs don't
-    # accumulate duplicates (NULL player_id bypasses UNIQUE constraint).
-    conn.execute(
-        "DELETE FROM player_injuries WHERE player_id IS NULL AND source = 'rotowire'"
-    )
+    # Full refresh: clear all rotowire injuries before re-inserting the
+    # current report.  This removes players who have recovered and are no
+    # longer on the Rotowire injury list.
+    conn.execute("DELETE FROM player_injuries WHERE source = 'rotowire'")
 
     for injury in injuries:
         player_name = injury.get("player", "")

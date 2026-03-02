@@ -323,6 +323,16 @@ class _MockResponse:
         self.stop_reason = stop_reason
 
 
+def _make_stream_cm(response):
+    """Create a mock context manager that mimics messages.stream()."""
+    stream = MagicMock()
+    stream.get_final_message.return_value = response
+    cm = MagicMock()
+    cm.__enter__ = MagicMock(return_value=stream)
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
 class TestE2EIntegration:
     """End-to-end tests: real DB → real queries → real formatters → tool dispatch.
 
@@ -470,7 +480,7 @@ class TestE2EIntegration:
         The mock stores a *reference* to self.messages (not a snapshot), so
         we search the final list state for tool_result entries.
         """
-        messages = mock_api.messages.create.call_args.kwargs["messages"]
+        messages = mock_api.messages.stream.call_args.kwargs["messages"]
         found = 0
         for msg in messages:
             content = msg.get("content")
@@ -491,9 +501,9 @@ class TestE2EIntegration:
         """get_my_roster → real query/format → tool result has real data."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_my_roster", {}),
-            self._text_response("Here's your roster!"),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_my_roster", {})),
+            _make_stream_cm(self._text_response("Here's your roster!")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -511,9 +521,9 @@ class TestE2EIntegration:
         """get_player_stats → real lookup → formatted card returned."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_player_stats", {"player_name": "Connor McDavid"}),
-            self._text_response("McDavid is on fire."),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_player_stats", {"player_name": "Connor McDavid"})),
+            _make_stream_cm(self._text_response("McDavid is on fire.")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -532,9 +542,9 @@ class TestE2EIntegration:
         """get_player_stats for unknown player → 'not found' in tool result."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_player_stats", {"player_name": "Wayne Gretzky"}),
-            self._text_response("I couldn't find Wayne Gretzky."),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_player_stats", {"player_name": "Wayne Gretzky"})),
+            _make_stream_cm(self._text_response("I couldn't find Wayne Gretzky.")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -551,11 +561,11 @@ class TestE2EIntegration:
         """compare_players → side-by-side data from real DB."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("compare_players", {
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("compare_players", {
                 "player_names": ["Connor McDavid", "Sidney Crosby"],
-            }),
-            self._text_response("McDavid has the edge."),
+            })),
+            _make_stream_cm(self._text_response("McDavid has the edge.")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -573,9 +583,9 @@ class TestE2EIntegration:
         """get_injuries scope=all → real injury data."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_injuries", {"scope": "all"}),
-            self._text_response("Crosby is day-to-day."),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_injuries", {"scope": "all"})),
+            _make_stream_cm(self._text_response("Crosby is day-to-day.")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -593,9 +603,9 @@ class TestE2EIntegration:
         """get_league_standings → real standings data."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_league_standings", {}),
-            self._text_response("You're in first!"),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_league_standings", {})),
+            _make_stream_cm(self._text_response("You're in first!")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -612,9 +622,9 @@ class TestE2EIntegration:
         """get_news_briefing for a specific player → real news data."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_news_briefing", {"player_name": "Connor McDavid"}),
-            self._text_response("McDavid had a hat trick!"),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_news_briefing", {"player_name": "Connor McDavid"})),
+            _make_stream_cm(self._text_response("McDavid had a hat trick!")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -631,11 +641,11 @@ class TestE2EIntegration:
         """get_schedule_analysis → real schedule data."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_schedule_analysis", {
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_schedule_analysis", {
                 "team_or_player": "EDM", "days_ahead": 30,
-            }),
-            self._text_response("Edmonton has games coming up."),
+            })),
+            _make_stream_cm(self._text_response("Edmonton has games coming up.")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -652,9 +662,9 @@ class TestE2EIntegration:
         """Missing required param → dispatch error is sent back gracefully."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_player_stats", {}),  # missing player_name
-            self._text_response("Sorry, I need a player name."),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_player_stats", {})),
+            _make_stream_cm(self._text_response("Sorry, I need a player name.")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
@@ -671,16 +681,16 @@ class TestE2EIntegration:
         """Claude calls two tools in sequence before final response."""
         mock_api = MagicMock()
         mock_cls.return_value = mock_api
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_my_roster", {}, "tool_01"),
-            self._tool_response("get_injuries", {"scope": "my_roster"}, "tool_02"),
-            self._text_response("Your roster looks solid. No injuries."),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_my_roster", {}, "tool_01")),
+            _make_stream_cm(self._tool_response("get_injuries", {"scope": "my_roster"}, "tool_02")),
+            _make_stream_cm(self._text_response("Your roster looks solid. No injuries.")),
         ]
 
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
         response = client.chat("Give me a full team update")
 
-        assert mock_api.messages.create.call_count == 3
+        assert mock_api.messages.stream.call_count == 3
         # First tool result had roster data
         roster_content = self._tool_result_content(mock_api, result_index=0)
         assert "Connor McDavid" in roster_content
@@ -695,16 +705,16 @@ class TestE2EIntegration:
         mock_cls.return_value = mock_api
 
         # Turn 1: simple text response (no tool)
-        mock_api.messages.create.side_effect = [
-            self._text_response("I'm your fantasy hockey assistant!"),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._text_response("I'm your fantasy hockey assistant!")),
         ]
         client = AssistantClient(context=e2e_ctx, team_name="My Team")
         client.chat("Hello")
 
         # Turn 2: one tool call
-        mock_api.messages.create.side_effect = [
-            self._tool_response("get_my_roster", {}),
-            self._text_response("Here's your roster!"),
+        mock_api.messages.stream.side_effect = [
+            _make_stream_cm(self._tool_response("get_my_roster", {})),
+            _make_stream_cm(self._text_response("Here's your roster!")),
         ]
         client.chat("Show my roster")
 

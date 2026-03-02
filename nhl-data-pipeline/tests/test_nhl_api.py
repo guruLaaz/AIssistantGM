@@ -1765,10 +1765,10 @@ class TestFetchAllSkaterGamelogsBulk:
     def test_calls_paginate_per_month(
         self, mock_sleep: MagicMock, mock_paginate: MagicMock
     ) -> None:
-        """Makes 14 _paginate_stats_api calls (7 months x 2 endpoints)."""
+        """Makes 21 _paginate_stats_api calls (7 months x 3 endpoints)."""
         mock_paginate.return_value = []
         result = fetch_all_skater_gamelogs_bulk("20252026")
-        assert mock_paginate.call_count == 14
+        assert mock_paginate.call_count == 21
         assert result == []
 
     @patch("fetchers.nhl_api._paginate_stats_api")
@@ -1805,9 +1805,17 @@ class TestFetchAllSkaterGamelogsBulk:
             "hits": 3, "blockedShots": 2,
         }
 
-        # First two calls are for Oct (summary then realtime)
-        # Remaining 12 calls return empty
-        call_results = [[summary_row], [realtime_row]] + [[] for _ in range(12)]
+        powerplay_row = {
+            "playerId": 8478402, "gameId": 2024020001,
+            "ppTimeOnIce": 245,
+        }
+
+        # First three calls are for Oct (summary, realtime, powerplay)
+        # Remaining 18 calls return empty
+        call_results = (
+            [[summary_row], [realtime_row], [powerplay_row]]
+            + [[] for _ in range(18)]
+        )
         mock_paginate.side_effect = call_results
 
         result = fetch_all_skater_gamelogs_bulk("20252026")
@@ -1816,6 +1824,7 @@ class TestFetchAllSkaterGamelogsBulk:
         assert result[0]["hits"] == 3
         assert result[0]["blocks"] == 2
         assert result[0]["goals"] == 2
+        assert result[0]["pp_toi"] == 245
 
     @patch("fetchers.nhl_api._paginate_stats_api")
     @patch("fetchers.nhl_api.time.sleep")
@@ -1826,7 +1835,7 @@ class TestFetchAllSkaterGamelogsBulk:
         mock_paginate.return_value = []
         result = fetch_all_skater_gamelogs_bulk("20252026")
         assert result == []
-        assert mock_paginate.call_count == 14
+        assert mock_paginate.call_count == 21
 
 
 # =============================================================================
