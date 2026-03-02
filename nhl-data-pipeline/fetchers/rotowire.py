@@ -110,7 +110,7 @@ def match_player_name(
     if not name:
         return None
 
-    name = name.strip()
+    name = " ".join(name.split())  # collapse multiple spaces / tabs
     if not name:
         return None
 

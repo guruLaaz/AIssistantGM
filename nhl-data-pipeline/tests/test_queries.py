@@ -819,31 +819,30 @@ class TestNewsIntegration:
     """Tests for news integration in drop and pickup recommendations."""
 
     def test_drop_candidate_recent_news(self, db: sqlite3.Connection) -> None:
-        """Drop candidates include recent_news when news exists within 42 days."""
+        """Drop candidates include recent_news list when news exists within 42 days."""
         drops = get_drop_candidates(db, "team1", "20252026")
-        # McDavid and Crosby both have recent news
         mcdavid = next((d for d in drops if d["player_name"] == "Connor McDavid"), None)
         crosby = next((d for d in drops if d["player_name"] == "Sidney Crosby"), None)
         if mcdavid:
-            assert mcdavid["recent_news"] == "McDavid: Hat Trick"
+            assert isinstance(mcdavid["recent_news"], list)
+            assert len(mcdavid["recent_news"]) >= 1
+            assert mcdavid["recent_news"][0]["headline"] == "McDavid: Hat Trick"
         if crosby:
-            assert crosby["recent_news"] == "Crosby: Injured"
+            assert isinstance(crosby["recent_news"], list)
+            assert crosby["recent_news"][0]["headline"] == "Crosby: Injured"
 
     def test_drop_candidate_no_news(self, db: sqlite3.Connection) -> None:
-        """Drop candidates have recent_news=None when no news exists."""
+        """Drop candidates have empty recent_news list when no news exists."""
         drops = get_drop_candidates(db, "team1", "20252026")
         makar = next((d for d in drops if d["player_name"] == "Cale Makar"), None)
         if makar:
-            assert makar["recent_news"] is None
+            assert makar["recent_news"] == []
 
-    def test_pickup_reason_includes_news(self, db: sqlite3.Connection) -> None:
-        """Pickup recommendations append news to reason when available."""
+    def test_pickup_news_in_output(self, db: sqlite3.Connection) -> None:
+        """Pickup recommendations include news list for pickups with news."""
         recs = get_pickup_recommendations(db, "team1", "20252026")["recommendations"]
-        # Draisaitl is a free agent (C) — no news for him, so reason won't have News:
         for r in recs:
-            if "News:" in r["reason"]:
-                # Verify the format
-                assert " | News: " in r["reason"]
+            assert isinstance(r.get("pickup_recent_news", []), list)
 
 
 # ---- free agent enrichment (trend, news) ----
@@ -867,13 +866,14 @@ class TestFreeAgentEnrichment:
             assert isinstance(fa["recent_14_fpg"], float)
 
     def test_free_agent_has_recent_news(self, db: sqlite3.Connection) -> None:
-        """Free agents include recent_news (None if no news)."""
+        """Free agents include recent_news list."""
         results = search_free_agents(db, "20252026", min_games=1)
         for fa in results:
             assert "recent_news" in fa
+            assert isinstance(fa["recent_news"], list)
             # Draisaitl has no news in the fixture
             if fa["player_name"] == "Leon Draisaitl":
-                assert fa["recent_news"] is None
+                assert fa["recent_news"] == []
 
     def test_free_agent_has_line_context(self, db: sqlite3.Connection) -> None:
         """Free agents include ev_line and pp_unit."""
@@ -893,7 +893,7 @@ class TestFreeAgentEnrichment:
         results = search_free_agents(db, "20252026", min_games=1)
         drai = next((fa for fa in results if fa["player_name"] == "Leon Draisaitl"), None)
         assert drai is not None
-        assert drai["recent_news"] is None
+        assert drai["recent_news"] == []
 
     def test_free_agent_news_within_window(self, db: sqlite3.Connection) -> None:
         """News within 42 days is included."""
@@ -906,7 +906,8 @@ class TestFreeAgentEnrichment:
         results = search_free_agents(db, "20252026", min_games=1)
         drai = next((fa for fa in results if fa["player_name"] == "Leon Draisaitl"), None)
         assert drai is not None
-        assert drai["recent_news"] == "Draisaitl: On fire"
+        assert len(drai["recent_news"]) >= 1
+        assert drai["recent_news"][0]["headline"] == "Draisaitl: On fire"
 
 
 # ---- trade candidates enrichment (injury, news, trend, line) ----
@@ -981,7 +982,9 @@ class TestTradeCandidateEnrichment:
         candidates = get_trade_candidates(db, "team1", "20252026")
         hot = next((c for c in candidates if c["player_name"] == "Hot Streak"), None)
         if hot:
-            assert hot["recent_news"] == "Hot Streak: Promoted to 1st line"
+            assert isinstance(hot["recent_news"], list)
+            assert len(hot["recent_news"]) >= 1
+            assert hot["recent_news"][0]["headline"] == "Hot Streak: Promoted to 1st line"
             assert hot["injury"] is not None
 
     def test_trade_candidate_line_info(self, db: sqlite3.Connection) -> None:

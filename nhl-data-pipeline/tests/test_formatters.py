@@ -38,7 +38,8 @@ class TestFormatRoster:
         }]
         result = format_roster(data)
         assert "Connor McDavid" in result
-        assert "30G 40A 20H 10B" in result
+        assert "G:30" in result
+        assert "A:40" in result
         assert "73.0" in result
 
     def test_goalie_row(self) -> None:
@@ -48,7 +49,9 @@ class TestFormatRoster:
             "fantasy_points": 56.0, "fpts_per_game": 1.40, "injury": None,
         }]
         result = format_roster(data)
-        assert "25W 10L 3SO" in result
+        assert "W:25" in result
+        assert "L:10" in result
+        assert "SO:3" in result
 
     def test_injured_player_tag(self) -> None:
         data = [{
@@ -103,7 +106,10 @@ class TestFormatRoster:
             "fantasy_points": 0.0, "fpts_per_game": 0.0, "injury": None,
         }]
         result = format_roster(data)
-        assert "0G 0A 0H 0B" in result
+        assert "G:0" in result
+        assert "A:0" in result
+        assert "H:0" in result
+        assert "B:0" in result
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +142,9 @@ class TestFormatFreeAgents:
             "fpts_per_game": 1.20, "injury": None,
         }]
         result = format_free_agents(data)
-        assert "18W 2SO 2.45GAA" in result
+        assert "W:18" in result
+        assert "SO:2" in result
+        assert "GAA:2.45" in result
 
     def test_injury_tag_appended(self) -> None:
         data = [{
@@ -385,7 +393,7 @@ class TestFormatTrends:
             "trend": "neutral",
         }
         result = format_trends(data)
-        assert "Neutral" in result
+        assert "neutral" in result
 
     def test_empty_windows(self) -> None:
         """Empty windows still renders with zeros."""
@@ -494,8 +502,8 @@ class TestFormatSchedule:
             "back_to_backs": [("2026-02-20", "2026-02-21")],
         }
         result = format_schedule(data)
-        assert "*" in result
-        assert "back-to-back" in result
+        assert "[B2B]" in result
+        assert "Back-to-backs" in result
 
     def test_no_games(self) -> None:
         data = {"team": "EDM", "game_count": 0, "games": [], "back_to_backs": []}
@@ -819,8 +827,8 @@ class TestFormatRosterMoves:
             }],
         }
         result = format_roster_moves([], pickup_data)
-        assert "~GP" in result
-        assert "TotV" in result
+        assert "Est games:" in result
+        assert "17.5" in result
         assert "25" in result
         assert "+17.5" in result
 
@@ -886,9 +894,9 @@ class TestFormatRosterMoves:
             }],
         }
         result = format_roster_moves([], pickup_data)
-        # Header columns
-        assert "Tm" in result
-        assert "Line" in result
+        # Labeled fields
+        assert "TOR" in result
+        assert "Line:" in result
         assert "PP/G" in result
         # Team abbreviation shown
         assert "TOR" in result
@@ -1103,7 +1111,7 @@ class TestFormatTradeTargetsHighToi:
             "signal": "high_toi_underperformer",
         }]
         result = format_trade_targets(data)
-        assert "[TOI]" in result
+        assert "high-TOI underperformer" in result
         assert "-15%" in result
         assert "20:00" in result  # 1200s = 20:00
 
@@ -1126,27 +1134,36 @@ class TestFormatDropCandidatesNews:
     """Tests for news headline in format_drop_candidates."""
 
     def test_news_shown(self) -> None:
-        """Drop candidate with recent_news shows truncated headline."""
+        """Drop candidate with recent_news shows date, headline, and content."""
         data = [{
             "player_name": "News Guy", "position": "C",
             "games_played": 40, "season_fpg": 1.0,
             "recent_14_fpg": 0.5, "trend": "cold", "injury": None,
-            "recent_news": "Expected to return from injury next week",
+            "recent_news": [
+                {"headline": "News Guy: Expected to return from injury next week",
+                 "content": "Guy skated on his own Tuesday.",
+                 "date": "2026-02-28T14:00:00"},
+                {"headline": "News Guy: Missed practice Tuesday",
+                 "content": "He is day-to-day.",
+                 "date": "2026-02-26T10:00:00"},
+            ],
         }]
         result = format_drop_candidates(data)
-        assert "News:" in result
+        assert "[2026-02-28]" in result
         assert "Expected to return" in result
+        assert "Guy skated on his own Tuesday." in result
+        assert "Missed practice Tuesday" in result
 
     def test_no_news_no_extra_line(self) -> None:
-        """Drop candidate without news has no News: line."""
+        """Drop candidate without news has no news lines."""
         data = [{
             "player_name": "No News", "position": "D",
             "games_played": 40, "season_fpg": 1.0,
             "recent_14_fpg": 0.8, "trend": "neutral", "injury": None,
-            "recent_news": None,
+            "recent_news": [],
         }]
         result = format_drop_candidates(data)
-        assert "News:" not in result
+        assert "^" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -1391,10 +1408,8 @@ class TestFormatDropCandidatesLines:
             "recent_14_fpg": 0.40, "trend": "cold", "injury": None,
         }]
         result = format_drop_candidates(data)
-        assert "Line" in result  # header
-        lines = result.strip().split("\n")
-        # data row shouldn't have L#
-        assert "L1" not in lines[-1]
+        # No line assignment should show Line:-
+        assert "Line:-" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1416,7 +1431,7 @@ class TestFormatTradeTargetsTrendPct:
             "signal": "high_toi_underperformer",
         }]
         result = format_trade_targets(data)
-        assert "[TOI]" in result
+        assert "high-TOI underperformer" in result
         assert "-25%" in result
 
     def test_positive_trending_player_uses_plus_sign(self) -> None:
@@ -1444,7 +1459,7 @@ class TestFormatTradeTargetsTrendPct:
         }]
         result = format_trade_targets(data)
         assert "-30%" in result
-        assert "[TOI]" in result
+        assert "high-TOI underperformer" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1553,8 +1568,7 @@ class TestFormatRosterSalary:
             "salary": 1_000_000, "injury": None,
         }]
         result = format_roster(data)
-        header = result.split("\n")[0]
-        assert "Sal" in header
+        assert "Salary:" in result
 
 
 # ---------------------------------------------------------------------------

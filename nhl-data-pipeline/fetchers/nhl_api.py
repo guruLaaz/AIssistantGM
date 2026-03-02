@@ -813,7 +813,8 @@ def save_skater_stats(
     player_id: int,
     season: str,
     stats: list[dict[str, Any]],
-    is_season_total: bool = False
+    is_season_total: bool = False,
+    commit: bool = True,
 ) -> int:
     """Insert skater game log rows into skater_stats table.
 
@@ -823,6 +824,8 @@ def save_skater_stats(
         season: Season in 8-digit format.
         stats: List of stat dicts from fetch_skater_game_log.
         is_season_total: True for season total row (NULL game_date).
+        commit: Whether to commit after writing. Set False for batch
+                operations and commit externally.
 
     Returns:
         Number of rows inserted/updated.
@@ -871,7 +874,8 @@ def save_skater_stats(
             ),
         )
         count += 1
-    conn.commit()
+    if commit:
+        conn.commit()
     return count
 
 
@@ -880,7 +884,8 @@ def save_goalie_stats(
     player_id: int,
     season: str,
     stats: list[dict[str, Any]],
-    is_season_total: bool = False
+    is_season_total: bool = False,
+    commit: bool = True,
 ) -> int:
     """Insert goalie game log rows into goalie_stats table.
 
@@ -890,6 +895,8 @@ def save_goalie_stats(
         season: Season in 8-digit format.
         stats: List of stat dicts from fetch_goalie_game_log.
         is_season_total: True for season total row (NULL game_date).
+        commit: Whether to commit after writing. Set False for batch
+                operations and commit externally.
 
     Returns:
         Number of rows inserted/updated.
@@ -931,7 +938,8 @@ def save_goalie_stats(
             ),
         )
         count += 1
-    conn.commit()
+    if commit:
+        conn.commit()
     return count
 
 

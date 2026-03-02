@@ -31,10 +31,18 @@ TOOLS = [
     {
         "name": "get_my_roster",
         "description": (
-            "Get the user's fantasy roster with player stats, calculated "
-            "fantasy points, hot/cold trends (last 14 games), and line deployment. "
-            "Returns every rostered player with GP, key stats, "
-            "FP, FP/G, recent 14-game FP/G, salary, trend, line/PP info, and injury status."
+            "Get the user's fantasy roster with player stats and line deployment. "
+            "Returns every rostered player with: name, position, GP, "
+            "stats (skaters: G/A/H/B; goalies: W/L/SO), "
+            "total FP, FP/G, last-14-games FP/G, salary, "
+            "hot/cold trend (last 14 games FP/G vs season FP/G +/-20%), "
+            "line deployment, and injury status. "
+            "Line deployment is shown as a compact tag like 'L1/PP1' or 'D2/PP2'. "
+            "For forwards: L1 = top line (most ice time), L4 = fourth line (least). "
+            "For defensemen: D1 = top pair, D3 = third pair. "
+            "PP1/PP2 = power-play unit (PP1 = first unit, more PP opportunities). "
+            "No PP tag means the player is not on a power-play unit. "
+            "Higher deployment (L1/PP1 or D1/PP1) generally means more fantasy production opportunity."
         ),
         "input_schema": {
             "type": "object",
@@ -66,8 +74,11 @@ TOOLS = [
         "name": "search_free_agents",
         "description": (
             "Search for the best available free agents not on any fantasy roster. "
-            "Can filter by position and minimum games played. Includes peripheral "
-            "FP/G (hits+blocks contribution) to identify high-volume physical players."
+            "Can filter by position and minimum games played. "
+            "Returns: name, team, position, GP, "
+            "stats (skaters: G/A/H/B; goalies: W/SO/GAA), "
+            "FP/G, peripheral FP/G (hits+blocks contribution for skaters), "
+            "and line deployment (Lx/Dx/PPx)."
         ),
         "input_schema": {
             "type": "object",
@@ -97,8 +108,11 @@ TOOLS = [
     {
         "name": "get_player_stats",
         "description": (
-            "Get detailed stats for a single player: season totals, recent "
-            "game log, injury status, and recent news."
+            "Get detailed stats for a single player. Returns: "
+            "season totals (skaters: G/A/Pts/H/B/SOG/+/-/TOI/PP stats; "
+            "goalies: W/L/OTL/SO/GAA/SV%), "
+            "line deployment with linemates, recent game log, "
+            "injury status, and recent news headlines."
         ),
         "input_schema": {
             "type": "object",
@@ -118,8 +132,9 @@ TOOLS = [
     {
         "name": "compare_players",
         "description": (
-            "Side-by-side comparison of 2-5 players showing season stats "
-            "and fantasy points."
+            "Side-by-side comparison of 2-5 players showing GP, FP, FP/G, "
+            "stats (skaters: G/A/Pts/H/B/TOI; goalies: W/L/SO/GAA), "
+            "and line deployment."
         ),
         "input_schema": {
             "type": "object",
@@ -139,8 +154,9 @@ TOOLS = [
         "name": "get_player_trends",
         "description": (
             "Analyze a player's recent performance trends. Shows FP/G averages "
-            "over last 7 games, last 14 games, and full season, plus a "
-            "hot/cold/neutral trend indicator."
+            "over last 7 games, last 14 games, last 30 games, and full season, "
+            "plus a hot/cold/neutral trend indicator "
+            "(hot = last-7 FP/G > season FP/G by 25%+; cold = below by 25%+)."
         ),
         "input_schema": {
             "type": "object",
@@ -204,8 +220,9 @@ TOOLS = [
     {
         "name": "get_league_standings",
         "description": (
-            "Get the current fantasy league standings with W/L record, "
-            "points, points for/against, and streak."
+            "Get the current fantasy league standings. "
+            "Returns: rank, team name, GP, points for (PF), "
+            "FP/G, games back (GB), and streak."
         ),
         "input_schema": {
             "type": "object",
@@ -316,8 +333,8 @@ TOOLS = [
             "at each position, with the FP/G upgrade for each swap. "
             "Pickup FP/G is sample-size adjusted (Bayesian regression toward "
             "the FA pool median) — players with fewer games are regressed "
-            "more toward the mean. Both raw R14 and regressed FP/G are shown, "
-            "along with GP, team, EV line, and PP/G (avg PP time per game over "
+            "more toward the mean. Both raw last-14-games FP/G and regressed FP/G are shown, "
+            "along with GP, team, line deployment (Lx/Dx), and PP/G (avg PP time per game over "
             "last 30 games in M:SS format — use this to judge real PP usage, "
             "not just depth chart projections). "
             "Total value is injury-adjusted: players out 60+ days get 0 est games. "

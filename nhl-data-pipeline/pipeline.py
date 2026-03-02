@@ -187,10 +187,11 @@ def _run_gamelogs(conn, season):
         if pid not in known_ids:
             continue
         try:
-            save_skater_stats(conn, pid, season, [row])
+            save_skater_stats(conn, pid, season, [row], commit=False)
             skater_games += 1
         except Exception as e:
             logger.warning("Failed saving skater game log for %d: %s", pid, e)
+    conn.commit()
 
     # Bulk fetch goalie gamelogs from Stats API
     goalie_rows = fetch_all_goalie_gamelogs_bulk(season)
@@ -200,10 +201,11 @@ def _run_gamelogs(conn, season):
         if pid not in known_ids:
             continue
         try:
-            save_goalie_stats(conn, pid, season, [row])
+            save_goalie_stats(conn, pid, season, [row], commit=False)
             goalie_games += 1
         except Exception as e:
             logger.warning("Failed saving goalie game log for %d: %s", pid, e)
+    conn.commit()
 
     return {"skater_games": skater_games, "goalie_games": goalie_games}
 
@@ -222,10 +224,11 @@ def _run_seasontotals(conn, season):
         if pid not in known_ids:
             continue
         try:
-            save_skater_stats(conn, pid, season, [row], is_season_total=True)
+            save_skater_stats(conn, pid, season, [row], is_season_total=True, commit=False)
             skaters_updated += 1
         except Exception as e:
             logger.warning("Failed saving skater season totals for %d: %s", pid, e)
+    conn.commit()
 
     # Bulk fetch goalie season totals from Stats API
     goalie_rows = fetch_all_goalie_seasontotals_bulk(season)
@@ -235,10 +238,11 @@ def _run_seasontotals(conn, season):
         if pid not in known_ids:
             continue
         try:
-            save_goalie_stats(conn, pid, season, [row], is_season_total=True)
+            save_goalie_stats(conn, pid, season, [row], is_season_total=True, commit=False)
             goalies_updated += 1
         except Exception as e:
             logger.warning("Failed saving goalie season totals for %d: %s", pid, e)
+    conn.commit()
 
     return {"skaters_updated": skaters_updated, "goalies_updated": goalies_updated}
 

@@ -1,7 +1,8 @@
-"""Terminal-friendly formatters for query results.
+"""Labeled key-value formatters for query results.
 
 Each function takes the output of the corresponding queries.py function
-and returns an aligned, human-readable string.
+and returns an explicitly labeled string.  Every stat carries its name
+so the AI never has to guess column positions.
 """
 
 from __future__ import annotations
@@ -11,34 +12,97 @@ def _divider(width: int = 80) -> str:
     return "-" * width
 
 
+def _fpos(position: str | None) -> str:
+    """Map NHL position (C/L/R/D/G) to fantasy position (F/D/G)."""
+    if not position:
+        return "F"
+    if position in ("G", "D"):
+        return position
+    return "F"
+
+
 def _injury_tag(injury: dict | None) -> str:
     if not injury:
         return ""
     return f"[{injury.get('status', 'INJ')}]"
 
 
-def _deploy_tag(ev_line: int | None, pp_unit: int | None) -> str:
-    """Compact deployment string like 'L1/PP2', 'L3', or '-'."""
+def _news_lines(news: list | str | None, player_name: str = "",
+                 indent: int = 2) -> list[str]:
+    """Render recent news as indented lines with date and content snippet.
+
+    Accepts a list of dicts ``{"headline", "content", "date"}`` (preferred),
+    a list of plain headline strings, or a single headline string (legacy).
+    """
+    if not news:
+        return []
+    if isinstance(news, str):
+        news = [{"headline": news}]
+    result: list[str] = []
+    pad = " " * indent
+    for item in news:
+        if isinstance(item, str):
+            item = {"headline": item}
+        headline = item.get("headline", "")
+        content = item.get("content", "")
+        date_raw = item.get("date", "")
+        # Format date as compact "2026-03-02"
+        date_str = ""
+        if date_raw:
+            try:
+                date_str = date_raw[:10]
+            except (ValueError, TypeError):
+                pass
+        # Strip redundant "Player Name: " prefix from headline
+        if player_name and headline.startswith(f"{player_name}: "):
+            headline = headline[len(player_name) + 2:]
+        # Truncate long headlines
+        if len(headline) > 90:
+            headline = headline[:87].rsplit(" ", 1)[0] + "..."
+        prefix = f"[{date_str}] " if date_str else ""
+        result.append(f"{pad}^ {prefix}{headline}")
+        # Add truncated content snippet if available
+        if content:
+            if "Visit RotoWire" in content:
+                content = content[:content.index("Visit RotoWire")].strip()
+            if content:
+                if len(content) > 120:
+                    content = content[:117].rsplit(" ", 1)[0] + "..."
+                result.append(f"{pad}  {content}")
+    return result
+
+
+def _deploy_tag(ev_line: int | None, pp_unit: int | None, position: str = "") -> str:
+    """Compact deployment string like 'L1/PP2', 'D1/PP1', or '-'."""
     parts: list[str] = []
     if ev_line is not None:
-        parts.append(f"L{ev_line}")
+        prefix = "D" if position == "D" else "L"
+        parts.append(f"{prefix}{ev_line}")
     if pp_unit is not None:
         parts.append(f"PP{pp_unit}")
     return "/".join(parts) if parts else "-"
 
 
-def _line_tag(line_info: dict | None) -> str:
-    """Build a compact line descriptor like 'L1/PP1' from line info dict."""
+def _line_tag(line_info: dict | None, position: str = "") -> str:
+    """Build a compact line descriptor like 'L1/PP1' or 'D1/PP1' from line info dict."""
     if not line_info:
         return ""
     parts = []
     ev = line_info.get("ev_line")
     if ev:
-        parts.append(f"L{ev}")
+        prefix = "D" if position == "D" else "L"
+        parts.append(f"{prefix}{ev}")
     pp = line_info.get("pp_unit")
     if pp:
         parts.append(f"PP{pp}")
     return "/".join(parts)
+
+
+def _toi_str(seconds: int | None) -> str:
+    """Format TOI seconds as M:SS."""
+    if not seconds:
+        return "0:00"
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -47,57 +111,47 @@ def _line_tag(line_info: dict | None) -> str:
 
 
 def format_roster(data: list[dict]) -> str:
-    """Format fantasy roster with stats and fantasy points.
-
-    Args:
-        data: Output from get_my_roster().
-
-    Returns:
-        Formatted table string.
-    """
+    """Format fantasy roster with labeled stats per player."""
     if not data:
         return "No players on roster."
 
     lines = []
-    lines.append(f"{'Player':<22} {'Pos':>3} {'GP':>3} {'Key Stats':<20} "
-                 f"{'FP':>6} {'FP/G':>5} {'R14':>5} {'Sal':>6} {'Trend':<7} "
-                 f"{'Line':>7} {'Injury':<12}")
-    lines.append(_divider(105))
-
     for p in data:
-        name = (p["player_name"] or "")[:21]
-        pos = p.get("position", "")
+        name = p.get("player_name") or ""
+        pos = _fpos(p.get("position"))
+        raw_pos = p.get("position", "")
         gp = p.get("games_played", 0)
         fp = p.get("fantasy_points", 0.0)
         fpg = p.get("fpts_per_game", 0.0)
         r14 = p.get("recent_14_fpg", 0.0)
         salary = p.get("salary", 0) or 0
-        sal_str = f"${salary / 1_000_000:.1f}M" if salary > 0 else "    -"
+        sal_str = f"${salary / 1_000_000:.1f}M" if salary > 0 else "-"
         inj = _injury_tag(p.get("injury"))
-
         trend = p.get("trend", "neutral")
-        trend_str = ("^^ HOT" if trend == "hot"
-                     else "vv COLD" if trend == "cold"
-                     else "")
-
+        trend_str = ("HOT" if trend == "hot"
+                     else "COLD" if trend == "cold"
+                     else "neutral")
         line_info = {"ev_line": p.get("ev_line"), "pp_unit": p.get("pp_unit")}
-        lt = _line_tag(line_info)
+        lt = _line_tag(line_info, raw_pos) or "-"
 
-        if pos == "G":
+        if raw_pos == "G":
             w = p.get("wins", 0)
             l = p.get("losses", 0)
             so = p.get("shutouts", 0)
-            key_stats = f"{w}W {l}L {so}SO"
+            stats_str = f"W:{w} L:{l} SO:{so}"
         else:
             g = p.get("goals", 0)
             a = p.get("assists", 0)
             h = p.get("hits", 0)
             b = p.get("blocks", 0)
-            key_stats = f"{g}G {a}A {h}H {b}B"
+            stats_str = f"G:{g} A:{a} H:{h} B:{b}"
 
-        lines.append(f"{name:<22} {pos:>3} {gp:>3} {key_stats:<20} "
-                     f"{fp:>6.1f} {fpg:>5.2f} {r14:>5.2f} {sal_str:>6} {trend_str:<7} "
-                     f"{lt:>7} {inj:<12}")
+        lines.append(f"--- {name} ({pos}) ---")
+        lines.append(f"GP:{gp} | {stats_str} | FP:{fp:.1f} | FP/G:{fpg:.2f} | Last 14 games FP/G:{r14:.2f}")
+        parts = [f"Salary:{sal_str}", f"Trend:{trend_str}", f"Line:{lt}"]
+        if inj:
+            parts.append(f"Injury:{inj}")
+        lines.append(" | ".join(parts))
 
     return "\n".join(lines)
 
@@ -108,50 +162,43 @@ def format_roster(data: list[dict]) -> str:
 
 
 def format_free_agents(data: list[dict]) -> str:
-    """Format free agent search results.
-
-    Args:
-        data: Output from search_free_agents().
-
-    Returns:
-        Formatted table string.
-    """
+    """Format free agent search results with labeled stats."""
     if not data:
         return "No free agents found."
 
     lines = []
-    lines.append(f"{'Player':<22} {'Team':>4} {'Pos':>3} {'GP':>3} "
-                 f"{'Key Stats':<20} {'FP/G':>5} {'Peri':>5} {'Line':>7}")
-    lines.append(_divider(76))
-
     for p in data:
-        tag = _injury_tag(p.get("injury"))
-        name = ((p["player_name"] or "")[:21] + f" {tag}").rstrip()
+        name = p.get("player_name") or ""
+        raw_pos = p.get("position", "")
+        pos = _fpos(raw_pos)
         team = p.get("team", "") or ""
-        pos = p.get("position", "")
         gp = p.get("games_played", 0)
         fpg = p.get("fpts_per_game", 0.0)
         peri = p.get("peripheral_fpg", 0.0)
+        inj = _injury_tag(p.get("injury"))
 
-        if pos == "G":
+        if raw_pos == "G":
             w = p.get("wins", 0)
             so = p.get("shutouts", 0)
             gaa = p.get("gaa", 0.0)
-            key_stats = f"{w}W {so}SO {gaa:.2f}GAA"
-            peri_str = "    -"
+            stats_str = f"W:{w} SO:{so} GAA:{gaa:.2f}"
+            peri_str = ""
         else:
             g = p.get("goals", 0)
             a = p.get("assists", 0)
             h = p.get("hits", 0)
             b = p.get("blocks", 0)
-            key_stats = f"{g}G {a}A {h}H {b}B"
-            peri_str = f"{peri:>5.2f}"
+            stats_str = f"G:{g} A:{a} H:{h} B:{b}"
+            peri_str = f" | Peripheral FP/G:{peri:.2f}"
 
         line_info = {"ev_line": p.get("ev_line"), "pp_unit": p.get("pp_unit")}
-        lt = _line_tag(line_info) if line_info.get("ev_line") or line_info.get("pp_unit") else ""
+        lt = _line_tag(line_info, raw_pos) or "-"
 
-        lines.append(f"{name:<22} {team:>4} {pos:>3} {gp:>3} "
-                     f"{key_stats:<20} {fpg:>5.2f} {peri_str} {lt:>7}")
+        header = f"--- {name} ({pos}, {team}) ---"
+        if inj:
+            header = f"--- {name} ({pos}, {team}) {inj} ---"
+        lines.append(header)
+        lines.append(f"GP:{gp} | {stats_str} | FP/G:{fpg:.2f}{peri_str} | Line:{lt}")
 
     return "\n".join(lines)
 
@@ -162,20 +209,13 @@ def format_free_agents(data: list[dict]) -> str:
 
 
 def format_player_card(data: dict) -> str:
-    """Format detailed player stats card.
-
-    Args:
-        data: Output from get_player_stats().
-
-    Returns:
-        Formatted player card string.
-    """
+    """Format detailed player stats card (already key-value)."""
     if not data:
         return "Player not found."
 
     p = data["player"]
     lines = []
-    lines.append(f"=== {p['full_name']} ({p['team_abbrev']} - {p['position']}) ===")
+    lines.append(f"=== {p['full_name']} ({p['team_abbrev']} - {_fpos(p.get('position'))}) ===")
 
     # Injury banner
     if data.get("injury"):
@@ -231,16 +271,14 @@ def format_player_card(data: dict) -> str:
             f"+/-:{stats.get('plus_minus',0)}"
         )
         toi_pg = stats.get("toi_per_game", 0)
-        toi_str = f"{toi_pg // 60}:{toi_pg % 60:02d}" if toi_pg else "0:00"
         ppg = stats.get("powerplay_goals", 0)
         ppp = stats.get("powerplay_points", 0)
         shg = stats.get("shorthanded_goals", 0)
         shp = stats.get("shorthanded_points", 0)
-        parts = [f"TOI/G: {toi_str}"]
+        parts = [f"TOI/G: {_toi_str(toi_pg)}"]
         pp_toi = stats.get("pp_toi", 0)
         if pp_toi:
-            pp_min = f"{pp_toi // 60}:{pp_toi % 60:02d}"
-            parts.append(f"PP TOI: {pp_min}")
+            parts.append(f"PP TOI: {_toi_str(pp_toi)}")
         parts.append(f"PPG:{ppg} PPP:{ppp}")
         if shg or shp:
             parts.append(f"SHG:{shg} SHP:{shp}")
@@ -251,25 +289,19 @@ def format_player_card(data: dict) -> str:
     if log:
         lines.append("")
         lines.append("Recent Games:")
-        if data["is_goalie"]:
-            lines.append(f"  {'Date':<12} {'W':>2} {'L':>2} {'OTL':>3} "
-                         f"{'SO':>2} {'SV':>3} {'GA':>2} {'FP':>5}")
-            for g in log:
+        for g in log:
+            date = g.get("game_date", "")
+            fp_val = g.get("fantasy_points", 0.0)
+            if data["is_goalie"]:
                 lines.append(
-                    f"  {g['game_date']:<12} {g['wins']:>2} {g['losses']:>2} "
-                    f"{g['ot_losses']:>3} {g['shutouts']:>2} {g['saves']:>3} "
-                    f"{g['goals_against']:>2} {g['fantasy_points']:>5.1f}"
+                    f"  {date} | W:{g['wins']} L:{g['losses']} OTL:{g['ot_losses']} "
+                    f"SO:{g['shutouts']} SV:{g['saves']} GA:{g['goals_against']} | FP:{fp_val:.1f}"
                 )
-        else:
-            lines.append(f"  {'Date':<12} {'G':>2} {'A':>2} {'Pts':>3} "
-                         f"{'H':>3} {'B':>3} {'SOG':>3} {'TOI':>6} {'FP':>5}")
-            for g in log:
-                g_toi = g.get("toi", 0)
-                toi_str = f"{g_toi // 60}:{g_toi % 60:02d}" if g_toi else "0:00"
+            else:
+                toi = _toi_str(g.get("toi", 0))
                 lines.append(
-                    f"  {g['game_date']:<12} {g['goals']:>2} {g['assists']:>2} "
-                    f"{g['points']:>3} {g['hits']:>3} {g['blocks']:>3} "
-                    f"{g['shots']:>3} {toi_str:>6} {g['fantasy_points']:>5.1f}"
+                    f"  {date} | G:{g['goals']} A:{g['assists']} Pts:{g['points']} "
+                    f"H:{g['hits']} B:{g['blocks']} SOG:{g['shots']} TOI:{toi} | FP:{fp_val:.1f}"
                 )
 
     # News
@@ -281,8 +313,6 @@ def format_player_card(data: dict) -> str:
         for n in news:
             date_str = (n.get("published_at") or "")[:10]
             headline = n.get("headline", "")
-            # Strip redundant "Player Name: " prefix since we're already
-            # in the player's card context
             if headline.startswith(f"{player_name}: "):
                 headline = headline[len(player_name) + 2:]
             lines.append(f"  [{date_str}] {headline}")
@@ -296,14 +326,7 @@ def format_player_card(data: dict) -> str:
 
 
 def format_comparison(data: list[dict]) -> str:
-    """Format side-by-side player comparison.
-
-    Args:
-        data: Output from compare_players().
-
-    Returns:
-        Formatted comparison string.
-    """
+    """Format side-by-side player comparison with labeled rows."""
     if not data:
         return "No players to compare."
 
@@ -318,6 +341,12 @@ def format_comparison(data: list[dict]) -> str:
         header += f" {name:>{col_width}}"
     lines.append(header)
     lines.append(_divider(label_width + col_width * len(data) + len(data)))
+
+    # Position row
+    pos_row = f"{'Position':<{label_width}}"
+    for p in data:
+        pos_row += f" {_fpos(p['player'].get('position')):>{col_width}}"
+    lines.append(pos_row)
 
     # Determine which stats to show based on whether any are goalies
     has_goalie = any(p.get("is_goalie") for p in data)
@@ -351,7 +380,7 @@ def format_comparison(data: list[dict]) -> str:
             val = p.get(key, "-")
             if key == "toi_per_game" and isinstance(val, (int, float)) and val != "-":
                 val_int = int(val)
-                row += f" {f'{val_int // 60}:{val_int % 60:02d}':>{col_width}}"
+                row += f" {_toi_str(val_int):>{col_width}}"
             elif isinstance(val, float):
                 row += f" {val:>{col_width}.2f}"
             else:
@@ -362,7 +391,7 @@ def format_comparison(data: list[dict]) -> str:
     line_row = f"{'Line':<{label_width}}"
     has_any_line = False
     for p in data:
-        tag = _line_tag(p.get("line_context"))
+        tag = _line_tag(p.get("line_context"), p.get("position", ""))
         if tag:
             has_any_line = True
         line_row += f" {(tag or '-'):>{col_width}}"
@@ -378,14 +407,7 @@ def format_comparison(data: list[dict]) -> str:
 
 
 def format_trends(data: dict) -> str:
-    """Format player trend analysis.
-
-    Args:
-        data: Output from get_player_trends().
-
-    Returns:
-        Formatted trend string.
-    """
+    """Format player trend analysis."""
     if not data:
         return "Player not found."
 
@@ -402,11 +424,11 @@ def format_trends(data: dict) -> str:
 
     trend = data.get("trend", "neutral")
     if trend == "hot":
-        arrow = "^^ HOT"
+        arrow = "HOT"
     elif trend == "cold":
-        arrow = "vv COLD"
+        arrow = "COLD"
     else:
-        arrow = "-- Neutral"
+        arrow = "neutral"
 
     lines.append(f"\n  Trend: {arrow}")
 
@@ -419,34 +441,21 @@ def format_trends(data: dict) -> str:
 
 
 def format_standings(data: list[dict]) -> str:
-    """Format fantasy league standings.
-
-    Args:
-        data: Output from get_league_standings().
-
-    Returns:
-        Formatted standings table.
-    """
+    """Format fantasy league standings with labeled values."""
     if not data:
         return "No standings data."
 
     lines = []
-    lines.append(f"{'Rk':>3} {'Team':<22} {'GP':>4} {'PF':>8} "
-                 f"{'FP/G':>6} {'GB':>6} {'Streak':<6}")
-    lines.append(_divider(60))
-
     for s in data:
-        name = (s.get("team_name") or s.get("short_name") or "")[:21]
+        name = s.get("team_name") or s.get("short_name") or ""
+        rank = s.get("rank", 0)
+        gp = s.get("games_played", 0)
+        pf = s.get("points_for", 0.0)
+        fpg = s.get("fantasy_points_per_game", 0.0)
         gb = s.get("games_back", 0.0)
-        gb_str = "  -" if gb == 0.0 else f"{gb:.2f}"
-        lines.append(
-            f"{s.get('rank', 0):>3} {name:<22} "
-            f"{s.get('games_played', 0):>4} "
-            f"{s.get('points_for', 0.0):>8.2f} "
-            f"{s.get('fantasy_points_per_game', 0.0):>6.2f} "
-            f"{gb_str:>6} "
-            f"{s.get('streak', ''):>6}"
-        )
+        gb_str = "-" if gb == 0.0 else f"{gb:.2f}"
+        streak = s.get("streak", "")
+        lines.append(f"#{rank} {name} | GP:{gp} | PF:{pf:.1f} | FP/G:{fpg:.2f} | GB:{gb_str} | Streak:{streak}")
 
     return "\n".join(lines)
 
@@ -457,14 +466,7 @@ def format_standings(data: list[dict]) -> str:
 
 
 def format_schedule(data: dict) -> str:
-    """Format schedule analysis.
-
-    Args:
-        data: Output from get_schedule_analysis().
-
-    Returns:
-        Formatted schedule string.
-    """
+    """Format schedule analysis."""
     if not data:
         return "No schedule data."
 
@@ -478,20 +480,16 @@ def format_schedule(data: dict) -> str:
         b2b_dates.add(d1)
         b2b_dates.add(d2)
 
-    lines.append(f"  {'Date':<12} {'Opp':>4} {'H/A':>4} {'B2B':>4}")
-    lines.append("  " + _divider(28))
-
     for g in data.get("games", []):
         gd = g["game_date"]
-        b2b = " *" if gd in b2b_dates else ""
-        lines.append(
-            f"  {gd:<12} {g.get('opponent', ''):>4} "
-            f"{g.get('home_away', ''):>4}{b2b}"
-        )
+        opp = g.get("opponent", "")
+        ha = g.get("home_away", "")
+        b2b = " [B2B]" if gd in b2b_dates else ""
+        lines.append(f"  {gd} | vs:{opp} | {ha}{b2b}")
 
     b2b_count = len(data.get("back_to_backs", []))
     if b2b_count:
-        lines.append(f"\n  * {b2b_count} back-to-back(s)")
+        lines.append(f"\n  Back-to-backs: {b2b_count}")
 
     return "\n".join(lines)
 
@@ -502,14 +500,7 @@ def format_schedule(data: dict) -> str:
 
 
 def format_news(data: list[dict]) -> str:
-    """Format recent news items.
-
-    Args:
-        data: Output from get_recent_news().
-
-    Returns:
-        Formatted news list.
-    """
+    """Format recent news items."""
     if not data:
         return "No recent news."
 
@@ -518,8 +509,6 @@ def format_news(data: list[dict]) -> str:
         date_str = (n.get("published_at") or "")[:10]
         player = n.get("player_name") or "Unknown"
         headline = n.get("headline") or ""
-        # Headlines are stored as "Player Name: headline text" — strip the
-        # prefix to avoid duplication since we already show the player name.
         if headline.startswith(f"{player}: "):
             headline = headline[len(player) + 2:]
         lines.append(f"[{date_str}] {player}: {headline}")
@@ -533,30 +522,20 @@ def format_news(data: list[dict]) -> str:
 
 
 def format_injuries(data: list[dict]) -> str:
-    """Format injury report.
-
-    Args:
-        data: Output from get_injuries().
-
-    Returns:
-        Formatted injury table.
-    """
+    """Format injury report with labeled fields."""
     if not data:
         return "No injuries to report."
 
     lines = []
-    lines.append(f"{'Player':<22} {'Team':>4} {'Pos':>3} {'Injury':<16} "
-                 f"{'Status':<12} {'Updated':<10}")
-    lines.append(_divider(72))
-
     for i in data:
-        name = (i.get("full_name") or "")[:21]
+        name = i.get("full_name") or ""
+        team = i.get("team_abbrev") or ""
+        pos = _fpos(i.get("position"))
+        injury_type = i.get("injury_type") or "Unknown"
+        status = i.get("status") or "Unknown"
+        updated = i.get("updated_at") or ""
         lines.append(
-            f"{name:<22} {(i.get('team_abbrev') or ''):>4} "
-            f"{(i.get('position') or ''):>3} "
-            f"{(i.get('injury_type') or ''):>16} "
-            f"{(i.get('status') or ''):<12} "
-            f"{(i.get('updated_at') or ''):<10}"
+            f"{name} ({pos}, {team}) | Injury:{injury_type} | Status:{status} | Updated:{updated}"
         )
 
     return "\n".join(lines)
@@ -568,14 +547,7 @@ def format_injuries(data: list[dict]) -> str:
 
 
 def format_team_roster(data: dict) -> str:
-    """Format another team's roster for trade analysis.
-
-    Args:
-        data: Output from get_team_roster().
-
-    Returns:
-        Formatted team roster string.
-    """
+    """Format another team's roster for trade analysis."""
     if not data:
         return "Team not found."
 
@@ -584,9 +556,8 @@ def format_team_roster(data: dict) -> str:
 
     lines = []
     lines.append(f"=== {info['team_name']} ({info['short_name']}) ===")
-    lines.append(f"  Rank: #{info.get('rank', '?')} | "
-                 f"PF: {info.get('points_for', 0):.1f} | "
-                 f"FP/G: {info.get('fpg', 0):.2f}")
+    lines.append(f"Rank:#{info.get('rank', '?')} | PF:{info.get('points_for', 0):.1f} | "
+                 f"FP/G:{info.get('fpg', 0):.2f}")
     lines.append("")
     lines.append(format_roster(roster))
 
@@ -594,14 +565,7 @@ def format_team_roster(data: dict) -> str:
 
 
 def format_trade_suggestions(data: dict) -> str:
-    """Format trade suggestions between two teams.
-
-    Args:
-        data: Output from suggest_trades().
-
-    Returns:
-        Formatted trade suggestion string.
-    """
+    """Format trade suggestions with labeled fields."""
     if not data:
         return "Could not generate trade suggestions."
 
@@ -613,146 +577,107 @@ def format_trade_suggestions(data: dict) -> str:
                  f"(#{opp.get('rank', '?')}) ===")
     lines.append("")
 
-    # Show position avg comparison
-    lines.append(f"{'Position':<10} {'My Avg FP/G':>11} {'Their Avg FP/G':>14}")
-    lines.append(_divider(38))
+    # Position avg comparison
     my_avgs = data["my_team"]["avg_fpg"]
     opp_avgs = opp["avg_fpg"]
     for g in ("F", "D", "G"):
-        lines.append(f"{g:<10} {my_avgs.get(g, 0):>11.2f} {opp_avgs.get(g, 0):>14.2f}")
+        lines.append(f"  {g}: My avg FP/G:{my_avgs.get(g, 0):.2f} | Their avg FP/G:{opp_avgs.get(g, 0):.2f}")
     lines.append("")
 
     if not suggestions:
         lines.append("No mutually beneficial trades identified.")
         return "\n".join(lines)
 
-    lines.append(f"{'Send':<22} {'Pos':>3} {'R14':>5}   "
-                 f"{'Receive':<22} {'Pos':>3} {'R14':>5}   "
-                 f"{'My +/-':>6}")
-    lines.append(_divider(76))
-
-    for s in suggestions:
+    for idx, s in enumerate(suggestions, 1):
         send_r14 = s.get('send_recent_14_fpg', s['send_fpg'])
         recv_r14 = s.get('receive_recent_14_fpg', s['receive_fpg'])
-        lines.append(
-            f"{s['send_player']:<22} {s['send_position']:>3} "
-            f"{send_r14:>5.2f}   "
-            f"{s['receive_player']:<22} {s['receive_position']:>3} "
-            f"{recv_r14:>5.2f}   "
-            f"{s['my_upgrade']:>+6.2f}"
-        )
+        lines.append(f"Trade #{idx}:")
+        lines.append(f"  Send: {s['send_player']} ({_fpos(s.get('send_position'))}) | Last 14 games FP/G:{send_r14:.2f}")
+        lines.append(f"  Receive: {s['receive_player']} ({_fpos(s.get('receive_position'))}) | Last 14 games FP/G:{recv_r14:.2f}")
+        lines.append(f"  My FP/G upgrade: {s['my_upgrade']:+.2f}")
+        send_news = _news_lines(s.get("send_news"), s.get("send_player", ""), indent=4)
+        recv_news = _news_lines(s.get("receive_news"), s.get("receive_player", ""), indent=4)
+        if send_news:
+            lines.append(f"  Send news:")
+            lines.extend(send_news)
+        if recv_news:
+            lines.append(f"  Receive news:")
+            lines.extend(recv_news)
 
     return "\n".join(lines)
 
 
 def format_trade_targets(data: list[dict]) -> str:
-    """Format buy-low trade target candidates.
-
-    Args:
-        data: Output from get_trade_candidates().
-
-    Returns:
-        Formatted table string.
-    """
+    """Format buy-low trade target candidates with labeled fields."""
     if not data:
         return "No buy-low trade targets found matching criteria."
 
     lines = []
     lines.append("=== Buy-Low Trade Targets ===")
     lines.append("")
-    lines.append(f"{'Player':<22} {'Owner':<18} {'Pos':>3} {'GP':>3} "
-                 f"{'Szn FP/G':>8} {'L7 FP/G':>7} {'TOI/G':>6} {'Line':>7} {'Trend':>10}")
-    lines.append(_divider(90))
 
     for p in data:
-        name = (p.get("player_name") or "")[:21]
-        owner = (p.get("owner_team_name") or "")[:17]
+        name = p.get("player_name") or ""
+        raw_pos = p.get("position", "")
+        owner = p.get("owner_team_name") or ""
         rank = p.get("owner_rank")
-        rank_tag = f" (#{rank})" if rank else ""
-        owner_display = (owner + rank_tag)[:17]
+        rank_str = f" (#{rank})" if rank else ""
         tpg = p.get("toi_per_game", 0)
-        pos = p.get("position", "")
-        toi_str = f"{tpg // 60}:{tpg % 60:02d}" if tpg and pos != "G" else ("  -  " if pos == "G" else "0:00")
-        lt = _line_tag(p.get("line_info"))
+        toi = _toi_str(tpg) if tpg and raw_pos != "G" else "-"
+        lt = _line_tag(p.get("line_info"), raw_pos) or "-"
         signal = p.get("signal", "trending_up")
         trend_pct = p.get("trend_pct", 0)
         if signal == "high_toi_underperformer":
-            trend_str = f"[TOI] {trend_pct:+.0f}%"
+            trend_str = f"high-TOI underperformer ({trend_pct:+.0f}%)"
         else:
-            trend_str = f"{trend_pct:+.0f}%"
-        lines.append(
-            f"{name:<22} {owner_display:<18} {p.get('position', ''):>3} "
-            f"{p.get('games_played', 0):>3} "
-            f"{p.get('season_fpg', 0.0):>8.2f} "
-            f"{p.get('recent_7_fpg', 0.0):>7.2f} "
-            f"{toi_str:>6} {lt:>7} {trend_str:>10}"
-        )
+            trend_str = f"trending up ({trend_pct:+.0f}%)"
+
+        lines.append(f"--- {name} ({_fpos(raw_pos)}) ---")
+        lines.append(f"Owner:{owner}{rank_str} | GP:{p.get('games_played', 0)} | "
+                     f"Season FP/G:{p.get('season_fpg', 0.0):.2f} | Last 7 games FP/G:{p.get('recent_7_fpg', 0.0):.2f}")
+        lines.append(f"TOI/G:{toi} | Line:{lt} | Signal:{trend_str}")
+        lines.extend(_news_lines(p.get("recent_news"), name))
 
     return "\n".join(lines)
 
 
 def format_drop_candidates(data: list[dict]) -> str:
-    """Format drop candidate analysis.
-
-    Args:
-        data: Output from get_drop_candidates().
-
-    Returns:
-        Formatted table string.
-    """
+    """Format drop candidate analysis with labeled fields."""
     if not data:
         return "No drop candidates identified."
 
     lines = []
     lines.append("=== Drop Candidates (Weakest Roster Players) ===")
     lines.append("")
-    lines.append(f"{'Player':<22} {'Pos':>3} {'GP':>3} {'Szn FP/G':>8} "
-                 f"{'L14 FP/G':>8} {'Line':>7} {'Trend':<8} {'Injury':<12}")
-    lines.append(_divider(80))
 
     for p in data:
-        name = (p.get("player_name") or "")[:21]
+        name = p.get("player_name") or ""
+        raw_pos = p.get("position", "")
         trend = p.get("trend", "neutral")
-        if trend == "hot":
-            trend_str = "^^ HOT"
-        elif trend == "cold":
-            trend_str = "vv COLD"
-        else:
-            trend_str = "-- Neut"
+        trend_str = ("HOT" if trend == "hot"
+                     else "COLD" if trend == "cold"
+                     else "neutral")
         inj = _injury_tag(p.get("injury"))
-        lt = _line_tag(p.get("line_info"))
-        lines.append(
-            f"{name:<22} {p.get('position', ''):>3} "
-            f"{p.get('games_played', 0):>3} "
-            f"{p.get('season_fpg', 0.0):>8.2f} "
-            f"{p.get('recent_14_fpg', 0.0):>8.2f} "
-            f"{lt:>7} {trend_str:<8} {inj:<12}"
-        )
-        if p.get("recent_news"):
-            news_text = p["recent_news"]
-            # Strip "Player Name: " prefix from headline to avoid redundancy
-            pname = p.get("player_name", "")
-            if news_text.startswith(f"{pname}: "):
-                news_text = news_text[len(pname) + 2:]
-            # Truncate at word boundary
-            if len(news_text) > 70:
-                news_text = news_text[:67].rsplit(" ", 1)[0] + "..."
-            lines.append(f"  {'':>22} News: {news_text}")
+        lt = _line_tag(p.get("line_info"), raw_pos) or "-"
+
+        lines.append(f"--- {name} ({_fpos(raw_pos)}) ---")
+        parts = [
+            f"GP:{p.get('games_played', 0)}",
+            f"Season FP/G:{p.get('season_fpg', 0.0):.2f}",
+            f"Last 14 games FP/G:{p.get('recent_14_fpg', 0.0):.2f}",
+            f"Line:{lt}",
+            f"Trend:{trend_str}",
+        ]
+        if inj:
+            parts.append(f"Injury:{inj}")
+        lines.append(" | ".join(parts))
+        lines.extend(_news_lines(p.get("recent_news"), name))
 
     return "\n".join(lines)
 
 
 def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
-    """Format combined drop and pickup recommendations.
-
-    Args:
-        drops: Output from get_drop_candidates().
-        pickups: Output from get_pickup_recommendations() — dict with
-            claims_remaining and recommendations, or legacy list.
-
-    Returns:
-        Formatted two-section string.
-    """
+    """Format combined drop and pickup recommendations with labeled fields."""
     # Unwrap new dict format
     if isinstance(pickups, dict):
         claims_remaining = pickups.get("claims_remaining")
@@ -769,7 +694,7 @@ def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
     if claims_remaining is not None:
         lines.append(f"=== CLAIMS REMAINING: {claims_remaining}/10 ===")
         if claims_remaining <= 2:
-            lines.append("*** CLAIMS ARE SCARCE — only use on high-impact pickups! ***")
+            lines.append("*** CLAIMS ARE SCARCE -- only use on high-impact pickups! ***")
         lines.append("")
 
     # GP remaining banner
@@ -782,23 +707,21 @@ def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
     lines.append("=== RECOMMENDED DROPS ===")
     lines.append("")
     if drops:
-        lines.append(f"{'Player':<22} {'Pos':>3} {'Szn FP/G':>8} "
-                     f"{'L14 FP/G':>8} {'Trend':<8}")
-        lines.append(_divider(54))
         for p in drops:
-            name = (p.get("player_name") or "")[:21]
+            name = p.get("player_name") or ""
+            raw_pos = p.get("position", "")
             trend = p.get("trend", "neutral")
-            trend_str = ("^^ HOT" if trend == "hot"
-                         else "vv COLD" if trend == "cold"
-                         else "-- Neut")
+            trend_str = ("HOT" if trend == "hot"
+                         else "COLD" if trend == "cold"
+                         else "neutral")
             inj = _injury_tag(p.get("injury"))
-            display_name = f"{name} {inj}".strip()[:21]
-            lines.append(
-                f"{display_name:<22} {p.get('position', ''):>3} "
-                f"{p.get('season_fpg', 0.0):>8.2f} "
-                f"{p.get('recent_14_fpg', 0.0):>8.2f} "
-                f"{trend_str:<8}"
-            )
+            header = f"--- {name} ({_fpos(raw_pos)}) ---"
+            if inj:
+                header = f"--- {name} ({_fpos(raw_pos)}) {inj} ---"
+            lines.append(header)
+            lines.append(f"Season FP/G:{p.get('season_fpg', 0.0):.2f} | "
+                         f"Last 14 games FP/G:{p.get('recent_14_fpg', 0.0):.2f} | "
+                         f"Trend:{trend_str}")
     else:
         lines.append("  No clear drop candidates.")
 
@@ -808,42 +731,45 @@ def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
     lines.append("=== RECOMMENDED PICKUPS ===")
     lines.append("")
     if pickup_list:
-        lines.append(f"{'Pickup':<20} {'Pos':>3} {'Tm':>3} {'Line':>4} {'PP/G':>5} "
-                     f"{'GP':>3} {'Szn':>5} {'R14':>5} "
-                     f"{'Reg':>5}  "
-                     f"{'Drop':<20} {'Szn':>5} {'R14':>5} "
-                     f"{'Upg':>7} {'~GP':>4} {'TotV':>6}  {'Reason'}")
-        lines.append(_divider(155))
         for r in pickup_list:
+            pickup_name = r.get("pickup_name") or ""
+            raw_pos = r.get("pickup_position", "")
             inj_tag = ""
             if r.get("pickup_injury"):
-                inj_tag = f" [{r['pickup_injury'].get('status', 'INJ')}]"
-            pickup = ((r.get("pickup_name") or "")[:19 - len(inj_tag)] + inj_tag)
-            drop = (r.get("drop_name") or "")[:19]
-            est_games = r.get("est_games", 0)
-            total_val = r.get("total_value", 0.0)
-            pickup_gp = r.get("pickup_games_played", 0)
-            regressed = r.get("pickup_regressed_fpg",
-                              r.get("pickup_recent_fpg", 0.0))
+                inj_tag = f" {_injury_tag(r['pickup_injury'])}"
             team = r.get("pickup_team", "")[:3]
             ev_line = r.get("pickup_ev_line")
-            line_str = f"L{ev_line}" if ev_line is not None else "-"
+            prefix = "D" if raw_pos == "D" else "L"
+            line_str = f"{prefix}{ev_line}" if ev_line is not None else "-"
             pp_pg = r.get("pickup_pp_toi_per_game", 0)
-            pp_str = f"{pp_pg // 60}:{pp_pg % 60:02d}"
+            pp_str = _toi_str(pp_pg)
+            regressed = r.get("pickup_regressed_fpg",
+                              r.get("pickup_recent_fpg", 0.0))
+            drop_name = r.get("drop_name") or ""
+
+            lines.append(f"--- Pickup: {pickup_name} ({_fpos(raw_pos)}, {team}){inj_tag} ---")
             lines.append(
-                f"{pickup:<20} {r.get('pickup_position', ''):>3} "
-                f"{team:>3} {line_str:>4} {pp_str:>5} "
-                f"{pickup_gp:>3} "
-                f"{r.get('pickup_season_fpg', 0.0):>5.2f} "
-                f"{r.get('pickup_recent_fpg', 0.0):>5.2f} "
-                f"{regressed:>5.2f}  "
-                f"{drop:<20} "
-                f"{r.get('drop_season_fpg', 0.0):>5.2f} "
-                f"{r.get('drop_recent_fpg', 0.0):>5.2f} "
-                f"{r.get('fpg_upgrade', 0.0):>+7.2f} "
-                f"{est_games:>4} "
-                f"{total_val:>+6.1f}  "
-                f"{r.get('reason') or ''}"
+                f"GP:{r.get('pickup_games_played', 0)} | "
+                f"Season FP/G:{r.get('pickup_season_fpg', 0.0):.2f} | "
+                f"Last 14 games FP/G:{r.get('pickup_recent_fpg', 0.0):.2f} | "
+                f"Regressed FP/G:{regressed:.2f}"
+            )
+            lines.append(
+                f"Line:{line_str} | PP/G:{pp_str} | "
+                f"Drop:{drop_name} (Season FP/G:{r.get('drop_season_fpg', 0.0):.2f}, "
+                f"Last 14 games FP/G:{r.get('drop_recent_fpg', 0.0):.2f})"
+            )
+            lines.append(
+                f"FP/G upgrade:{r.get('fpg_upgrade', 0.0):+.2f} | "
+                f"Est games:{r.get('est_games', 0)} | "
+                f"Total value:{r.get('total_value', 0.0):+.1f}"
+            )
+            reason = r.get('reason') or ''
+            if reason:
+                lines.append(f"Reason: {reason}")
+            lines.extend(
+                _news_lines(r.get("pickup_recent_news"),
+                            pickup_name, indent=2)
             )
     else:
         lines.append("  No clear pickup recommendations.")
@@ -860,32 +786,31 @@ def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
         lines.append("=== IR STASH CANDIDATES (no drop needed) ===")
         lines.append("")
         if ir_stash:
-            lines.append(
-                f"{'Player':<20} {'Pos':>3} {'Tm':>3} "
-                f"{'GP':>3} {'Szn':>5} {'R14':>5} "
-                f"{'Reg':>5}  {'~GP':>4} {'TotV':>6}  {'Reason'}")
-            lines.append(_divider(85))
             for r in ir_stash:
+                pickup_name = r.get("pickup_name") or ""
+                raw_pos = r.get("pickup_position", "")
                 inj_tag = ""
                 if r.get("pickup_injury"):
-                    inj_tag = (
-                        f" [{r['pickup_injury'].get('status', 'INJ')}]")
-                name = ((r.get("pickup_name") or "")[:19 - len(inj_tag)]
-                        + inj_tag)
+                    inj_tag = f" {_injury_tag(r['pickup_injury'])}"
                 team = r.get("pickup_team", "")[:3]
+                regressed = r.get("pickup_regressed_fpg", 0.0)
+
+                lines.append(f"--- IR Stash: {pickup_name} ({_fpos(raw_pos)}, {team}){inj_tag} ---")
                 lines.append(
-                    f"{name:<20} {r.get('pickup_position', ''):>3} "
-                    f"{team:>3} "
-                    f"{r.get('pickup_games_played', 0):>3} "
-                    f"{r.get('pickup_season_fpg', 0.0):>5.2f} "
-                    f"{r.get('pickup_recent_fpg', 0.0):>5.2f} "
-                    f"{r.get('pickup_regressed_fpg', 0.0):>5.2f}  "
-                    f"{r.get('est_games', 0):>4} "
-                    f"{r.get('total_value', 0.0):>+6.1f}  "
-                    f"{r.get('reason', '')}"
+                    f"GP:{r.get('pickup_games_played', 0)} | "
+                    f"Season FP/G:{r.get('pickup_season_fpg', 0.0):.2f} | "
+                    f"Last 14 games FP/G:{r.get('pickup_recent_fpg', 0.0):.2f} | "
+                    f"Regressed FP/G:{regressed:.2f}"
                 )
-                for news_item in (r.get("pickup_recent_news") or []):
-                    lines.append(f"{'':>28}^ {news_item}")
+                lines.append(
+                    f"Est games:{r.get('est_games', 0)} | "
+                    f"Total value:{r.get('total_value', 0.0):+.1f} | "
+                    f"Reason: {r.get('reason', '')}"
+                )
+                lines.extend(
+                    _news_lines(r.get("pickup_recent_news"),
+                                pickup_name, indent=2)
+                )
         else:
             lines.append("  No IR-eligible free agents worth stashing.")
 
@@ -898,15 +823,7 @@ def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
 
 
 def format_web_search_results(data: dict, query: str) -> str:
-    """Format Brave Search API response as readable text.
-
-    Args:
-        data: Raw JSON response from Brave Search API.
-        query: Original search query (for header context).
-
-    Returns:
-        Formatted search results string.
-    """
+    """Format Brave Search API response as readable text."""
     results = data.get("web", {}).get("results", [])
 
     if not results:
