@@ -176,7 +176,7 @@ class TestToolDefinitions:
     """Tests for the TOOLS list structure."""
 
     def test_correct_tool_count(self) -> None:
-        assert len(TOOLS) == 15
+        assert len(TOOLS) == 12  # 3 convenience tools commented out for A/B testing
 
     def test_all_tools_have_required_fields(self) -> None:
         for tool in TOOLS:
@@ -196,8 +196,8 @@ class TestToolDefinitions:
             "get_player_stats", "compare_players", "get_player_trends",
             "get_news_briefing", "get_schedule_analysis",
             "get_league_standings", "get_injuries",
-            "get_trade_targets", "get_roster_moves",
-            "get_team_roster", "suggest_trades",
+            # "get_trade_targets", "get_roster_moves",  # commented out for A/B testing
+            "get_team_roster",  # "suggest_trades",  # commented out for A/B testing
             "web_search",
         }
         assert names == expected
@@ -325,13 +325,14 @@ class TestDispatchTool:
         result = dispatch_tool("get_injuries", {"scope": "team"}, ctx)
         assert "specify a team" in result.lower()
 
-    def test_get_trade_targets(self, ctx: SessionContext) -> None:
-        result = dispatch_tool("get_trade_targets", {}, ctx)
-        assert isinstance(result, str)
+    # --- Convenience tools commented out for A/B testing ---
+    # def test_get_trade_targets(self, ctx: SessionContext) -> None:
+    #     result = dispatch_tool("get_trade_targets", {}, ctx)
+    #     assert isinstance(result, str)
 
-    def test_get_roster_moves(self, ctx: SessionContext) -> None:
-        result = dispatch_tool("get_roster_moves", {}, ctx)
-        assert "RECOMMENDED" in result
+    # def test_get_roster_moves(self, ctx: SessionContext) -> None:
+    #     result = dispatch_tool("get_roster_moves", {}, ctx)
+    #     assert "RECOMMENDED" in result
 
     def test_get_team_roster(self, ctx: SessionContext) -> None:
         result = dispatch_tool("get_team_roster", {"team_name": "Other Team"}, ctx)
@@ -341,13 +342,14 @@ class TestDispatchTool:
         result = dispatch_tool("get_team_roster", {"team_name": "Nonexistent"}, ctx)
         assert "not found" in result.lower()
 
-    def test_suggest_trades(self, ctx: SessionContext) -> None:
-        result = dispatch_tool("suggest_trades", {"opponent_team_name": "Other Team"}, ctx)
-        assert isinstance(result, str)
+    # def test_suggest_trades(self, ctx: SessionContext) -> None:
+    #     result = dispatch_tool("suggest_trades", {"opponent_team_name": "Other Team"}, ctx)
+    #     assert isinstance(result, str)
 
-    def test_suggest_trades_not_found(self, ctx: SessionContext) -> None:
-        result = dispatch_tool("suggest_trades", {"opponent_team_name": "Nonexistent"}, ctx)
-        assert "not found" in result.lower()
+    # def test_suggest_trades_not_found(self, ctx: SessionContext) -> None:
+    #     result = dispatch_tool("suggest_trades", {"opponent_team_name": "Nonexistent"}, ctx)
+    #     assert "not found" in result.lower()
+    # --- End convenience tools ---
 
 
 # ---------------------------------------------------------------------------

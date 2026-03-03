@@ -62,6 +62,54 @@ def _position_group(position: str | None) -> str:
     return "F"
 
 
+def _get_fantasy_gp(
+    conn: sqlite3.Connection,
+    team_id: str,
+    roster: list[dict] | None = None,
+) -> dict[str, dict]:
+    """Get real fantasy GP per position from Fantrax data.
+
+    Falls back to summing NHL games_played if the
+    fantasy_gp_per_position table has no data for this team.
+    """
+    rows = conn.execute(
+        "SELECT position, gp_used, gp_limit, gp_remaining "
+        "FROM fantasy_gp_per_position WHERE team_id = ?",
+        (team_id,),
+    ).fetchall()
+
+    if rows:
+        gp_limits: dict[str, dict] = {}
+        for row in rows:
+            pos = row["position"]
+            gp_limits[pos] = {
+                "used": row["gp_used"],
+                "limit": row["gp_limit"],
+                "remaining": row["gp_remaining"],
+                "pct": round(row["gp_used"] / row["gp_limit"] * 100, 1)
+                if row["gp_limit"] > 0 else 0.0,
+            }
+        return gp_limits
+
+    # Fallback: sum NHL GP (inaccurate but better than nothing)
+    gp_used: dict[str, int] = {"F": 0, "D": 0, "G": 0}
+    for p in (roster or []):
+        group = _position_group(p.get("position"))
+        gp_used[group] += p.get("games_played", 0)
+
+    gp_limits = {}
+    for g in ("F", "D", "G"):
+        limit = GP_LIMITS[g]
+        used = gp_used[g]
+        gp_limits[g] = {
+            "used": used,
+            "limit": limit,
+            "remaining": limit - used,
+            "pct": round(used / limit * 100, 1) if limit > 0 else 0.0,
+        }
+    return gp_limits
+
+
 def _get_recent_pp_toi(
     conn: sqlite3.Connection,
     player_id: int,
@@ -415,7 +463,6 @@ def get_roster_analysis(
 
     counts: dict[str, int] = {"F": 0, "D": 0, "G": 0}
     fpts_sums: dict[str, float] = {"F": 0.0, "D": 0.0, "G": 0.0}
-    gp_used: dict[str, int] = {"F": 0, "D": 0, "G": 0}
     total_salary = 0.0
     injured = []
 
@@ -423,7 +470,6 @@ def get_roster_analysis(
         group = _position_group(p.get("position"))
         counts[group] = counts.get(group, 0) + 1
         fpts_sums[group] = fpts_sums.get(group, 0.0) + p["fpts_per_game"]
-        gp_used[group] = gp_used.get(group, 0) + p.get("games_played", 0)
         total_salary += p.get("salary", 0) or 0
         if p.get("injury"):
             injured.append(p)
@@ -432,17 +478,8 @@ def get_roster_analysis(
     for g in ("F", "D", "G"):
         avg_fpts[g] = round(fpts_sums[g] / counts[g], 2) if counts[g] > 0 else 0.0
 
-    # GP limits per position group
-    gp_limits = {}
-    for g in ("F", "D", "G"):
-        limit = GP_LIMITS[g]
-        used = gp_used[g]
-        gp_limits[g] = {
-            "used": used,
-            "limit": limit,
-            "remaining": limit - used,
-            "pct": round(used / limit * 100, 1) if limit > 0 else 0.0,
-        }
+    # GP limits per position group — use real Fantrax data
+    gp_limits = _get_fantasy_gp(conn, team_id, roster)
 
     # Bottom 3 by FP/G (players with at least 1 game)
     with_games = [p for p in roster if p["games_played"] > 0]
@@ -1730,14 +1767,16 @@ def get_pickup_recommendations(
 
     # Compute GP remaining per position group
     roster = get_my_roster(conn, team_id, season)
-    gp_used: dict[str, int] = {"F": 0, "D": 0, "G": 0}
+    # Real fantasy GP per position from Fantrax
+    gp_limits_data = _get_fantasy_gp(conn, team_id, roster)
+    gp_used: dict[str, int] = {g: gp_limits_data.get(g, {}).get("used", 0) for g in ("F", "D", "G")}
+    gp_remaining: dict[str, int] = {g: gp_limits_data.get(g, {}).get("remaining", 0) for g in ("F", "D", "G")}
+
     roster_count: dict[str, int] = {"F": 0, "D": 0, "G": 0}
     for p in roster:
         pg = _position_group(p.get("position"))
-        gp_used[pg] += p.get("games_played", 0)
         roster_count[pg] += 1
 
-    gp_remaining = {g: GP_LIMITS[g] - gp_used[g] for g in ("F", "D", "G")}
     # Approximate games left per player at each position
     games_per_player = {
         g: round(gp_remaining[g] / roster_count[g]) if roster_count[g] > 0 else 0
@@ -1842,7 +1881,8 @@ def get_pickup_recommendations(
     # Phase 2: cross-position pairs when drop group GP is tight (>=75%)
     for drop in drops:
         drop_pg = _position_group(drop["position"])
-        drop_gp_pct = gp_used[drop_pg] / GP_LIMITS[drop_pg] * 100
+        drop_limit = gp_limits_data.get(drop_pg, {}).get("limit", GP_LIMITS.get(drop_pg, 1))
+        drop_gp_pct = gp_used[drop_pg] / drop_limit * 100 if drop_limit > 0 else 0
         if drop_gp_pct < 75:
             continue
         drop_recent_fpg = drop["recent_14_fpg"]

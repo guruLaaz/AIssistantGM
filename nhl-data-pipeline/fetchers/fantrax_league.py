@@ -525,6 +525,82 @@ def save_roster(
     return len(slots)
 
 
+def fetch_gp_per_position(
+    session: requests.Session,
+    league_id: str,
+    team_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch actual fantasy games-played per position for a team.
+
+    Calls the Fantrax API with ``view=GAMES_PER_POS`` to get the real
+    fantasy GP used (not NHL GP), remaining, limit, and pace for each
+    position group (F, D, G).
+
+    Args:
+        session: Authenticated requests session.
+        league_id: Fantrax league ID.
+        team_id: Fantasy team ID.
+
+    Returns:
+        List of dicts with position, gp_used, gp_limit, gp_remaining, pace.
+    """
+    data = _fantrax_api_call(
+        session, league_id, "getTeamRosterInfo",
+        extra_data={"teamId": team_id, "view": "GAMES_PER_POS"},
+    )
+
+    gp_data = data.get("gamePlayedPerPosData", {})
+    table_data = gp_data.get("tableData", [])
+
+    results: list[dict[str, Any]] = []
+    for row in table_data:
+        results.append({
+            "position": row.get("posShort", ""),
+            "gp_used": int(row.get("gp", 0)),
+            "gp_limit": int(row.get("max", 0)),
+            "gp_remaining": int(row.get("remaining", 0)),
+            "pace": row.get("pace", ""),
+        })
+
+    logger.debug("GP per position for %s: %s", team_id, results)
+    return results
+
+
+def save_gp_per_position(
+    conn: sqlite3.Connection,
+    team_id: str,
+    rows: list[dict[str, Any]],
+) -> int:
+    """Save games-played per position to the database.
+
+    Args:
+        conn: Database connection.
+        team_id: Fantasy team ID.
+        rows: List of GP dicts from fetch_gp_per_position.
+
+    Returns:
+        Number of rows saved.
+    """
+    for row in rows:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO fantasy_gp_per_position
+                (team_id, position, gp_used, gp_limit, gp_remaining, pace)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                team_id,
+                row["position"],
+                row["gp_used"],
+                row["gp_limit"],
+                row["gp_remaining"],
+                row.get("pace"),
+            ),
+        )
+    conn.commit()
+    return len(rows)
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -574,6 +650,10 @@ def sync_fantrax_league(
 
         roster = fetch_roster(session, league_id, tid, _roster_data=roster_data)
         total_slots += save_roster(conn, tid, roster)
+
+        # Fetch actual fantasy GP per position
+        gp_rows = fetch_gp_per_position(session, league_id, tid)
+        save_gp_per_position(conn, tid, gp_rows)
 
     logger.info("Saved %d total roster slots", total_slots)
 

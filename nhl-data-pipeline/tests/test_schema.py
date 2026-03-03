@@ -42,6 +42,7 @@ class TestInitDb:
             "fantasy_teams",
             "fantasy_standings",
             "fantasy_roster_slots",
+            "fantasy_gp_per_position",
         }
         assert expected <= tables
 
@@ -936,3 +937,29 @@ class TestFantasySchemaIntegration:
             "SELECT claims_remaining FROM fantasy_standings WHERE team_id='t1'"
         ).fetchone()
         assert row["claims_remaining"] == 15
+
+    def test_fantasy_gp_per_position_table_exists(self, db):
+        """Verify fantasy_gp_per_position table was created."""
+        row = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fantasy_gp_per_position'"
+        ).fetchone()
+        assert row is not None
+
+    def test_fantasy_gp_per_position_unique_constraint(self, db):
+        """Verify UNIQUE(team_id, position) on fantasy_gp_per_position."""
+        db.execute(
+            "INSERT INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('t1', 'D', 369, 492, 123)"
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('t1', 'D', 375, 492, 117)"
+        )
+        db.commit()
+        rows = db.execute(
+            "SELECT * FROM fantasy_gp_per_position WHERE team_id='t1' AND position='D'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["gp_used"] == 375

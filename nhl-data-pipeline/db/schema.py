@@ -206,6 +206,20 @@ def init_db(db_path: Path) -> None:
 
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS fantasy_gp_per_position (
+            team_id TEXT NOT NULL,
+            position TEXT NOT NULL,
+            gp_used INTEGER NOT NULL,
+            gp_limit INTEGER NOT NULL,
+            gp_remaining INTEGER NOT NULL,
+            pace TEXT,
+            UNIQUE (team_id, position)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS line_combinations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             player_id INTEGER,

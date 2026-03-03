@@ -38,9 +38,12 @@ TOOLS = [
             "hot/cold trend (last 14 games FP/G vs season FP/G +/-20%), "
             "line deployment, and injury status. "
             "Line deployment is shown as a compact tag like 'L1/PP1' or 'D2/PP2'. "
-            "For forwards: L1 = top line (most ice time), L4 = fourth line (least). "
-            "For defensemen: D1 = top pair, D3 = third pair. "
-            "PP1/PP2 = power-play unit (PP1 = first unit, more PP opportunities). "
+            "For forwards: L1 = first line (most ice time), L2 = second line, "
+            "L3 = third line, L4 = fourth line (least ice time). "
+            "For defensemen: D1 = first pair (most ice time), D2 = second pair, "
+            "D3 = third pair (least ice time). "
+            "PP1 = first power-play unit (more PP opportunities), "
+            "PP2 = second power-play unit (fewer PP opportunities). "
             "No PP tag means the player is not on a power-play unit. "
             "Higher deployment (L1/PP1 or D1/PP1) generally means more fantasy production opportunity."
         ),
@@ -91,7 +94,7 @@ TOOLS = [
                 "sort_by": {
                     "type": "string",
                     "enum": ["fpts_per_game", "fantasy_points"],
-                    "description": "Sort key. Default: fpts_per_game.",
+                    "description": "Sort key. Default: fantasy_points.",
                 },
                 "min_games": {
                     "type": "integer",
@@ -280,77 +283,79 @@ TOOLS = [
             "required": ["team_name"],
         },
     },
-    {
-        "name": "suggest_trades",
-        "description": (
-            "Suggest player-for-player trades with a specific opponent. "
-            "Analyzes both rosters to find swaps where both teams improve — "
-            "trading away surplus to fill a need. Shows FP/G upgrade for "
-            "each side."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "opponent_team_name": {
-                    "type": "string",
-                    "description": (
-                        "Opponent's team name or short name."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of trade suggestions. Default: 5.",
-                },
-            },
-            "required": ["opponent_team_name"],
-        },
-    },
-    {
-        "name": "get_trade_targets",
-        "description": (
-            "Find buy-low trade targets on other fantasy teams — players "
-            "trending up (last 7 games FP/G > season FP/G by 20%+). "
-            "Includes the owner team name and standings rank to help "
-            "identify GMs who might be willing to sell."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of trade targets to return. Default: 15.",
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "get_roster_moves",
-        "description": (
-            "Get combined drop candidates and pickup recommendations. "
-            "Shows the weakest players on the user's roster (based on "
-            "last 14 games) and the best available free agent replacements "
-            "at each position, with the FP/G upgrade for each swap. "
-            "Pickup FP/G is sample-size adjusted (Bayesian regression toward "
-            "the FA pool median) — players with fewer games are regressed "
-            "more toward the mean. Both raw last-14-games FP/G and regressed FP/G are shown, "
-            "along with GP, team, line deployment (Lx/Dx), and PP/G (avg PP time per game over "
-            "last 30 games in M:SS format — use this to judge real PP usage, "
-            "not just depth chart projections). "
-            "Total value is injury-adjusted: players out 60+ days get 0 est games. "
-            "Injured pickups show [IR]/[IR-LT] tags. "
-            "If the user's IR slot is empty, also shows IR stash candidates — "
-            "injured FAs that can be picked up without dropping anyone. "
-            "Each IR stash candidate includes up to 3 recent news headlines "
-            "for return timeline analysis — use these to assess when the "
-            "player will actually return and contribute fantasy points."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
+    # --- Convenience tools (commented out for A/B testing) ---
+    # {
+    #     "name": "suggest_trades",
+    #     "description": (
+    #         "Suggest player-for-player trades with a specific opponent. "
+    #         "Analyzes both rosters to find swaps where both teams improve — "
+    #         "trading away surplus to fill a need. Shows FP/G upgrade for "
+    #         "each side."
+    #     ),
+    #     "input_schema": {
+    #         "type": "object",
+    #         "properties": {
+    #             "opponent_team_name": {
+    #                 "type": "string",
+    #                 "description": (
+    #                     "Opponent's team name or short name."
+    #                 ),
+    #             },
+    #             "limit": {
+    #                 "type": "integer",
+    #                 "description": "Maximum number of trade suggestions. Default: 5.",
+    #             },
+    #         },
+    #         "required": ["opponent_team_name"],
+    #     },
+    # },
+    # {
+    #     "name": "get_trade_targets",
+    #     "description": (
+    #         "Find buy-low trade targets on other fantasy teams — players "
+    #         "trending up (last 7 games FP/G > season FP/G by 20%+). "
+    #         "Includes the owner team name and standings rank to help "
+    #         "identify GMs who might be willing to sell."
+    #     ),
+    #     "input_schema": {
+    #         "type": "object",
+    #         "properties": {
+    #             "limit": {
+    #                 "type": "integer",
+    #                 "description": "Maximum number of trade targets to return. Default: 15.",
+    #             },
+    #         },
+    #         "required": [],
+    #     },
+    # },
+    # {
+    #     "name": "get_roster_moves",
+    #     "description": (
+    #         "Get combined drop candidates and pickup recommendations. "
+    #         "Shows the weakest players on the user's roster (based on "
+    #         "last 14 games) and the best available free agent replacements "
+    #         "at each position, with the FP/G upgrade for each swap. "
+    #         "Pickup FP/G is sample-size adjusted (Bayesian regression toward "
+    #         "the FA pool median) — players with fewer games are regressed "
+    #         "more toward the mean. Both raw last-14-games FP/G and regressed FP/G are shown, "
+    #         "along with GP, team, line deployment (Lx/Dx), and PP/G (avg PP time per game over "
+    #         "last 30 games in M:SS format — use this to judge real PP usage, "
+    #         "not just depth chart projections). "
+    #         "Total value is injury-adjusted: players out 60+ days get 0 est games. "
+    #         "Injured pickups show [IR]/[IR-LT] tags. "
+    #         "If the user's IR slot is empty, also shows IR stash candidates — "
+    #         "injured FAs that can be picked up without dropping anyone. "
+    #         "Each IR stash candidate includes up to 3 recent news headlines "
+    #         "for return timeline analysis — use these to assess when the "
+    #         "player will actually return and contribute fantasy points."
+    #     ),
+    #     "input_schema": {
+    #         "type": "object",
+    #         "properties": {},
+    #         "required": [],
+    #     },
+    # },
+    # --- End convenience tools ---
     {
         "name": "web_search",
         "description": (
@@ -460,7 +465,7 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
     try:
         if tool_name == "get_my_roster":
             data = queries.get_my_roster(conn, team_id, season)
-            sort_by = tool_input.get("sort_by", "fpts_per_game")
+            sort_by = tool_input.get("sort_by", "fantasy_points")
             data.sort(key=lambda p: p.get(sort_by, 0), reverse=True)
             return formatters.format_roster(data)
 
@@ -609,23 +614,25 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
                 return f"Team not found: '{team_name}'. Try a different name."
             return formatters.format_team_roster(data)
 
-        if tool_name == "suggest_trades":
-            opponent = tool_input["opponent_team_name"]
-            limit = tool_input.get("limit", 5)
-            data = queries.suggest_trades(conn, team_id, opponent, season, limit)
-            if data is None:
-                return f"Team not found: '{opponent}'. Try a different name."
-            return formatters.format_trade_suggestions(data)
+        # --- Convenience tools (commented out for A/B testing) ---
+        # if tool_name == "suggest_trades":
+        #     opponent = tool_input["opponent_team_name"]
+        #     limit = tool_input.get("limit", 5)
+        #     data = queries.suggest_trades(conn, team_id, opponent, season, limit)
+        #     if data is None:
+        #         return f"Team not found: '{opponent}'. Try a different name."
+        #     return formatters.format_trade_suggestions(data)
 
-        if tool_name == "get_trade_targets":
-            limit = tool_input.get("limit", 15)
-            data = queries.get_trade_candidates(conn, team_id, season, limit=limit)
-            return formatters.format_trade_targets(data)
+        # if tool_name == "get_trade_targets":
+        #     limit = tool_input.get("limit", 15)
+        #     data = queries.get_trade_candidates(conn, team_id, season, limit=limit)
+        #     return formatters.format_trade_targets(data)
 
-        if tool_name == "get_roster_moves":
-            drops = queries.get_drop_candidates(conn, team_id, season)
-            pickup_data = queries.get_pickup_recommendations(conn, team_id, season)
-            return formatters.format_roster_moves(drops, pickup_data)
+        # if tool_name == "get_roster_moves":
+        #     drops = queries.get_drop_candidates(conn, team_id, season)
+        #     pickup_data = queries.get_pickup_recommendations(conn, team_id, season)
+        #     return formatters.format_roster_moves(drops, pickup_data)
+        # --- End convenience tools ---
 
         if tool_name == "web_search":
             query = tool_input["query"]

@@ -17,9 +17,11 @@ from fetchers.fantrax_league import (
     _fantrax_api_call,
     _get_authenticated_session,
     _parse_roster_slots,
+    fetch_gp_per_position,
     fetch_roster,
     fetch_standings,
     fetch_teams,
+    save_gp_per_position,
     save_roster,
     save_standings,
     save_teams,
@@ -1433,3 +1435,113 @@ class TestFantraxLeagueIntegration:
             print(f"  [{i}] {key}")
 
         assert len(field_keys) > 0, "Expected at least one header field"
+
+
+# =============================================================================
+# fetch_gp_per_position Tests
+# =============================================================================
+
+
+class TestFetchGpPerPosition:
+    """Tests for fetch_gp_per_position."""
+
+    def test_parses_gp_data(self) -> None:
+        """Extracts position, gp_used, gp_limit, gp_remaining, pace."""
+        session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "responses": [{
+                "data": {
+                    "gamePlayedPerPosData": {
+                        "tableData": [
+                            {"posShort": "F", "gp": 714, "max": 984,
+                             "remaining": "270", "pace": "978(-6)"},
+                            {"posShort": "D", "gp": 369, "max": 492,
+                             "remaining": "123", "pace": "505(+13)"},
+                            {"posShort": "G", "gp": 65, "max": 82,
+                             "remaining": "17", "pace": "89(+7)"},
+                        ],
+                    },
+                },
+            }],
+        }
+        session.post.return_value = mock_resp
+
+        result = fetch_gp_per_position(session, "lg123", "team1")
+
+        assert len(result) == 3
+        f_row = next(r for r in result if r["position"] == "F")
+        assert f_row["gp_used"] == 714
+        assert f_row["gp_limit"] == 984
+        assert f_row["gp_remaining"] == 270
+        assert f_row["pace"] == "978(-6)"
+
+        d_row = next(r for r in result if r["position"] == "D")
+        assert d_row["gp_used"] == 369
+        assert d_row["gp_remaining"] == 123
+
+    def test_empty_table_data(self) -> None:
+        """Returns empty list when tableData is missing."""
+        session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "responses": [{"data": {"gamePlayedPerPosData": {}}}],
+        }
+        session.post.return_value = mock_resp
+
+        result = fetch_gp_per_position(session, "lg123", "team1")
+        assert result == []
+
+
+# =============================================================================
+# save_gp_per_position Tests
+# =============================================================================
+
+
+class TestSaveGpPerPosition:
+    """Tests for save_gp_per_position."""
+
+    def test_saves_and_retrieves(self, db: sqlite3.Connection) -> None:
+        """GP data is saved and can be queried back."""
+        rows = [
+            {"position": "F", "gp_used": 714, "gp_limit": 984,
+             "gp_remaining": 270, "pace": "978(-6)"},
+            {"position": "D", "gp_used": 369, "gp_limit": 492,
+             "gp_remaining": 123, "pace": "505(+13)"},
+            {"position": "G", "gp_used": 65, "gp_limit": 82,
+             "gp_remaining": 17, "pace": "89(+7)"},
+        ]
+        count = save_gp_per_position(db, "team1", rows)
+        assert count == 3
+
+        saved = db.execute(
+            "SELECT * FROM fantasy_gp_per_position WHERE team_id = ?",
+            ("team1",),
+        ).fetchall()
+        assert len(saved) == 3
+
+        d_row = next(r for r in saved if r["position"] == "D")
+        assert d_row["gp_used"] == 369
+        assert d_row["gp_remaining"] == 123
+
+    def test_upsert_updates_existing(self, db: sqlite3.Connection) -> None:
+        """Saving again for the same team updates existing rows."""
+        rows_v1 = [
+            {"position": "D", "gp_used": 369, "gp_limit": 492,
+             "gp_remaining": 123, "pace": "505(+13)"},
+        ]
+        save_gp_per_position(db, "team1", rows_v1)
+
+        rows_v2 = [
+            {"position": "D", "gp_used": 375, "gp_limit": 492,
+             "gp_remaining": 117, "pace": "510(+18)"},
+        ]
+        save_gp_per_position(db, "team1", rows_v2)
+
+        saved = db.execute(
+            "SELECT gp_used, gp_remaining FROM fantasy_gp_per_position "
+            "WHERE team_id = ? AND position = ?",
+            ("team1", "D"),
+        ).fetchone()
+        assert saved["gp_used"] == 375
+        assert saved["gp_remaining"] == 117
