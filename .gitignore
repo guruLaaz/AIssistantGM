@@ -46,6 +46,10 @@ ENV/
 .coverage
 htmlcov/
 
+# Runtime data
+nhl-data-pipeline/db/nhl_data.db
+nhl-data-pipeline/logs/
+
 # Claude plans
 .claude/
 
