@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -602,6 +603,111 @@ def save_gp_per_position(
 
 
 # ---------------------------------------------------------------------------
+# Player salaries (all players from Fantrax)
+# ---------------------------------------------------------------------------
+
+def fetch_player_salaries(
+    session: requests.Session,
+    league_id: str,
+    max_pages: int = 20,
+) -> list[dict[str, Any]]:
+    """Fetch all player salaries from the Fantrax players page.
+
+    Paginates through ``getPlayerStats`` with 500 results per page to
+    collect every player's salary, name, team, and position.
+
+    Args:
+        session: Authenticated requests session.
+        league_id: Fantrax league ID.
+        max_pages: Safety cap on number of pages to fetch.
+
+    Returns:
+        List of dicts with fantrax_id, player_name, team_abbrev,
+        position, salary.
+    """
+    results: list[dict[str, Any]] = []
+    page = 1
+
+    while page <= max_pages:
+        data = _fantrax_api_call(
+            session, league_id, "getPlayerStats",
+            extra_data={
+                "statusOrTeamFilter": "ALL",
+                "maxResultsPerPage": "500",
+                "pageNumber": str(page),
+            },
+        )
+
+        pagination = data.get("paginatedResultSet", {})
+        total_pages = pagination.get("totalNumPages", 1)
+        rows = data.get("statsTable", [])
+
+        for row in rows:
+            scorer = row.get("scorer", {})
+            cells = row.get("cells", [])
+
+            # Cell 4 is salary (formatted like "8,250,000")
+            salary_str = cells[4].get("content", "0") if len(cells) > 4 else "0"
+            salary = int(salary_str.replace(",", "").replace("$", "") or "0")
+
+            results.append({
+                "fantrax_id": scorer.get("scorerId", ""),
+                "player_name": scorer.get("name", ""),
+                "team_abbrev": scorer.get("teamShortName", ""),
+                "position": scorer.get("posShortNames", ""),
+                "salary": salary,
+            })
+
+        logger.debug(
+            "Fetched player salaries page %d/%d (%d players)",
+            page, total_pages, len(rows),
+        )
+
+        if page >= total_pages:
+            break
+        page += 1
+        time.sleep(1)
+
+    logger.info("Fetched %d total player salaries", len(results))
+    return results
+
+
+def save_player_salaries(
+    conn: sqlite3.Connection,
+    players: list[dict[str, Any]],
+) -> int:
+    """Save player salary data to the fantrax_players table.
+
+    Full replace — deletes all existing rows then inserts fresh data.
+
+    Args:
+        conn: Database connection.
+        players: List of player dicts from fetch_player_salaries.
+
+    Returns:
+        Number of rows saved.
+    """
+    conn.execute("DELETE FROM fantrax_players")
+    for p in players:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO fantrax_players
+                (fantrax_id, player_name, team_abbrev, position, salary)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                p["fantrax_id"],
+                p["player_name"],
+                p["team_abbrev"],
+                p["position"],
+                p["salary"],
+            ),
+        )
+    conn.commit()
+    return len(players)
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -657,10 +763,16 @@ def sync_fantrax_league(
 
     logger.info("Saved %d total roster slots", total_slots)
 
+    # Fetch all player salaries (paginated, ~17 pages)
+    salary_players = fetch_player_salaries(session, league_id)
+    salaries_synced = save_player_salaries(conn, salary_players)
+    logger.info("Saved %d player salaries", salaries_synced)
+
     return {
         "teams_synced": teams_synced,
         "standings_synced": standings_synced,
         "roster_slots_synced": total_slots,
+        "salaries_synced": salaries_synced,
     }
 
 

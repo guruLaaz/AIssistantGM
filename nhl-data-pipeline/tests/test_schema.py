@@ -963,3 +963,79 @@ class TestFantasySchemaIntegration:
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]["gp_used"] == 375
+
+    def test_fantrax_players_table_exists(self, db):
+        """Verify fantrax_players table was created."""
+        row = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fantrax_players'"
+        ).fetchone()
+        assert row is not None
+
+    def test_fantrax_players_unique_constraint(self, db):
+        """Verify fantrax_id is the primary key on fantrax_players."""
+        db.execute(
+            "INSERT INTO fantrax_players "
+            "(fantrax_id, player_name, team_abbrev, position, salary) "
+            "VALUES ('abc1', 'Test Player', 'TST', 'F', 1000000)"
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO fantrax_players "
+            "(fantrax_id, player_name, team_abbrev, position, salary) "
+            "VALUES ('abc1', 'Test Player Updated', 'TST', 'F', 2000000)"
+        )
+        db.commit()
+        rows = db.execute(
+            "SELECT * FROM fantrax_players WHERE fantrax_id='abc1'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["salary"] == 2000000
+
+
+class TestPpToiMigration:
+    """Tests for pp_toi column migration on old databases."""
+
+    def test_pp_toi_added_to_old_db_without_column(self, db_path: Path) -> None:
+        """init_db adds pp_toi column to a skater_stats table that was created without it."""
+        # Create a DB with the old schema (no pp_toi column)
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE skater_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id INTEGER NOT NULL,
+                game_date TEXT,
+                season TEXT NOT NULL,
+                is_season_total INTEGER NOT NULL DEFAULT 0,
+                toi INTEGER NOT NULL DEFAULT 0,
+                goals INTEGER DEFAULT 0,
+                assists INTEGER DEFAULT 0,
+                points INTEGER DEFAULT 0,
+                plus_minus INTEGER DEFAULT 0,
+                pim INTEGER DEFAULT 0,
+                shots INTEGER DEFAULT 0,
+                hits INTEGER DEFAULT 0,
+                blocks INTEGER DEFAULT 0,
+                powerplay_goals INTEGER DEFAULT 0,
+                powerplay_points INTEGER DEFAULT 0,
+                shorthanded_goals INTEGER DEFAULT 0,
+                shorthanded_points INTEGER DEFAULT 0,
+                UNIQUE (player_id, game_date)
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        # Verify pp_toi does NOT exist yet
+        conn2 = sqlite3.connect(db_path)
+        cursor = conn2.execute("PRAGMA table_info(skater_stats)")
+        columns_before = [row[1] for row in cursor.fetchall()]
+        assert "pp_toi" not in columns_before
+        conn2.close()
+
+        # Run init_db — the migration should add pp_toi
+        init_db(db_path)
+
+        conn3 = get_db(db_path)
+        cursor = conn3.execute("PRAGMA table_info(skater_stats)")
+        columns_after = [row[1] for row in cursor.fetchall()]
+        assert "pp_toi" in columns_after
+        conn3.close()

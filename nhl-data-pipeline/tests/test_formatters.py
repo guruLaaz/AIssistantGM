@@ -1,7 +1,9 @@
 """Tests for assistant/formatters.py — terminal output formatters."""
 
 from assistant.formatters import (
+    _deploy_tag,
     _line_tag,
+    _news_lines,
     format_roster,
     format_free_agents,
     format_player_card,
@@ -11,6 +13,8 @@ from assistant.formatters import (
     format_schedule,
     format_news,
     format_injuries,
+    format_team_roster,
+    format_trade_suggestions,
     format_trade_targets,
     format_drop_candidates,
     format_roster_moves,
@@ -1656,3 +1660,402 @@ class TestFormatWebSearchResults:
         assert "1. Result 0" in result
         assert "2. Result 1" in result
         assert "3. Result 2" in result
+
+
+# ---------------------------------------------------------------------------
+# Coverage: _news_lines edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestNewsLines:
+    """Tests for _news_lines helper function."""
+
+    def test_string_input_wrapped_as_list(self) -> None:
+        """Single string input is wrapped into a headline dict."""
+        result = _news_lines("Big trade incoming")
+        assert len(result) == 1
+        assert "Big trade incoming" in result[0]
+
+    def test_empty_list_returns_empty(self) -> None:
+        result = _news_lines([])
+        assert result == []
+
+    def test_none_returns_empty(self) -> None:
+        result = _news_lines(None)
+        assert result == []
+
+    def test_long_headline_truncated(self) -> None:
+        """Headlines > 90 chars are truncated with '...'."""
+        long_headline = "A " * 50  # 100 chars
+        result = _news_lines([{"headline": long_headline}])
+        assert result[0].endswith("...")
+        # The truncated part should be < 100 chars
+        assert len(result[0]) < 110
+
+    def test_rotowire_content_stripped(self) -> None:
+        """Content containing 'Visit RotoWire' is stripped."""
+        result = _news_lines([{
+            "headline": "Test",
+            "content": "He skated today. Visit RotoWire for more.",
+        }])
+        assert "Visit RotoWire" not in "\n".join(result)
+        assert "He skated today." in "\n".join(result)
+
+    def test_long_content_truncated(self) -> None:
+        """Content > 120 chars is truncated."""
+        long_content = "word " * 30  # 150 chars
+        result = _news_lines([{"headline": "Test", "content": long_content}])
+        content_line = result[1]  # second line is content
+        assert content_line.strip().endswith("...")
+
+    def test_date_formatted(self) -> None:
+        """Date is shown as compact YYYY-MM-DD."""
+        result = _news_lines([{
+            "headline": "Test",
+            "date": "2026-03-01T14:00:00",
+        }])
+        assert "[2026-03-01]" in result[0]
+
+    def test_player_name_prefix_stripped(self) -> None:
+        """Redundant 'Player Name: ' prefix is removed from headline."""
+        result = _news_lines(
+            [{"headline": "Connor McDavid: Hat trick tonight"}],
+            player_name="Connor McDavid",
+        )
+        assert "Connor McDavid:" not in result[0]
+        assert "Hat trick tonight" in result[0]
+
+    def test_plain_string_list(self) -> None:
+        """List of plain strings (not dicts) is handled."""
+        result = _news_lines(["Headline one", "Headline two"])
+        assert len(result) == 2
+        assert "Headline one" in result[0]
+        assert "Headline two" in result[1]
+
+    def test_bad_date_value(self) -> None:
+        """Non-string date doesn't crash (ValueError/TypeError caught)."""
+        result = _news_lines([{"headline": "Test", "date": 12345}])
+        assert len(result) == 1
+
+    def test_rotowire_content_fully_stripped_yields_no_content_line(self) -> None:
+        """Content that is only 'Visit RotoWire...' yields no content line."""
+        result = _news_lines([{
+            "headline": "Test",
+            "content": "Visit RotoWire for more details.",
+        }])
+        assert len(result) == 1  # only headline, no content
+
+
+# ---------------------------------------------------------------------------
+# Coverage: _deploy_tag
+# ---------------------------------------------------------------------------
+
+
+class TestDeployTag:
+    """Tests for _deploy_tag helper."""
+
+    def test_both_ev_and_pp(self) -> None:
+        assert _deploy_tag(1, 1) == "L1/PP1"
+
+    def test_ev_only(self) -> None:
+        assert _deploy_tag(2, None) == "L2"
+
+    def test_pp_only(self) -> None:
+        assert _deploy_tag(None, 1) == "PP1"
+
+    def test_none_both(self) -> None:
+        assert _deploy_tag(None, None) == "-"
+
+    def test_defense_prefix(self) -> None:
+        assert _deploy_tag(1, None, position="D") == "D1"
+
+    def test_forward_prefix(self) -> None:
+        assert _deploy_tag(2, 2, position="C") == "L2/PP2"
+
+
+# ---------------------------------------------------------------------------
+# Coverage: format_player_card — line context without deployed_position
+# ---------------------------------------------------------------------------
+
+
+class TestFormatPlayerCardLineContextNoDeploy:
+    """Test line context where deployed_position is missing."""
+
+    def test_forward_label_when_no_deployed_position(self) -> None:
+        """When deployed_position is absent, 'Forward Line X' used for C/L/R."""
+        data = {
+            "player": {"full_name": "Test Forward", "team_abbrev": "TOR", "position": "C"},
+            "is_goalie": False,
+            "season_stats": {
+                "games_played": 10, "fantasy_points": 10.0, "fpts_per_game": 1.0,
+                "goals": 5, "assists": 5, "points": 10,
+                "hits": 3, "blocks": 2, "shots": 20, "plus_minus": 1,
+            },
+            "game_log": [],
+            "injury": None,
+            "news": [],
+            "line_context": {"ev_line": 2, "pp_unit": None, "ev_linemates": [], "pp_linemates": []},
+        }
+        result = format_player_card(data)
+        assert "Forward Line 2" in result
+
+    def test_deployed_position_label_when_present(self) -> None:
+        """When deployed_position is set, its uppercase value is used."""
+        data = {
+            "player": {"full_name": "Test", "team_abbrev": "TOR", "position": "C"},
+            "is_goalie": False,
+            "season_stats": {
+                "games_played": 10, "fantasy_points": 10.0, "fpts_per_game": 1.0,
+                "goals": 5, "assists": 5, "points": 10,
+                "hits": 3, "blocks": 2, "shots": 20, "plus_minus": 1,
+            },
+            "game_log": [],
+            "injury": None,
+            "news": [],
+            "line_context": {
+                "ev_line": 1, "pp_unit": 1,
+                "deployed_position": "lw",
+                "ev_linemates": [], "pp_linemates": [],
+            },
+        }
+        result = format_player_card(data)
+        assert "Line 1 (LW)" in result
+
+
+# ---------------------------------------------------------------------------
+# Coverage: format_player_card — news prefix stripping
+# ---------------------------------------------------------------------------
+
+
+class TestFormatPlayerCardNewsPrefix:
+    """Test news headline prefix stripping in player card."""
+
+    def test_player_name_prefix_stripped_from_news(self) -> None:
+        data = {
+            "player": {"full_name": "Connor McDavid", "team_abbrev": "EDM", "position": "C"},
+            "is_goalie": False,
+            "season_stats": {"games_played": 1, "fantasy_points": 1.0, "fpts_per_game": 1.0},
+            "game_log": [],
+            "injury": None,
+            "news": [
+                {"published_at": "2026-02-18", "headline": "Connor McDavid: Hat trick tonight"},
+            ],
+        }
+        result = format_player_card(data)
+        assert "Hat trick tonight" in result
+        assert "Connor McDavid: Hat" not in result
+
+
+# ---------------------------------------------------------------------------
+# Coverage: format_standings — GP remaining and claims
+# ---------------------------------------------------------------------------
+
+
+class TestFormatStandingsGPRemaining:
+    """Test GP remaining display in standings."""
+
+    def test_gp_remaining_shown(self) -> None:
+        data = [{
+            "rank": 1, "team_name": "My Team",
+            "games_played": 70, "points_for": 5000.0,
+            "fantasy_points_per_game": 71.4, "streak": "W3",
+            "claims_remaining": 5,
+            "gp_remaining": {
+                "F": {"remaining": 270},
+                "D": {"remaining": 123},
+                "G": {"remaining": 17},
+            },
+        }]
+        result = format_standings(data)
+        assert "GP_Rem(F:270 D:123 G:17)" in result
+        assert "Claims:5" in result
+
+    def test_no_gp_remaining_no_tag(self) -> None:
+        data = [{
+            "rank": 1, "team_name": "Team",
+            "games_played": 70, "points_for": 5000.0,
+            "fantasy_points_per_game": 71.4, "streak": "W3",
+        }]
+        result = format_standings(data)
+        assert "GP_Rem" not in result
+
+    def test_empty_gp_remaining_dict(self) -> None:
+        data = [{
+            "rank": 1, "team_name": "Team",
+            "games_played": 70, "points_for": 5000.0,
+            "fantasy_points_per_game": 71.4, "streak": "W3",
+            "gp_remaining": {},
+        }]
+        result = format_standings(data)
+        assert "GP_Rem" not in result
+
+
+# ---------------------------------------------------------------------------
+# Coverage: format_news — prefix stripping
+# ---------------------------------------------------------------------------
+
+
+class TestFormatNewsPrefix:
+    """Test player name prefix stripping in format_news."""
+
+    def test_player_name_prefix_stripped(self) -> None:
+        """Headline 'Player: text' is stripped, then re-added as 'Player: text' (no doubling)."""
+        data = [{
+            "player_name": "Sidney Crosby",
+            "headline": "Sidney Crosby: Back at practice",
+            "published_at": "2026-02-18",
+        }]
+        result = format_news(data)
+        assert "Back at practice" in result
+        # Should NOT have duplicated prefix like "Sidney Crosby: Sidney Crosby: Back at practice"
+        assert "Sidney Crosby: Sidney Crosby:" not in result
+
+
+# ---------------------------------------------------------------------------
+# Coverage: format_team_roster
+# ---------------------------------------------------------------------------
+
+
+class TestFormatTeamRoster:
+    """Tests for format_team_roster."""
+
+    def test_none_data(self) -> None:
+        assert format_team_roster(None) == "Team not found."
+
+    def test_empty_dict(self) -> None:
+        assert format_team_roster({}) == "Team not found."
+
+    def test_full_team_roster(self) -> None:
+        data = {
+            "team_info": {
+                "team_name": "Rival Team",
+                "short_name": "RT",
+                "rank": 5,
+                "points_for": 4500.0,
+                "fpg": 64.3,
+            },
+            "roster": [{
+                "player_name": "Player One", "position": "C",
+                "games_played": 50, "goals": 20, "assists": 30,
+                "hits": 40, "blocks": 10,
+                "fantasy_points": 53.0, "fpts_per_game": 1.06,
+                "injury": None,
+            }],
+        }
+        result = format_team_roster(data)
+        assert "Rival Team" in result
+        assert "RT" in result
+        assert "#5" in result
+        assert "Player One" in result
+
+
+# ---------------------------------------------------------------------------
+# Coverage: format_trade_suggestions
+# ---------------------------------------------------------------------------
+
+
+class TestFormatTradeSuggestions:
+    """Tests for format_trade_suggestions."""
+
+    def test_none_data(self) -> None:
+        assert format_trade_suggestions(None) == "Could not generate trade suggestions."
+
+    def test_empty_dict(self) -> None:
+        assert format_trade_suggestions({}) == "Could not generate trade suggestions."
+
+    def test_no_suggestions(self) -> None:
+        data = {
+            "opponent": {"name": "Other Team", "rank": 10, "avg_fpg": {"F": 1.0, "D": 0.8, "G": 1.5}},
+            "my_team": {"avg_fpg": {"F": 1.2, "D": 0.9, "G": 1.3}},
+            "suggestions": [],
+        }
+        result = format_trade_suggestions(data)
+        assert "Other Team" in result
+        assert "No mutually beneficial trades" in result
+
+    def test_with_suggestions(self) -> None:
+        data = {
+            "opponent": {"name": "Rival", "rank": 8, "avg_fpg": {"F": 1.0, "D": 0.8, "G": 1.5}},
+            "my_team": {"avg_fpg": {"F": 1.2, "D": 0.9, "G": 1.3}},
+            "suggestions": [{
+                "send_player": "Player A", "send_position": "C",
+                "send_fpg": 0.8, "send_recent_14_fpg": 0.75,
+                "receive_player": "Player B", "receive_position": "C",
+                "receive_fpg": 1.1, "receive_recent_14_fpg": 1.05,
+                "my_upgrade": 0.30,
+            }],
+        }
+        result = format_trade_suggestions(data)
+        assert "Trade #1" in result
+        assert "Send: Player A" in result
+        assert "Receive: Player B" in result
+        assert "+0.30" in result
+
+    def test_with_news_in_suggestions(self) -> None:
+        data = {
+            "opponent": {"name": "Rival", "rank": 8, "avg_fpg": {"F": 1.0, "D": 0.8, "G": 1.5}},
+            "my_team": {"avg_fpg": {"F": 1.2, "D": 0.9, "G": 1.3}},
+            "suggestions": [{
+                "send_player": "Player A", "send_position": "C",
+                "send_fpg": 0.8, "send_recent_14_fpg": 0.75,
+                "receive_player": "Player B", "receive_position": "C",
+                "receive_fpg": 1.1, "receive_recent_14_fpg": 1.05,
+                "my_upgrade": 0.30,
+                "send_news": [{"headline": "Player A: Demoted to 3rd line", "date": "2026-03-01"}],
+                "receive_news": [{"headline": "Player B: PP1 role confirmed", "date": "2026-03-02"}],
+            }],
+        }
+        result = format_trade_suggestions(data)
+        assert "Send news:" in result
+        assert "Receive news:" in result
+        assert "Demoted to 3rd line" in result
+        assert "PP1 role confirmed" in result
+
+
+# ---------------------------------------------------------------------------
+# Coverage: format_roster_moves — claims <= 2 and injury tag on pickup
+# ---------------------------------------------------------------------------
+
+
+class TestFormatRosterMovesEdgeCases:
+    """Additional edge cases for format_roster_moves."""
+
+    def test_claims_scarce_warning_at_1(self) -> None:
+        """Warning shown when claims_remaining == 1."""
+        pickup_data = {
+            "claims_remaining": 1,
+            "recommendations": [],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "CLAIMS ARE SCARCE" in result
+
+    def test_pickup_with_injury_tag(self) -> None:
+        """Pickup with injury shows injury tag after team name."""
+        pickup_data = {
+            "claims_remaining": 5,
+            "recommendations": [{
+                "pickup_name": "Hurt Guy",
+                "pickup_position": "C",
+                "pickup_team": "BOS",
+                "pickup_injury": {"status": "DTD", "injury_type": "Lower Body"},
+                "drop_name": "Drop Me",
+                "drop_position": "C",
+                "fpg_upgrade": 0.5,
+                "reason": "IR stash",
+            }],
+        }
+        result = format_roster_moves([], pickup_data)
+        assert "[DTD]" in result
+
+    def test_drops_with_injury_tag(self) -> None:
+        """Drop candidate with injury shows tag in header."""
+        drops = [{
+            "player_name": "Injured Drop",
+            "position": "D",
+            "season_fpg": 0.5,
+            "recent_14_fpg": 0.0,
+            "trend": "cold",
+            "injury": {"status": "IR"},
+        }]
+        result = format_roster_moves(drops, [])
+        assert "[IR]" in result

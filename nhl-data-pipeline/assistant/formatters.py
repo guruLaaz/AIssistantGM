@@ -455,7 +455,22 @@ def format_standings(data: list[dict]) -> str:
         gb = s.get("games_back", 0.0)
         gb_str = "-" if gb == 0.0 else f"{gb:.2f}"
         streak = s.get("streak", "")
-        lines.append(f"#{rank} {name} | GP:{gp} | PF:{pf:.1f} | FP/G:{fpg:.2f} | GB:{gb_str} | Streak:{streak}")
+        claims = s.get("claims_remaining")
+        claims_str = f" | Claims:{claims}" if claims is not None else ""
+
+        gp_rem = s.get("gp_remaining", {})
+        if gp_rem:
+            f_rem = gp_rem.get("F", {}).get("remaining", "?")
+            d_rem = gp_rem.get("D", {}).get("remaining", "?")
+            g_rem = gp_rem.get("G", {}).get("remaining", "?")
+            gp_str = f" | GP_Rem(F:{f_rem} D:{d_rem} G:{g_rem})"
+        else:
+            gp_str = ""
+
+        lines.append(
+            f"#{rank} {name} | GP:{gp} | PF:{pf:.1f} | FP/G:{fpg:.2f} "
+            f"| GB:{gb_str} | Streak:{streak}{claims_str}{gp_str}"
+        )
 
     return "\n".join(lines)
 

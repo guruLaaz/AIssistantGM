@@ -18,10 +18,12 @@ from fetchers.fantrax_league import (
     _get_authenticated_session,
     _parse_roster_slots,
     fetch_gp_per_position,
+    fetch_player_salaries,
     fetch_roster,
     fetch_standings,
     fetch_teams,
     save_gp_per_position,
+    save_player_salaries,
     save_roster,
     save_standings,
     save_teams,
@@ -1231,6 +1233,8 @@ class TestSaveRosterEdgeCases:
 class TestSyncEdgeCases:
     """Edge-case tests for sync_fantrax_league orchestrator."""
 
+    @patch("fetchers.fantrax_league.save_player_salaries", return_value=0)
+    @patch("fetchers.fantrax_league.fetch_player_salaries", return_value=[])
     @patch("fetchers.fantrax_league.save_roster")
     @patch("fetchers.fantrax_league.fetch_roster")
     @patch("fetchers.fantrax_league.save_teams")
@@ -1249,6 +1253,8 @@ class TestSyncEdgeCases:
         mock_save_teams: MagicMock,
         mock_fetch_roster: MagicMock,
         mock_save_roster: MagicMock,
+        mock_fetch_salaries: MagicMock,
+        mock_save_salaries: MagicMock,
         db: sqlite3.Connection,
     ) -> None:
         """Empty standings → no teams, no rosters fetched."""
@@ -1263,6 +1269,8 @@ class TestSyncEdgeCases:
         mock_fetch_roster.assert_not_called()
         mock_fetch_teams.assert_not_called()
 
+    @patch("fetchers.fantrax_league.save_player_salaries", return_value=0)
+    @patch("fetchers.fantrax_league.fetch_player_salaries", return_value=[])
     @patch("fetchers.fantrax_league.save_standings")
     @patch("fetchers.fantrax_league.fetch_standings")
     @patch("fetchers.fantrax_league._get_authenticated_session")
@@ -1271,6 +1279,8 @@ class TestSyncEdgeCases:
         mock_auth: MagicMock,
         mock_fetch_standings: MagicMock,
         mock_save_standings: MagicMock,
+        mock_fetch_salaries: MagicMock,
+        mock_save_salaries: MagicMock,
         db: sqlite3.Connection,
     ) -> None:
         """Custom config dict is forwarded to _get_authenticated_session."""
@@ -1545,3 +1555,126 @@ class TestSaveGpPerPosition:
         ).fetchone()
         assert saved["gp_used"] == 375
         assert saved["gp_remaining"] == 117
+
+
+class TestFetchPlayerSalaries:
+    """Tests for fetch_player_salaries."""
+
+    @patch("fetchers.fantrax_league._fantrax_api_call")
+    def test_parses_single_page(self, mock_api: MagicMock) -> None:
+        """Parses player salary data from a single-page response."""
+        mock_api.return_value = {
+            "paginatedResultSet": {
+                "totalNumPages": 1,
+                "pageNumber": 1,
+                "maxResultsPerPage": 500,
+            },
+            "statsTable": [
+                {
+                    "scorer": {
+                        "scorerId": "abc1",
+                        "name": "Connor McDavid",
+                        "teamShortName": "EDM",
+                        "posShortNames": "F",
+                    },
+                    "cells": [
+                        {"content": "1"},
+                        {"content": "FA"},
+                        {"content": "30"},
+                        {"content": ""},
+                        {"content": "12,500,000"},
+                        {"content": "110"},
+                        {"content": "1.78"},
+                        {"content": "100%"},
+                        {"content": "0%"},
+                    ],
+                },
+            ],
+        }
+        session = MagicMock()
+        result = fetch_player_salaries(session, "lg123")
+        assert len(result) == 1
+        assert result[0]["fantrax_id"] == "abc1"
+        assert result[0]["player_name"] == "Connor McDavid"
+        assert result[0]["salary"] == 12_500_000
+        assert result[0]["position"] == "F"
+
+    @patch("fetchers.fantrax_league._fantrax_api_call")
+    def test_paginates_multiple_pages(self, mock_api: MagicMock) -> None:
+        """Fetches multiple pages when totalNumPages > 1."""
+        def api_side_effect(_session, _league, _method, extra_data=None):
+            page = extra_data.get("pageNumber", 1) if extra_data else 1
+            return {
+                "paginatedResultSet": {
+                    "totalNumPages": 2,
+                    "pageNumber": page,
+                    "maxResultsPerPage": 500,
+                },
+                "statsTable": [
+                    {
+                        "scorer": {
+                            "scorerId": f"p{page}",
+                            "name": f"Player {page}",
+                            "teamShortName": "TST",
+                            "posShortNames": "F",
+                        },
+                        "cells": [
+                            {"content": "1"},
+                            {"content": "FA"},
+                            {"content": "10"},
+                            {"content": ""},
+                            {"content": "1,000,000"},
+                            {"content": "10"},
+                            {"content": "1.0"},
+                            {"content": "50%"},
+                            {"content": "0%"},
+                        ],
+                    },
+                ],
+            }
+
+        mock_api.side_effect = api_side_effect
+        session = MagicMock()
+        result = fetch_player_salaries(session, "lg123")
+        assert len(result) == 2
+        assert mock_api.call_count == 2
+
+
+class TestSavePlayerSalaries:
+    """Tests for save_player_salaries."""
+
+    def test_saves_and_retrieves(self, db: sqlite3.Connection) -> None:
+        """Player salary data is saved and can be queried back."""
+        players = [
+            {"fantrax_id": "abc1", "player_name": "Connor McDavid",
+             "team_abbrev": "EDM", "position": "F", "salary": 12_500_000},
+            {"fantrax_id": "abc2", "player_name": "Ilya Sorokin",
+             "team_abbrev": "NYI", "position": "G", "salary": 8_250_000},
+        ]
+        count = save_player_salaries(db, players)
+        assert count == 2
+
+        saved = db.execute(
+            "SELECT * FROM fantrax_players ORDER BY player_name"
+        ).fetchall()
+        assert len(saved) == 2
+        assert saved[0]["player_name"] == "Connor McDavid"
+        assert saved[0]["salary"] == 12_500_000
+
+    def test_full_replace_deletes_old_data(self, db: sqlite3.Connection) -> None:
+        """Saving again replaces all previous data."""
+        players_v1 = [
+            {"fantrax_id": "abc1", "player_name": "Old Player",
+             "team_abbrev": "TST", "position": "F", "salary": 1_000_000},
+        ]
+        save_player_salaries(db, players_v1)
+
+        players_v2 = [
+            {"fantrax_id": "abc2", "player_name": "New Player",
+             "team_abbrev": "TST", "position": "D", "salary": 2_000_000},
+        ]
+        save_player_salaries(db, players_v2)
+
+        saved = db.execute("SELECT * FROM fantrax_players").fetchall()
+        assert len(saved) == 1
+        assert saved[0]["player_name"] == "New Player"

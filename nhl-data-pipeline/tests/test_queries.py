@@ -22,7 +22,11 @@ from assistant.queries import (
     get_pickup_recommendations,
     suggest_trades,
     _get_skater_season_stats,
+    _get_goalie_season_stats,
     _get_recent_pp_toi,
+    _is_goalie,
+    _position_group,
+    _get_fantasy_gp,
 )
 
 
@@ -1525,3 +1529,861 @@ class TestPickupPpToiInOutput:
         for r in recs:
             assert "pickup_pp_toi_recent" in r
             assert isinstance(r["pickup_pp_toi_recent"], list)
+
+
+# ---------------------------------------------------------------------------
+# Coverage: _is_goalie, _position_group, _get_fantasy_gp
+# ---------------------------------------------------------------------------
+
+
+class TestIsGoalie:
+    """Tests for _is_goalie helper."""
+
+    def test_goalie_returns_true(self, db: sqlite3.Connection) -> None:
+        assert _is_goalie(db, 8477424) is True  # Saros is G
+
+    def test_skater_returns_false(self, db: sqlite3.Connection) -> None:
+        assert _is_goalie(db, 8478402) is False  # McDavid is C
+
+    def test_missing_player_returns_false(self, db: sqlite3.Connection) -> None:
+        assert _is_goalie(db, 9999999) is False
+
+
+class TestPositionGroup:
+    """Tests for _position_group helper."""
+
+    def test_none_defaults_to_f(self) -> None:
+        assert _position_group(None) == "F"
+
+    def test_empty_string_defaults_to_f(self) -> None:
+        assert _position_group("") == "F"
+
+    def test_goalie(self) -> None:
+        assert _position_group("G") == "G"
+
+    def test_defense(self) -> None:
+        assert _position_group("D") == "D"
+
+    def test_center(self) -> None:
+        assert _position_group("C") == "F"
+
+    def test_left_wing(self) -> None:
+        assert _position_group("L") == "F"
+
+    def test_right_wing(self) -> None:
+        assert _position_group("R") == "F"
+
+
+class TestGetFantasyGp:
+    """Tests for _get_fantasy_gp helper."""
+
+    def test_with_real_fantrax_data(self, db: sqlite3.Connection) -> None:
+        """When fantasy_gp_per_position has data, uses it."""
+        db.execute(
+            "INSERT INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'F', 714, 984, 270)"
+        )
+        db.execute(
+            "INSERT INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'D', 369, 492, 123)"
+        )
+        db.execute(
+            "INSERT INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'G', 65, 82, 17)"
+        )
+        db.commit()
+
+        result = _get_fantasy_gp(db, "team1")
+        assert result["F"]["used"] == 714
+        assert result["F"]["remaining"] == 270
+        assert result["D"]["remaining"] == 123
+        assert result["G"]["remaining"] == 17
+        assert result["F"]["pct"] == round(714 / 984 * 100, 1)
+
+    def test_fallback_sums_nhl_gp(self, db: sqlite3.Connection) -> None:
+        """Without fantasy_gp_per_position data, falls back to summing NHL GP."""
+        roster = [
+            {"position": "C", "games_played": 50},
+            {"position": "C", "games_played": 40},
+            {"position": "D", "games_played": 45},
+            {"position": "G", "games_played": 30},
+        ]
+        result = _get_fantasy_gp(db, "team_no_data", roster)
+        assert result["F"]["used"] == 90
+        assert result["D"]["used"] == 45
+        assert result["G"]["used"] == 30
+
+
+# ---------------------------------------------------------------------------
+# Coverage: _get_goalie_season_stats empty return
+# ---------------------------------------------------------------------------
+
+
+class TestGetGoalieSeasonStatsEmpty:
+    """Test _get_goalie_season_stats returns {} for player with no data."""
+
+    def test_no_goalie_data_returns_empty(self, db: sqlite3.Connection) -> None:
+        """Player with no goalie stats returns empty dict."""
+        # McDavid has no goalie stats
+        result = _get_goalie_season_stats(db, 8478402, "20252026")
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Coverage: search_free_agents goalie path + salary lookup
+# ---------------------------------------------------------------------------
+
+
+class TestSearchFreeAgentsGoalie:
+    """Test goalie free agent path in search_free_agents."""
+
+    def test_goalie_free_agent(self, db: sqlite3.Connection) -> None:
+        """Free agent goalie appears with goalie-specific stats."""
+        # Add a free agent goalie
+        upsert_player(db, {
+            "id": 8470000, "full_name": "Free Goalie",
+            "first_name": "Free", "last_name": "Goalie",
+            "team_abbrev": "NYR", "position": "G",
+        })
+        db.execute(
+            "INSERT INTO goalie_stats "
+            "(player_id, game_date, season, is_season_total, "
+            "wins, losses, ot_losses, shutouts, saves, goals_against, shots_against, toi) "
+            "VALUES (8470000, NULL, '20252026', 1, 15, 8, 3, 2, 1000, 50, 1050, 72000)"
+        )
+        for i in range(10):
+            gd = f"2025-10-{10 + i:02d}"
+            db.execute(
+                "INSERT INTO goalie_stats "
+                "(player_id, game_date, season, is_season_total, "
+                "wins, losses, ot_losses, shutouts, saves, goals_against, shots_against, toi) "
+                f"VALUES (8470000, '{gd}', '20252026', 0, 1, 0, 0, 0, 30, 2, 32, 3600)"
+            )
+        db.commit()
+
+        fa = search_free_agents(db, "20252026", position="G", min_games=5)
+        assert len(fa) >= 1
+        goalie = next(p for p in fa if p["player_name"] == "Free Goalie")
+        assert "wins" in goalie
+        assert "shutouts" in goalie
+        assert "gaa" in goalie
+        assert goalie["peripheral_fpg"] == 0.0
+
+    def test_salary_lookup_present(self, db: sqlite3.Connection) -> None:
+        """Free agents include salary from fantrax_players table."""
+        db.execute(
+            "INSERT INTO fantrax_players "
+            "(fantrax_id, player_name, team_abbrev, position, salary) "
+            "VALUES ('fa001', 'Leon Draisaitl', 'EDM', 'C', 14000000)"
+        )
+        db.commit()
+
+        fa = search_free_agents(db, "20252026", min_games=1)
+        drai = next(p for p in fa if p["player_name"] == "Leon Draisaitl")
+        assert drai["salary"] == 14000000
+
+
+# ---------------------------------------------------------------------------
+# Coverage: get_player_stats salary and line context
+# ---------------------------------------------------------------------------
+
+
+class TestGetPlayerStatsSalary:
+    """Test salary lookup in get_player_stats."""
+
+    def test_salary_from_fantrax(self, db: sqlite3.Connection) -> None:
+        """get_player_stats includes salary from fantrax_players."""
+        db.execute(
+            "INSERT INTO fantrax_players "
+            "(fantrax_id, player_name, team_abbrev, position, salary) "
+            "VALUES ('fa002', 'Connor McDavid', 'EDM', 'C', 12500000)"
+        )
+        db.commit()
+
+        result = get_player_stats(db, "Connor McDavid", "20252026")
+        assert result["salary"] == 12500000
+
+    def test_salary_zero_when_not_found(self, db: sqlite3.Connection) -> None:
+        """Salary is 0 when player not in fantrax_players."""
+        result = get_player_stats(db, "Connor McDavid", "20252026")
+        assert result["salary"] == 0
+
+    def test_line_context_included(self, db: sqlite3.Connection) -> None:
+        """get_player_stats includes line_context when present."""
+        db.execute(
+            "INSERT INTO line_combinations "
+            "(player_id, team_abbrev, player_name, position, ev_line, pp_unit, "
+            "ev_linemates, pp_linemates, rating, updated_at) "
+            "VALUES (8478402, 'EDM', 'Connor McDavid', 'C', 1, 1, "
+            "'[\"Draisaitl\", \"Hyman\"]', '[\"Draisaitl\", \"Nugent-Hopkins\"]', "
+            "9.5, '2026-02-18')"
+        )
+        db.commit()
+
+        result = get_player_stats(db, "Connor McDavid", "20252026")
+        assert result["line_context"] is not None
+        assert result["line_context"]["ev_line"] == 1
+        assert result["line_context"]["pp_unit"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Coverage: get_league_standings GP data
+# ---------------------------------------------------------------------------
+
+
+class TestGetLeagueStandingsGP:
+    """Test GP remaining data in get_league_standings."""
+
+    def test_gp_remaining_included(self, db: sqlite3.Connection) -> None:
+        """Standings include gp_remaining when fantasy_gp_per_position has data."""
+        db.execute(
+            "INSERT INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'F', 700, 984, 284)"
+        )
+        db.execute(
+            "INSERT INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'D', 369, 492, 123)"
+        )
+        db.execute(
+            "INSERT INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'G', 65, 82, 17)"
+        )
+        db.commit()
+
+        standings = get_league_standings(db)
+        team1 = next(s for s in standings if s["team_name"] == "My Team")
+        assert "gp_remaining" in team1
+        assert team1["gp_remaining"]["F"]["remaining"] == 284
+
+
+# ---------------------------------------------------------------------------
+# Coverage: get_injuries scope="my_roster"
+# ---------------------------------------------------------------------------
+
+
+class TestGetInjuriesMyRoster:
+    """Test get_injuries with scope='my_roster'."""
+
+    def test_my_roster_scope(self, db: sqlite3.Connection) -> None:
+        """Scope 'my_roster' returns only injured players from team1."""
+        result = get_injuries(db, scope="my_roster", team_id="team1")
+        assert len(result) >= 1
+        names = [r["full_name"] for r in result]
+        assert "Sidney Crosby" in names
+
+    def test_my_roster_no_injuries(self, db: sqlite3.Connection) -> None:
+        """Team with no injured players returns empty list."""
+        result = get_injuries(db, scope="my_roster", team_id="team2")
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Coverage: suggest_trades
+# ---------------------------------------------------------------------------
+
+
+class TestSuggestTrades:
+    """Tests for suggest_trades function."""
+
+    def test_suggest_trades_returns_dict(self, db: sqlite3.Connection) -> None:
+        """suggest_trades returns a dict with expected keys."""
+        result = suggest_trades(db, "team1", "Other Team", "20252026")
+        assert isinstance(result, dict)
+        assert "my_team" in result
+        assert "opponent" in result
+        assert "suggestions" in result
+
+    def test_suggest_trades_has_avg_fpg(self, db: sqlite3.Connection) -> None:
+        """Both teams have avg_fpg for F/D/G."""
+        result = suggest_trades(db, "team1", "Other Team", "20252026")
+        for key in ("F", "D", "G"):
+            assert key in result["my_team"]["avg_fpg"]
+            assert key in result["opponent"]["avg_fpg"]
+
+    def test_suggest_trades_nonexistent_opponent(self, db: sqlite3.Connection) -> None:
+        """Nonexistent opponent returns None."""
+        result = suggest_trades(db, "team1", "team_fake", "20252026")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Coverage: get_player_trends hot/cold
+# ---------------------------------------------------------------------------
+
+
+class TestGetPlayerTrendsHotCold:
+    """Test hot/cold trend detection in get_player_trends."""
+
+    def test_hot_trend_detected(self, db: sqlite3.Connection) -> None:
+        """Player with much higher last 7 vs season is flagged hot."""
+        # Add a player with hot streak
+        upsert_player(db, {
+            "id": 8480001, "full_name": "Hot Streak",
+            "first_name": "Hot", "last_name": "Streak",
+            "team_abbrev": "TST", "position": "C",
+        })
+        # Season total with low avg
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (8480001, NULL, '20252026', 1, 10, 10, 20, 50, 25, 100, 0, 0, 30000)"
+        )
+        # 20 per-game rows: first 13 low, last 7 high
+        game_dates = [f"2025-10-{d:02d}" for d in range(5, 25)]
+        for gd in game_dates[:13]:
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (8480001, '{gd}', '20252026', 0, 0, 0, 0, 2, 1, 3, 0, 0, 900)"
+            )
+        for gd in game_dates[13:]:
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (8480001, '{gd}', '20252026', 0, 3, 3, 6, 10, 5, 15, 2, 0, 1200)"
+            )
+        db.commit()
+
+        result = get_player_trends(db, "Hot Streak", "20252026")
+        assert result["trend"] == "hot"
+
+    def test_cold_trend_detected(self, db: sqlite3.Connection) -> None:
+        """Player with much lower last 7 vs season is flagged cold."""
+        upsert_player(db, {
+            "id": 8480002, "full_name": "Cold Streak",
+            "first_name": "Cold", "last_name": "Streak",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (8480002, NULL, '20252026', 1, 20, 20, 40, 100, 50, 200, 0, 0, 30000)"
+        )
+        game_dates = [f"2025-10-{d:02d}" for d in range(5, 25)]
+        for gd in game_dates[:13]:
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (8480002, '{gd}', '20252026', 0, 2, 2, 4, 8, 4, 12, 1, 0, 1200)"
+            )
+        for gd in game_dates[13:]:
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (8480002, '{gd}', '20252026', 0, 0, 0, 0, 1, 0, 1, -1, 0, 600)"
+            )
+        db.commit()
+
+        result = get_player_trends(db, "Cold Streak", "20252026")
+        assert result["trend"] == "cold"
+
+    def test_no_games_returns_neutral(self, db: sqlite3.Connection) -> None:
+        """Player with no game logs returns neutral trend."""
+        upsert_player(db, {
+            "id": 8480003, "full_name": "No Games",
+            "first_name": "No", "last_name": "Games",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.commit()
+
+        result = get_player_trends(db, "No Games", "20252026")
+        assert result["trend"] == "neutral"
+        assert result["windows"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Coverage: search_free_agents position="F"
+# ---------------------------------------------------------------------------
+
+
+class TestSearchFreeAgentsPositionF:
+    """Test search_free_agents with position='F'."""
+
+    def test_forward_filter(self, db: sqlite3.Connection) -> None:
+        """Position 'F' returns all forward positions (C, L, R)."""
+        fa = search_free_agents(db, "20252026", position="F", min_games=1)
+        for p in fa:
+            assert p["position"] in ("C", "L", "R")
+
+
+# ---------------------------------------------------------------------------
+# Coverage: get_recent_news scope="my_roster"
+# ---------------------------------------------------------------------------
+
+
+class TestGetRecentNewsMyRoster:
+    """Test get_recent_news with team_id filter."""
+
+    def test_my_roster_news(self, db: sqlite3.Connection) -> None:
+        """team_id filter returns only my team's player news."""
+        news = get_recent_news(db, team_id="team1")
+        names = [n["player_name"] for n in news]
+        assert any("McDavid" in n for n in names)
+
+    def test_empty_team_no_news(self, db: sqlite3.Connection) -> None:
+        """Non-existent team returns empty news."""
+        news = get_recent_news(db, team_id="nonexistent")
+        assert news == []
+
+
+# ---------------------------------------------------------------------------
+# Coverage: _get_skater_season_stats returns {} (line 200)
+# ---------------------------------------------------------------------------
+
+
+class TestSkaterSeasonStatsEmpty:
+    """_get_skater_season_stats returns {} when player has no data at all."""
+
+    def test_no_data_returns_empty(self, db: sqlite3.Connection) -> None:
+        upsert_player(db, {
+            "id": 1111111, "full_name": "Empty Stats",
+            "first_name": "Empty", "last_name": "Stats",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.commit()
+        assert _get_skater_season_stats(db, 1111111, "20252026") == {}
+
+
+# ---------------------------------------------------------------------------
+# Coverage: get_my_roster skips empty player_name (line 362)
+# ---------------------------------------------------------------------------
+
+
+class TestRosterSkipsEmptyName:
+    """get_my_roster skips roster slots with blank player_name."""
+
+    def test_empty_name_slot_skipped(self, db: sqlite3.Connection) -> None:
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team1', '', 'C', 'active', 0)"
+        )
+        db.commit()
+        roster = get_my_roster(db, "team1", "20252026")
+        assert len(roster) == 4  # empty slot excluded
+
+
+# ---------------------------------------------------------------------------
+# Coverage: search_free_agents edge cases (lines 565, 612)
+# ---------------------------------------------------------------------------
+
+
+class TestSearchFreeAgentsEdgeCases:
+    """Edge cases: no stats excluded, hot trend detected."""
+
+    def test_no_stats_excluded(self, db: sqlite3.Connection) -> None:
+        """Player with no season stats is excluded (line 565)."""
+        upsert_player(db, {
+            "id": 1111112, "full_name": "Statless FA",
+            "first_name": "Statless", "last_name": "FA",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.commit()
+        fa = search_free_agents(db, "20252026", min_games=0)
+        assert "Statless FA" not in [p["player_name"] for p in fa]
+
+    def test_hot_trend_free_agent(self, db: sqlite3.Connection) -> None:
+        """FA with high recent 14 FPG vs low season FPG is 'hot' (line 612)."""
+        upsert_player(db, {
+            "id": 1111113, "full_name": "Hot FA",
+            "first_name": "Hot", "last_name": "FA",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (1111113, NULL, '20252026', 1, 10, 10, 20, 60, 30, 100, 0, 0, 40000)"
+        )
+        for d in range(1, 21):
+            gd = (date.today() - timedelta(days=d)).isoformat()
+            if d <= 14:
+                g, a, h, b = 3, 3, 10, 5
+            else:
+                g, a, h, b = 0, 0, 1, 0
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (1111113, '{gd}', '20252026', 0, {g}, {a}, {g + a}, {h}, {b}, 5, 0, 0, 1000)"
+            )
+        db.commit()
+        fa = search_free_agents(db, "20252026", min_games=1)
+        hot = next(p for p in fa if p["player_name"] == "Hot FA")
+        assert hot["trend"] == "hot"
+
+
+# ---------------------------------------------------------------------------
+# Coverage: get_injuries blank/unresolvable player (lines 1096, 1099)
+# ---------------------------------------------------------------------------
+
+
+class TestGetInjuriesSlotEdgeCases:
+    """get_injuries scope='my_roster' skips blank and unresolvable names."""
+
+    def test_empty_name_skipped(self, db: sqlite3.Connection) -> None:
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team1', '', 'C', 'active', 0)"
+        )
+        db.commit()
+        result = get_injuries(db, scope="my_roster", team_id="team1")
+        assert any(r["full_name"] == "Sidney Crosby" for r in result)
+
+    def test_unresolvable_name_skipped(self, db: sqlite3.Connection) -> None:
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team1', 'Unknown XYZABC', 'C', 'active', 0)"
+        )
+        db.commit()
+        result = get_injuries(db, scope="my_roster", team_id="team1")
+        assert any(r["full_name"] == "Sidney Crosby" for r in result)
+
+
+# ---------------------------------------------------------------------------
+# Coverage: suggest_trades cross-position + dedup
+# (lines 1515, 1643-1657, 1685-1693)
+# ---------------------------------------------------------------------------
+
+
+class TestSuggestTradesCrossPosition:
+    """Cross-position swaps and dedup in suggest_trades."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, db: sqlite3.Connection) -> None:
+        # Weak D on team1 to lower my D avg
+        upsert_player(db, {
+            "id": 2222222, "full_name": "Weak Dman",
+            "first_name": "Weak", "last_name": "Dman",
+            "team_abbrev": "TST", "position": "D",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (2222222, NULL, '20252026', 1, 0, 0, 0, 21, 7, 30, 0, 0, 9800)"
+        )
+        for i in range(7):
+            gd = (date.today() - timedelta(days=1 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (2222222, '{gd}', '20252026', 0, 0, 0, 0, 3, 1, 4, 0, 0, 1400)"
+            )
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team1', 'Weak Dman', 'D', 'active', 1000000)"
+        )
+
+        # Opp team: 1 weak F, 3 strong D (within 0.3 of McDavid 6.5),
+        # 1 weak D, 1 low-GP player
+        upsert_player(db, {
+            "id": 3333333, "full_name": "Opp Forward",
+            "first_name": "Opp", "last_name": "Forward",
+            "team_abbrev": "OPP", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (3333333, NULL, '20252026', 1, 3, 5, 8, 30, 15, 40, 0, 0, 30000)"
+        )
+        for i in range(10):
+            gd = (date.today() - timedelta(days=1 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (3333333, '{gd}', '20252026', 0, 0, 1, 1, 3, 1, 4, 0, 0, 1000)"
+            )
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team2', 'Opp Forward', 'C', 'active', 2000000)"
+        )
+
+        # 3 strong D on opp: FPG ~6.5, 6.4, 6.3 (within 0.3 of McDavid)
+        for pid, name, h_val in [
+            (4444441, "Strong Dman1", 10),
+            (4444442, "Strong Dman2", 9),
+            (4444443, "Strong Dman3", 8),
+        ]:
+            upsert_player(db, {
+                "id": pid, "full_name": name,
+                "first_name": name, "last_name": "",
+                "team_abbrev": "OPP", "position": "D",
+            })
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES ({pid}, NULL, '20252026', 1, 20, 30, 50, {h_val * 10}, 50, 100, 0, 0, 50000)"
+            )
+            for i in range(10):
+                gd = (date.today() - timedelta(days=1 + i)).isoformat()
+                db.execute(
+                    "INSERT INTO skater_stats "
+                    "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                    "hits, blocks, shots, plus_minus, pim, toi) "
+                    f"VALUES ({pid}, '{gd}', '20252026', 0, 2, 3, 5, {h_val}, 5, 10, 0, 0, 1300)"
+                )
+            db.execute(
+                "INSERT INTO fantasy_roster_slots "
+                "(team_id, player_name, position_short, status_id, salary) "
+                f"VALUES ('team2', '{name}', 'D', 'active', 3000000)"
+            )
+
+        # Weak D on opp (lowers opp D avg)
+        upsert_player(db, {
+            "id": 4444444, "full_name": "Weak OppD",
+            "first_name": "Weak", "last_name": "OppD",
+            "team_abbrev": "OPP", "position": "D",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (4444444, NULL, '20252026', 1, 0, 0, 0, 10, 0, 10, 0, 0, 20000)"
+        )
+        for i in range(10):
+            gd = (date.today() - timedelta(days=1 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (4444444, '{gd}', '20252026', 0, 0, 0, 0, 1, 0, 1, 0, 0, 1000)"
+            )
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team2', 'Weak OppD', 'D', 'active', 1000000)"
+        )
+
+        # Low-GP player on team2 (triggers line 1515 GP<5 skip)
+        upsert_player(db, {
+            "id": 5555555, "full_name": "Few Games",
+            "first_name": "Few", "last_name": "Games",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (5555555, NULL, '20252026', 1, 1, 1, 2, 5, 2, 10, 0, 0, 5000)"
+        )
+        for i in range(3):
+            gd = (date.today() - timedelta(days=1 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (5555555, '{gd}', '20252026', 0, 0, 0, 0, 2, 1, 3, 0, 0, 900)"
+            )
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team2', 'Few Games', 'C', 'active', 1000000)"
+        )
+        db.commit()
+
+    def test_cross_position_swaps(self, db: sqlite3.Connection) -> None:
+        """Cross-position swaps produce F->D suggestions."""
+        result = suggest_trades(db, "team1", "Other Team", "20252026")
+        assert result is not None
+        cross = [s for s in result["suggestions"]
+                 if "->" in s.get("position_group", "")]
+        assert len(cross) >= 1
+
+    def test_send_player_capped_at_2(self, db: sqlite3.Connection) -> None:
+        """Same sender appears at most 2 times (dedup)."""
+        result = suggest_trades(db, "team1", "Other Team", "20252026")
+        assert result is not None
+        from collections import Counter
+        counts = Counter(s["send_player"] for s in result["suggestions"])
+        for c in counts.values():
+            assert c <= 2
+
+
+# ---------------------------------------------------------------------------
+# Coverage: get_pickup_recommendations cross-pos, reasons, news, injury
+# (lines 1794, 1838, 1844, 1853, 1857, 1874, 1934-1951, 1961, 1977)
+# ---------------------------------------------------------------------------
+
+
+class TestPickupCrossPositionAndReasons:
+    """Cross-pos phase 2 + _build_reason branches + FA news + injury adj."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, db: sqlite3.Connection) -> None:
+        # Weak D on team1 (drop candidate with very low FPG)
+        upsert_player(db, {
+            "id": 2222222, "full_name": "Weak Dman",
+            "first_name": "Weak", "last_name": "Dman",
+            "team_abbrev": "TST", "position": "D",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (2222222, NULL, '20252026', 1, 0, 0, 0, 21, 7, 30, 0, 0, 9800)"
+        )
+        for i in range(7):
+            gd = (date.today() - timedelta(days=1 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (2222222, '{gd}', '20252026', 0, 0, 0, 0, 3, 1, 4, 0, 0, 1400)"
+            )
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team1', 'Weak Dman', 'D', 'active', 1000000)"
+        )
+
+        # GP data: D at 81%, F at 51%, G at 85%
+        for pos, used, limit, rem in [
+            ("D", 400, 492, 92), ("F", 500, 984, 484), ("G", 70, 82, 12),
+        ]:
+            db.execute(
+                "INSERT INTO fantasy_gp_per_position "
+                "(team_id, position, gp_used, gp_limit, gp_remaining) "
+                f"VALUES ('team1', '{pos}', {used}, {limit}, {rem})"
+            )
+
+        # Hot FA with PP1 + Line 1 + recent news
+        upsert_player(db, {
+            "id": 1111113, "full_name": "Hot PP1 FA",
+            "first_name": "Hot", "last_name": "PP1 FA",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (1111113, NULL, '20252026', 1, 10, 10, 20, 60, 30, 100, 0, 0, 40000)"
+        )
+        for d in range(1, 21):
+            gd = (date.today() - timedelta(days=d)).isoformat()
+            if d <= 14:
+                g, a, h, b = 3, 3, 10, 5
+            else:
+                g, a, h, b = 0, 0, 1, 0
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (1111113, '{gd}', '20252026', 0, {g}, {a}, {g + a}, {h}, {b}, 5, 0, 0, 1000)"
+            )
+        db.execute(
+            "INSERT INTO line_combinations "
+            "(player_id, team_abbrev, player_name, position, ev_line, pp_unit, "
+            "ev_linemates, pp_linemates, rating, updated_at) "
+            "VALUES (1111113, 'TST', 'Hot PP1 FA', 'C', 1, 1, '[]', '[]', 9.0, '2026-02-18')"
+        )
+        recent = (date.today() - timedelta(days=3)).isoformat()
+        db.execute(
+            "INSERT INTO player_news "
+            "(rotowire_news_id, player_id, headline, content, published_at) "
+            f"VALUES ('news_hotfa', 1111113, 'Hot PP1 FA: Top line', 'Big role.', '{recent}')"
+        )
+
+        # Mid-term injured FA (days_out ~40, Day-to-Day → filters in IR stash)
+        upsert_player(db, {
+            "id": 1111114, "full_name": "MidTerm Injured",
+            "first_name": "MidTerm", "last_name": "Injured",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (1111114, NULL, '20252026', 1, 20, 20, 40, 60, 30, 120, 5, 4, 48000)"
+        )
+        for i in range(15):
+            gd = (date.today() - timedelta(days=40 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (1111114, '{gd}', '20252026', 0, 1, 1, 2, 4, 2, 8, 0, 0, 1100)"
+            )
+        db.execute(
+            "INSERT INTO player_injuries "
+            "(player_id, source, injury_type, status, updated_at) "
+            "VALUES (1111114, 'rotowire', 'Knee', 'Day-to-Day', '2026-02-01')"
+        )
+
+        # Strong IR FA (picked as regular recommendation → skipped in IR stash)
+        upsert_player(db, {
+            "id": 1111116, "full_name": "Strong IR FA",
+            "first_name": "Strong", "last_name": "IR FA",
+            "team_abbrev": "TST", "position": "C",
+        })
+        db.execute(
+            "INSERT INTO skater_stats "
+            "(player_id, game_date, season, is_season_total, goals, assists, points, "
+            "hits, blocks, shots, plus_minus, pim, toi) "
+            "VALUES (1111116, NULL, '20252026', 1, 30, 30, 60, 100, 50, 200, 10, 4, 50000)"
+        )
+        for i in range(15):
+            gd = (date.today() - timedelta(days=1 + i)).isoformat()
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES (1111116, '{gd}', '20252026', 0, 2, 2, 4, 7, 3, 13, 1, 0, 1100)"
+            )
+        db.execute(
+            "INSERT INTO player_injuries "
+            "(player_id, source, injury_type, status, updated_at) "
+            "VALUES (1111116, 'rotowire', 'Shoulder', 'IR', '2026-02-20')"
+        )
+
+        db.commit()
+
+    def test_recommendations_produced(self, db: sqlite3.Connection) -> None:
+        """Pickup recommendations are produced with enriched data."""
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        assert len(data["recommendations"]) >= 1
+
+    def test_gp_remaining_from_db(self, db: sqlite3.Connection) -> None:
+        """GP remaining reflects fantasy_gp_per_position data."""
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        gp = data["gp_remaining"]
+        assert gp is not None
+        assert gp["D"] == 92
+        assert gp["F"] == 484
+
+    def test_fa_news_collected(self, db: sqlite3.Connection) -> None:
+        """Hot PP1 FA's news appears in recommendations."""
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        for r in data["recommendations"]:
+            if r["pickup_name"] == "Hot PP1 FA":
+                assert len(r["pickup_recent_news"]) >= 1
+                break
+
+    def test_pp1_and_line_in_reason(self, db: sqlite3.Connection) -> None:
+        """PP1 and Line 1 deployment appear in pickup reason."""
+        data = get_pickup_recommendations(db, "team1", "20252026")
+        for r in data["recommendations"]:
+            if r["pickup_name"] == "Hot PP1 FA":
+                assert "PP1" in r["reason"]
+                assert "Line 1" in r["reason"]
+                break

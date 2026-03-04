@@ -225,7 +225,8 @@ TOOLS = [
         "description": (
             "Get the current fantasy league standings. "
             "Returns: rank, team name, GP, points for (PF), "
-            "FP/G, games back (GB), and streak."
+            "FP/G, games back (GB), streak, claims remaining, "
+            "and GP remaining per position (F/D/G) for every team."
         ),
         "input_schema": {
             "type": "object",

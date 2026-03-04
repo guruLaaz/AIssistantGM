@@ -36,10 +36,14 @@ class AssistantClient:
 
         # Load and fill system prompt template
         template = _PROMPT_PATH.read_text(encoding="utf-8")
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        _est = _tz(_td(hours=-5))
+        _now_est = _dt.now(_est)
         self.system_prompt = template.format(
             team_name=team_name,
             team_id=context.team_id,
             season=context.season,
+            today=_now_est.strftime("%B %d, %Y at %I:%M %p EST"),
         )
 
     def _estimate_tokens(self) -> int:
@@ -103,6 +107,13 @@ class AssistantClient:
                     wait = 30 * (attempt + 1)
                     print(f"[Rate limited — waiting {wait}s before retrying...]")
                     time.sleep(wait)
+                except (anthropic.APIConnectionError, ConnectionError, OSError) as e:
+                    if attempt < 2:
+                        wait = 5 * (attempt + 1)
+                        print(f"[Connection error: {e} — retrying in {wait}s...]")
+                        time.sleep(wait)
+                    else:
+                        raise
 
             # Collect all content blocks from the response
             assistant_content = response.content

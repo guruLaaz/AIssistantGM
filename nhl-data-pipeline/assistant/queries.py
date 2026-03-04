@@ -523,6 +523,16 @@ def search_free_agents(
     """
     rostered = get_rostered_nhl_ids(conn)
 
+    # Build salary lookup from fantrax_players table (name → salary)
+    salary_lookup: dict[str, int] = {}
+    try:
+        for row in conn.execute(
+            "SELECT player_name, salary FROM fantrax_players WHERE salary > 0"
+        ).fetchall():
+            salary_lookup[row["player_name"].lower()] = row["salary"]
+    except Exception:
+        pass  # Table may not exist yet
+
     # Build position filter
     if position == "any":
         pos_filter = None
@@ -565,6 +575,7 @@ def search_free_agents(
             "games_played": gp,
             "fantasy_points": stats.get("fantasy_points", 0.0),
             "fpts_per_game": stats.get("fpts_per_game", 0.0),
+            "salary": salary_lookup.get(p["full_name"].lower(), 0),
         }
 
         if goalie:
@@ -747,6 +758,18 @@ def get_player_stats(
 
     line_context = _get_line_context(conn, nhl_id)
 
+    # Salary lookup from fantrax_players
+    salary = 0
+    try:
+        sal_row = conn.execute(
+            "SELECT salary FROM fantrax_players WHERE LOWER(player_name) = LOWER(?)",
+            (resolved["full_name"],),
+        ).fetchone()
+        if sal_row:
+            salary = sal_row["salary"]
+    except Exception:
+        pass
+
     return {
         "player": resolved,
         "is_goalie": goalie,
@@ -755,6 +778,7 @@ def get_player_stats(
         "injury": injury,
         "news": news,
         "line_context": line_context,
+        "salary": salary,
     }
 
 
@@ -987,7 +1011,7 @@ def get_league_standings(conn: sqlite3.Connection) -> list[dict]:
         List of standing dicts ordered by rank.
     """
     rows = conn.execute(
-        "SELECT fs.rank, ft.name AS team_name, ft.short_name, "
+        "SELECT fs.team_id, fs.rank, ft.name AS team_name, ft.short_name, "
         "fs.wins, fs.losses, fs.ties, fs.points, "
         "fs.win_percentage, fs.games_back, fs.waiver_order, "
         "fs.claims_remaining, fs.points_for, fs.points_against, "
@@ -997,7 +1021,28 @@ def get_league_standings(conn: sqlite3.Connection) -> list[dict]:
         "ORDER BY fs.rank"
     ).fetchall()
 
-    return [dict(r) for r in rows]
+    # Build GP-per-position lookup for all teams
+    gp_rows = conn.execute(
+        "SELECT team_id, position, gp_used, gp_limit, gp_remaining "
+        "FROM fantasy_gp_per_position"
+    ).fetchall()
+    gp_by_team: dict[str, dict[str, dict]] = {}
+    for gr in gp_rows:
+        tid = gr["team_id"]
+        gp_by_team.setdefault(tid, {})[gr["position"]] = {
+            "used": gr["gp_used"],
+            "limit": gr["gp_limit"],
+            "remaining": gr["gp_remaining"],
+        }
+
+    results = []
+    for r in rows:
+        entry = dict(r)
+        team_id = entry.pop("team_id")
+        entry["gp_remaining"] = gp_by_team.get(team_id, {})
+        results.append(entry)
+
+    return results
 
 
 def get_injuries(
@@ -1843,6 +1888,7 @@ def get_pickup_recommendations(
             "pickup_pp_unit": fa.get("pp_unit"),
             "pickup_trend": fa.get("trend", "neutral"),
             "pickup_team": fa.get("team", ""),
+            "pickup_salary": fa.get("salary", 0),
             "pickup_injury": injury,
             "pickup_days_out": fa.get("days_out", 0),
             "pickup_recent_news": fa_news_all.get(fa["player_name"], []),

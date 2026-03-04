@@ -64,7 +64,7 @@ python pipeline.py --db path/to/db      # Override database path
 | 3 | gamelogs | NHL Stats API (bulk) | `skater_stats`, `goalie_stats` |
 | 4 | seasontotals | NHL Stats API (bulk) | `skater_stats`, `goalie_stats` |
 | 5 | injuries | Rotowire JSON | `player_injuries` |
-| 6 | fantrax-league | Fantrax API | `fantasy_teams`, `fantasy_standings`, `fantasy_roster_slots` |
+| 6 | fantrax-league | Fantrax API | `fantasy_teams`, `fantasy_standings`, `fantasy_roster_slots`, `fantasy_gp_per_position`, `fantrax_players` |
 
 The `rosters` step also re-links unmatched news items to players (`player_news`).
 
@@ -105,7 +105,8 @@ The interactive assistant requires an Anthropic API key:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
-ASSISTANT_MODEL=claude-sonnet-4-20250514   # optional, this is the default
+ASSISTANT_MODEL=claude-opus-4-6            # optional (default: claude-sonnet-4-20250514)
+BRAVE_SEARCH_API_KEY=BSA...               # optional, enables web_search tool
 ```
 
 ### Running the assistant
@@ -123,18 +124,18 @@ The assistant has **12 tools** it can call autonomously:
 |----------|-------|
 | Roster | `get_my_roster`, `get_roster_analysis` |
 | Players | `get_player_stats`, `compare_players`, `get_player_trends` |
-| Free agents | `search_free_agents` |
+| Free agents | `search_free_agents`, `get_pickup_recommendations` |
 | League | `get_league_standings`, `get_schedule_analysis` |
 | News & injuries | `get_news_briefing`, `get_injuries` |
-| Advanced analysis | `get_trade_targets`, `get_roster_moves` |
+| Search | `web_search` |
 
-Advanced analysis includes buy-low trade target identification (players trending 20%+ above season average) and a combined drop-candidates + pickup-recommendations report with exact FP/G upgrade calculations.
+Pickup recommendations pair the best free agents with your weakest rostered players by position, showing the FP/G upgrade for each swap. Salary data is included for all players (rostered and free agents).
 
 Conversation context is automatically trimmed when approaching the 100k token limit.
 
 ## Database
 
-SQLite at `db/nhl_data.db` with 10 tables:
+SQLite at `db/nhl_data.db` with 13 tables:
 
 - `players` — NHL roster players (id, name, team, position, rotowire_id)
 - `skater_stats` — per-game and season total stats for skaters
@@ -146,6 +147,9 @@ SQLite at `db/nhl_data.db` with 10 tables:
 - `fantasy_teams` — Fantrax league teams (id, league_id, name, short_name, logo_url)
 - `fantasy_standings` — league standings per team (rank, W/L, points, FP for/against, claims remaining, etc.)
 - `fantasy_roster_slots` — player roster assignments per fantasy team (player_name, position, salary, fantasy points)
+- `fantasy_gp_per_position` — actual fantasy games-played per position group (F/D/G) per team, from Fantrax
+- `fantrax_players` — all ~8,400 players with Fantrax ID, name, team, position, and NHL salary
+- `line_combinations` — even-strength lines, PP units, PK units per team (from DailyFaceoff via Rotowire)
 
 ## Data quirks & known limitations
 
