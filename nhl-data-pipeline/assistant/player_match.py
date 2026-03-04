@@ -77,6 +77,40 @@ def resolve_player(
     if row:
         return _row_to_dict(row)
 
+    # 5. Last-name match for nickname variants (e.g. Benjamin→Ben)
+    parts = name_query.split()
+    if len(parts) >= 2:
+        last_name = parts[-1]
+        # Try exact last name first
+        rows = conn.execute(
+            "SELECT id, full_name, team_abbrev, position "
+            "FROM players WHERE last_name = ? COLLATE NOCASE",
+            (last_name,),
+        ).fetchall()
+        if len(rows) == 1:
+            return _row_to_dict(rows[0])
+
+        # Try with first initial to disambiguate common last names
+        first_initial = parts[0][0].upper()
+        initial_matches = [
+            r for r in rows
+            if r["full_name"] and r["full_name"][0].upper() == first_initial
+        ]
+        if len(initial_matches) == 1:
+            return _row_to_dict(initial_matches[0])
+
+    # 6. Normalize hyphens/spaces in last name (e.g. "Sandin Pellikka" → "Sandin-Pellikka")
+    if len(parts) >= 3:
+        # Try joining last two parts with hyphen
+        hyphenated = parts[-2] + "-" + parts[-1]
+        row = conn.execute(
+            "SELECT id, full_name, team_abbrev, position "
+            "FROM players WHERE last_name = ? COLLATE NOCASE",
+            (hyphenated,),
+        ).fetchone()
+        if row:
+            return _row_to_dict(row)
+
     return None
 
 
