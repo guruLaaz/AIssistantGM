@@ -540,7 +540,12 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
                 min_games=tool_input.get("min_games", 10),
                 limit=tool_input.get("limit", 20),
             )
-            return formatters.format_free_agents(data)
+            claims_row = conn.execute(
+                "SELECT claims_remaining FROM fantasy_standings WHERE team_id = ?",
+                (context.team_id,),
+            ).fetchone()
+            claims = claims_row["claims_remaining"] if claims_row else None
+            return formatters.format_free_agents(data, claims_remaining=claims)
 
         if tool_name == "get_player_stats":
             player_name = tool_input["player_name"]

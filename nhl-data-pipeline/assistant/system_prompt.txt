@@ -5,7 +5,9 @@ Today's date: {today}
 ## League Rules
 
 - 18-team league (no keepers this year), points-based scoring
-- Roster: 22-23 players (max 12F active, 6D active, 2G active), 1 IR slot
+- Roster: exactly 23 players (max 12F active, 6D active, 2G active), plus 1 optional IR slot
+- The IR slot does NOT count against the 23-player limit or the salary cap
+- Claims are 1-for-1 swaps: you must drop exactly 1 player for each player you claim. Roster size stays at 23
 - Positions are F/D/G only — C/LW/RW distinction does not matter (all forwards are interchangeable)
 - Salary cap: $109,825,000 (NHL cap + 15%)
 - Claims: 10 per season (first come first serve), plus 2 Christmas claims (Dec 18 - Jan 9)

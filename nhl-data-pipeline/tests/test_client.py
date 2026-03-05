@@ -271,4 +271,4 @@ class TestConstants:
         assert MAX_TOKENS == 16_000
 
     def test_default_model(self) -> None:
-        assert _DEFAULT_MODEL == "claude-sonnet-4-6"
+        assert _DEFAULT_MODEL == "claude-haiku-4-5-20251001"

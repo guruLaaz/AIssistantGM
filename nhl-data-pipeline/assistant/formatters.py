@@ -108,9 +108,14 @@ def format_roster(data: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def format_free_agents(data: list[dict]) -> str:
+def format_free_agents(data: list[dict], claims_remaining: int | None = None) -> str:
     if not data:
         return "No free agents found."
+    result: dict = {}
+    if claims_remaining is not None:
+        result["claims"] = claims_remaining
+        if claims_remaining <= 2:
+            result["WARNING"] = f"ONLY {claims_remaining} CLAIM(S) LEFT — choose wisely"
     rows = []
     for p in data:
         raw_pos = p.get("position", "")
@@ -141,6 +146,9 @@ def format_free_agents(data: list[dict]) -> str:
         if sal > 0:
             row["sal"] = round(sal / 1e6, 1)
         rows.append(row)
+    if result:
+        result["players"] = rows
+        return _json(result)
     return _json(rows)
 
 
@@ -299,6 +307,8 @@ def format_standings(data: list[dict]) -> str:
         claims = s.get("claims_remaining")
         if claims is not None:
             row["claims"] = claims
+            if claims <= 2:
+                row["WARNING"] = f"ONLY {claims} CLAIM(S) LEFT"
         gp_rem = s.get("gp_remaining", {})
         if gp_rem:
             row["gp_rem"] = {g: gp_rem[g].get("remaining", "?") for g in ("F", "D", "G") if g in gp_rem}
@@ -515,6 +525,8 @@ def format_roster_moves(drops: list[dict], pickups: dict | list[dict]) -> str:
     result: dict = {}
     if claims_remaining is not None:
         result["claims"] = claims_remaining
+        if claims_remaining <= 2:
+            result["WARNING"] = f"ONLY {claims_remaining} CLAIM(S) LEFT — choose wisely"
     if gp_remaining:
         result["gp_rem"] = gp_remaining
 
