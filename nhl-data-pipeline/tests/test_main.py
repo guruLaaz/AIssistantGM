@@ -229,7 +229,7 @@ class TestChatLoop:
             with patch("sys.argv", ["main.py"]):
                 main()
 
-        mock_client.chat.assert_called_once_with("Show my roster")
+        mock_client.chat.assert_called_once_with("Show my roster", deep=False)
 
     @patch("assistant.main.get_db")
     @patch("assistant.main.select_team")

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from db.schema import init_db, get_db
 from assistant.tools import SessionContext
-from assistant.client import AssistantClient, MAX_TOKENS
+from assistant.client import AssistantClient, MAX_TOKENS, _DEFAULT_MODEL
 
 
 def _make_stream_cm(response):
@@ -59,7 +59,7 @@ class TestAssistantClientInit:
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
             os.environ.pop("ASSISTANT_MODEL", None)
             client = AssistantClient(context=ctx, team_name="My Team")
-            assert client.model == "claude-opus-4-6"
+            assert client.model == _DEFAULT_MODEL
 
     @patch("assistant.client.anthropic.Anthropic")
     def test_custom_model(self, mock_anthropic, ctx: SessionContext) -> None:
@@ -268,4 +268,7 @@ class TestChat:
 
 class TestConstants:
     def test_max_tokens(self) -> None:
-        assert MAX_TOKENS == 48_000
+        assert MAX_TOKENS == 16_000
+
+    def test_default_model(self) -> None:
+        assert _DEFAULT_MODEL == "claude-sonnet-4-6"

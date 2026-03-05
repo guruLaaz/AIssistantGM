@@ -127,6 +127,7 @@ def main() -> None:
     print("    - Find me some buy-low trade targets")
     print("    - What's the league standings?")
     print()
+    print("  Prefix with /deep for complex analysis (uses Opus).")
     print("  Type 'quit' or 'exit' to leave.\n")
 
     while True:
@@ -142,8 +143,18 @@ def main() -> None:
             print("Goodbye!")
             break
 
+        # /deep prefix → Opus with extended thinking
+        deep = False
+        if user_input.lower().startswith("/deep"):
+            deep = True
+            user_input = user_input[5:].lstrip()
+            if not user_input:
+                print("Please add a question after /deep.\n")
+                continue
+            print("[Using Opus for deep analysis...]\n")
+
         try:
-            response = client.chat(user_input)
+            response = client.chat(user_input, deep=deep)
             print(f"\nAssistant: {response}\n")
         except KeyboardInterrupt:
             print("\n(interrupted)")

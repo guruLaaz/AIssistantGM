@@ -10,8 +10,13 @@ import anthropic
 
 from assistant.tools import TOOLS, SessionContext, dispatch_tool
 
-MAX_TOKENS = 48_000
+MAX_TOKENS = 16_000
 _PROMPT_PATH = Path(__file__).parent / "system_prompt.txt"
+
+# Model and thinking configuration
+_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEEP_MODEL = "claude-opus-4-6"
+_DEFAULT_THINKING_BUDGET = 4_096
 
 
 class AssistantClient:
@@ -30,7 +35,7 @@ class AssistantClient:
             )
 
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = os.environ.get("ASSISTANT_MODEL", "claude-opus-4-6")
+        self.model = os.environ.get("ASSISTANT_MODEL", _DEFAULT_MODEL)
         self.context = context
         self.messages: list[dict] = []
 
@@ -70,7 +75,7 @@ class AssistantClient:
                             total_chars += len(str(block.input))
         return total_chars // 4
 
-    def chat(self, user_message: str) -> str:
+    def chat(self, user_message: str, deep: bool = False) -> str:
         """Send a user message and return the final assistant text.
 
         Handles the full tool-use loop: if Claude responds with tool_use
@@ -79,11 +84,20 @@ class AssistantClient:
 
         Args:
             user_message: The user's input text.
+            deep: If True, use Opus with higher thinking budget.
 
         Returns:
             The assistant's final text response.
         """
         self.messages.append({"role": "user", "content": user_message})
+
+        # Select model and thinking config
+        if deep:
+            model = _DEEP_MODEL
+            thinking = {"type": "adaptive"}
+        else:
+            model = self.model
+            thinking = {"type": "enabled", "budget_tokens": _DEFAULT_THINKING_BUDGET}
 
         while True:
             # Context management: trim if approaching 100k tokens
@@ -94,10 +108,14 @@ class AssistantClient:
             for attempt in range(3):
                 try:
                     with self.client.messages.stream(
-                        model=self.model,
+                        model=model,
                         max_tokens=MAX_TOKENS,
-                        thinking={"type": "adaptive"},
-                        system=self.system_prompt,
+                        thinking=thinking,
+                        system=[{
+                            "type": "text",
+                            "text": self.system_prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }],
                         tools=TOOLS,
                         messages=self.messages,
                     ) as stream:

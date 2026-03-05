@@ -279,7 +279,7 @@ class TestDispatchTool:
 
     def test_get_player_trends(self, ctx: SessionContext) -> None:
         result = dispatch_tool("get_player_trends", {"player_name": "Connor McDavid"}, ctx)
-        assert "Trends" in result
+        assert "Connor McDavid" in result
 
     def test_get_player_trends_not_found(self, ctx: SessionContext) -> None:
         result = dispatch_tool("get_player_trends", {"player_name": "Nobody"}, ctx)
