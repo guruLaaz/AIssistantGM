@@ -13,6 +13,10 @@ import pytest
 from db.schema import get_db, init_db, upsert_player
 from fetchers.nhl_api import ALL_TEAMS, save_skater_stats, save_team_schedule
 from pipeline import (
+    PHASE_1,
+    PHASE_2,
+    PHASE_3,
+    PHASE_4,
     PIPELINE_STEPS,
     StepResult,
     _STEP_RUNNERS,
@@ -127,15 +131,15 @@ class TestCurrentSeason:
 # =============================================================================
 
 class TestRunPipeline:
-    """Tests for run_pipeline orchestration."""
+    """Tests for run_pipeline parallel orchestration."""
 
-    def test_calls_all_steps_in_order(self, db_path: Path) -> None:
-        """All steps execute in PIPELINE_STEPS order."""
-        call_order: list[str] = []
+    def test_runs_all_steps_and_returns_in_order(self, db_path: Path) -> None:
+        """All steps execute and results are in PIPELINE_STEPS order."""
+        called: set[str] = set()
 
         def make_recorder(name: str):
             def recorder(conn, season):
-                call_order.append(name)
+                called.add(name)
                 return {}
             return recorder
 
@@ -146,17 +150,17 @@ class TestRunPipeline:
         ):
             results = run_pipeline(db_path, "20252026")
 
-        assert call_order == PIPELINE_STEPS
+        assert called == set(PIPELINE_STEPS)
         assert len(results) == len(PIPELINE_STEPS)
         assert [r.name for r in results] == PIPELINE_STEPS
 
     def test_continues_on_step_failure(self, db_path: Path) -> None:
         """If one step raises, remaining steps still run."""
-        call_order: list[str] = []
+        called: set[str] = set()
 
         def make_recorder(name: str):
             def recorder(conn, season):
-                call_order.append(name)
+                called.add(name)
                 if name == "schedules":
                     raise RuntimeError("Schedules failed")
                 return {}
@@ -169,13 +173,13 @@ class TestRunPipeline:
         ):
             results = run_pipeline(db_path, "20252026")
 
-        assert call_order == PIPELINE_STEPS
+        assert called == set(PIPELINE_STEPS)
         assert len(results) == len(PIPELINE_STEPS)
-        assert results[1].name == "schedules"
-        assert results[1].status == "error"
-        assert "Schedules failed" in results[1].error
-        for i, r in enumerate(results):
-            if i != 1:
+        sched_result = next(r for r in results if r.name == "schedules")
+        assert sched_result.status == "error"
+        assert "Schedules failed" in sched_result.error
+        for r in results:
+            if r.name != "schedules":
                 assert r.status == "ok"
 
     def test_reports_status_per_step(self, db_path: Path) -> None:
@@ -215,6 +219,45 @@ class TestRunPipeline:
 
         for r in results:
             assert r.duration_s >= 0
+
+    def test_phase2_waits_for_phase1(self, db_path: Path) -> None:
+        """Phase 2 steps don't start until all Phase 1 steps complete."""
+        import threading
+        import time as _time
+
+        # Pre-init DB so threads don't race on WAL setup
+        init_db(db_path)
+
+        timestamps: dict[str, dict[str, float]] = {}
+        lock = threading.Lock()
+
+        def make_runner(name: str):
+            def runner(conn, season):
+                t = {"start": _time.monotonic()}
+                if name == "rosters":
+                    _time.sleep(0.1)
+                t["end"] = _time.monotonic()
+                with lock:
+                    timestamps[name] = t
+                return {}
+            return runner
+
+        with patch.dict(
+            "pipeline._STEP_RUNNERS",
+            {name: make_runner(name) for name in PIPELINE_STEPS},
+            clear=True,
+        ):
+            results = run_pipeline(db_path, "20252026")
+
+        # Every Phase 1 step must finish before any Phase 2 step starts
+        phase1_end = max(timestamps[s]["end"] for s in PHASE_1)
+        phase2_start = min(timestamps[s]["start"] for s in PHASE_2)
+        assert phase1_end <= phase2_start
+        assert len(results) == len(PIPELINE_STEPS)
+
+    def test_phases_cover_all_steps(self) -> None:
+        """All phases cover all PIPELINE_STEPS exactly."""
+        assert set(PHASE_1 + PHASE_2 + PHASE_3 + PHASE_4) == set(PIPELINE_STEPS)
 
 
 # =============================================================================
@@ -463,9 +506,9 @@ class TestFantraxLeagueStep:
         """Verify fantrax-league has a runner registered."""
         assert "fantrax-league" in _STEP_RUNNERS
 
-    def test_fantrax_league_is_last_step(self) -> None:
-        """Verify fantrax-league runs last (so cookie failures don't block NHL steps)."""
-        assert PIPELINE_STEPS[-1] == "fantrax-league"
+    def test_fantrax_league_in_phase1(self) -> None:
+        """Verify fantrax-league runs in Phase 1 (parallel, no dependencies)."""
+        assert "fantrax-league" in PHASE_1
 
     @patch("pipeline.sync_fantrax_league")
     def test_fantrax_league_step_runner(
@@ -1147,3 +1190,19 @@ class TestTeamStats:
         result = _STEP_RUNNERS["team-stats"](db, "20252026")
         assert result["teams_updated"] == 1
         mock_fetch.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# WAL mode
+# ---------------------------------------------------------------------------
+
+class TestWalMode:
+    """Tests for SQLite WAL mode configuration."""
+
+    def test_init_db_enables_wal(self, db_path: Path) -> None:
+        """init_db() sets journal_mode to WAL."""
+        init_db(db_path)
+        conn = get_db(db_path)
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        conn.close()
+        assert mode == "wal"

@@ -291,6 +291,7 @@ def init_db(db_path: Path) -> None:
         cursor.execute("ALTER TABLE nhl_team_stats ADD COLUMN l14_record TEXT")
 
     conn.commit()
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.close()
 
 
@@ -303,7 +304,7 @@ def get_db(db_path: Path) -> sqlite3.Connection:
     Returns:
         Connection with row_factory=sqlite3.Row for column-name access.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 

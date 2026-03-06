@@ -8,6 +8,7 @@ injuries), logs progress, and generates summary reports.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import logging
 import time as time_module
 from dataclasses import dataclass, field
@@ -57,6 +58,15 @@ PIPELINE_STEPS = [
 STEP_ALIASES: dict[str, list[str]] = {
     "stats": ["gamelogs", "seasontotals"],
 }
+
+# Parallel execution phases — each phase waits for the previous to complete.
+# CONSTRAINT: only ONE NHL API caller per phase (shared rate limit across
+# api-web.nhle.com and api.nhle.com/stats).  Non-NHL fetchers (Fantrax,
+# Rotowire, DailyFaceoff) can safely run alongside an NHL caller.
+PHASE_1 = ["rosters", "fantrax-league", "backfill-news"]  # rosters=NHL
+PHASE_2 = ["schedules", "injuries", "lines"]               # schedules=NHL
+PHASE_3 = ["gamelogs"]                                      # gamelogs=NHL stats
+PHASE_4 = ["seasontotals", "team-stats"]                    # seasontotals=NHL stats, team-stats=1 req
 
 
 # ---------------------------------------------------------------------------
@@ -369,45 +379,43 @@ def run_step(step: str, db_path: Path, season: str) -> StepResult:
 
 
 def run_pipeline(db_path: Path, season: str) -> list[StepResult]:
-    """Run all pipeline steps in PIPELINE_STEPS order.
+    """Run all pipeline steps with parallel execution.
 
-    Initialises the database, then executes each step. Continues on failure
-    so that one broken step doesn't block the rest.
+    Steps are split into two phases (PHASE_1 and PHASE_2).  Phase 1 steps
+    run in parallel; Phase 2 steps run in parallel after Phase 1 completes.
+    This is safe because Phase 2 steps depend on data written by Phase 1
+    (e.g. gamelogs needs the players table populated by rosters).
+
+    Each thread gets its own DB connection via run_step().  SQLite WAL mode
+    allows concurrent readers and serialises writers automatically.
 
     Args:
         db_path: Path to SQLite database.
         season: Season string.
 
     Returns:
-        List of StepResult, one per step.
+        List of StepResult in PIPELINE_STEPS order.
     """
     init_db(db_path)
-    conn = get_db(db_path)
-    results: list[StepResult] = []
-    try:
-        for step_name in PIPELINE_STEPS:
-            logger.info("Step: %s", step_name)
-            start = time_module.monotonic()
-            try:
-                detail = _STEP_RUNNERS[step_name](conn, season)
-                duration = time_module.monotonic() - start
-                _log_pipeline_step(conn, step_name, "ok")
-                results.append(StepResult(
-                    name=step_name, status="ok",
-                    duration_s=duration, detail=detail,
-                ))
-                logger.info("  OK (%.1fs)", duration)
-            except Exception as e:
-                duration = time_module.monotonic() - start
-                _log_pipeline_step(conn, step_name, "error")
-                results.append(StepResult(
-                    name=step_name, status="error",
-                    duration_s=duration, detail={}, error=str(e),
-                ))
-                logger.error("  FAILED: %s (%.1fs)", e, duration)
-    finally:
-        conn.close()
-    return results
+
+    result_map: dict[str, StepResult] = {}
+
+    def _run_phase(steps: list[str]) -> None:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(steps)) as pool:
+            futures = {
+                pool.submit(run_step, step, db_path, season): step
+                for step in steps
+            }
+            for future in concurrent.futures.as_completed(futures):
+                step_name = futures[future]
+                result_map[step_name] = future.result()
+
+    for i, phase in enumerate([PHASE_1, PHASE_2, PHASE_3, PHASE_4], 1):
+        logger.info("Phase %d: %s", i, ", ".join(phase))
+        _run_phase(phase)
+
+    # Return results in canonical PIPELINE_STEPS order
+    return [result_map[s] for s in PIPELINE_STEPS]
 
 
 # ---------------------------------------------------------------------------
