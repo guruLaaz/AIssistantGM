@@ -92,6 +92,8 @@ def format_roster(data: list[dict]) -> str:
             row["w"] = p.get("wins", 0)
             row["l"] = p.get("losses", 0)
             row["so"] = p.get("shutouts", 0)
+            row["sr"] = p.get("start_rate", 0.0)
+            row["sr14"] = p.get("start_rate_l14", 0.0)
         else:
             row["g"] = p.get("goals", 0)
             row["a"] = p.get("assists", 0)
@@ -131,6 +133,8 @@ def format_free_agents(data: list[dict], claims_remaining: int | None = None) ->
             row["w"] = p.get("wins", 0)
             row["so"] = p.get("shutouts", 0)
             row["gaa"] = round(p.get("gaa", 0.0), 2)
+            row["sr"] = p.get("start_rate", 0.0)
+            row["sr14"] = p.get("start_rate_l14", 0.0)
         else:
             row["g"] = p.get("goals", 0)
             row["a"] = p.get("assists", 0)
@@ -191,6 +195,8 @@ def format_player_card(data: dict) -> str:
             "otl": stats.get("ot_losses", 0), "so": stats.get("shutouts", 0),
             "gaa": round(stats.get("gaa", 0.0), 2),
             "svp": round(stats.get("sv_pct", 0.0), 3),
+            "sr": stats.get("start_rate", 0.0),
+            "sr14": stats.get("start_rate_l14", 0.0),
         })
     else:
         result.update({
@@ -255,7 +261,7 @@ def format_comparison(data: list[dict]) -> str:
             "fpg": p.get("fpts_per_game", "-"),
         }
         if p.get("is_goalie"):
-            row.update({"w": p.get("wins", "-"), "l": p.get("losses", "-"), "so": p.get("shutouts", "-"), "gaa": p.get("gaa", "-")})
+            row.update({"w": p.get("wins", "-"), "l": p.get("losses", "-"), "so": p.get("shutouts", "-"), "gaa": p.get("gaa", "-"), "sr": p.get("start_rate", "-"), "sr14": p.get("start_rate_l14", "-")})
         else:
             row.update({"g": p.get("goals", "-"), "a": p.get("assists", "-"), "pts": p.get("points", "-"), "h": p.get("hits", "-"), "b": p.get("blocks", "-")})
             toi = p.get("toi_per_game")
@@ -333,6 +339,8 @@ def format_schedule(data: dict) -> str:
         entry: dict = {"date": g["game_date"], "vs": g.get("opponent", ""), "ha": g.get("home_away", "")}
         if g["game_date"] in b2b_dates:
             entry["b2b"] = True
+        if "opp" in g:
+            entry["opp"] = g["opp"]
         games.append(entry)
     result = {
         "team": data.get("team", ""),
@@ -341,6 +349,31 @@ def format_schedule(data: dict) -> str:
         "games": games,
     }
     return _json(result)
+
+
+# ---------------------------------------------------------------------------
+# NHL team standings
+# ---------------------------------------------------------------------------
+
+
+def format_nhl_standings(data: list[dict]) -> str:
+    if not data:
+        return "No NHL team stats available."
+    rows = []
+    for t in data:
+        entry = {
+            "team": t["team"],
+            "rec": f"{t['wins']}-{t['losses']}-{t['ot_losses']}",
+            "pts": t["points"],
+            "gf_g": round(t["goals_for_per_game"], 2),
+            "ga_g": round(t["goals_against_per_game"], 2),
+            "l10": t.get("l10_record", ""),
+            "l14": t.get("l14_record", ""),
+            "streak": t.get("streak", ""),
+            "div": t.get("division", ""),
+        }
+        rows.append(entry)
+    return _json(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +454,8 @@ def format_team_roster(data: dict) -> str:
             row["w"] = p.get("wins", 0)
             row["l"] = p.get("losses", 0)
             row["so"] = p.get("shutouts", 0)
+            row["sr"] = p.get("start_rate", 0.0)
+            row["sr14"] = p.get("start_rate_l14", 0.0)
         else:
             row["g"] = p.get("goals", 0)
             row["a"] = p.get("assists", 0)

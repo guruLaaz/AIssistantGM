@@ -16,6 +16,7 @@ from assistant.queries import (
     get_recent_news,
     get_schedule_analysis,
     get_league_standings,
+    get_nhl_standings,
     get_injuries,
     get_trade_candidates,
     get_drop_candidates,
@@ -2387,3 +2388,107 @@ class TestPickupCrossPositionAndReasons:
                 assert "PP1" in r["reason"]
                 assert "Line 1" in r["reason"]
                 break
+
+
+# ---------------------------------------------------------------------------
+# NHL team standings
+# ---------------------------------------------------------------------------
+
+
+def _insert_team_stats(db, team, season="20252026", **kwargs):
+    """Insert a row into nhl_team_stats for testing."""
+    defaults = {
+        "games_played": 60, "wins": 30, "losses": 20, "ot_losses": 10,
+        "points": 70, "goals_for": 180, "goals_against": 190,
+        "goals_for_per_game": 3.0, "goals_against_per_game": 3.17,
+        "l10_record": "5-3-2", "streak": "L6", "division": "Atlantic",
+    }
+    defaults.update(kwargs)
+    db.execute(
+        "INSERT OR REPLACE INTO nhl_team_stats "
+        "(team, season, games_played, wins, losses, ot_losses, points, "
+        "goals_for, goals_against, goals_for_per_game, goals_against_per_game, "
+        "l10_record, streak, division) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (team, season, defaults["games_played"], defaults["wins"],
+         defaults["losses"], defaults["ot_losses"], defaults["points"],
+         defaults["goals_for"], defaults["goals_against"],
+         defaults["goals_for_per_game"], defaults["goals_against_per_game"],
+         defaults["l10_record"], defaults["streak"], defaults["division"]),
+    )
+    db.commit()
+
+
+class TestNhlStandings:
+    """Tests for get_nhl_standings query."""
+
+    @pytest.fixture
+    def db(self, tmp_path: Path) -> sqlite3.Connection:
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        conn = get_db(db_path)
+        yield conn
+        conn.close()
+
+    def test_returns_all_teams(self, db: sqlite3.Connection) -> None:
+        _insert_team_stats(db, "TOR", points=70)
+        _insert_team_stats(db, "MTL", points=50)
+        result = get_nhl_standings(db, "20252026")
+        assert len(result) == 2
+        assert result[0]["team"] == "TOR"  # sorted by points DESC
+        assert result[1]["team"] == "MTL"
+
+    def test_filter_by_team(self, db: sqlite3.Connection) -> None:
+        _insert_team_stats(db, "TOR")
+        _insert_team_stats(db, "MTL")
+        result = get_nhl_standings(db, "20252026", team="MTL")
+        assert len(result) == 1
+        assert result[0]["team"] == "MTL"
+
+    def test_empty_table(self, db: sqlite3.Connection) -> None:
+        result = get_nhl_standings(db, "20252026")
+        assert result == []
+
+
+class TestScheduleEnrichment:
+    """Tests that get_schedule_analysis includes opponent stats."""
+
+    @pytest.fixture
+    def db(self, tmp_path: Path) -> sqlite3.Connection:
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        conn = get_db(db_path)
+
+        # Insert a future game
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        conn.execute(
+            "INSERT INTO team_games (team, season, game_date, opponent, home_away) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("TOR", "20252026", tomorrow, "MTL", "home"),
+        )
+        conn.commit()
+        yield conn
+        conn.close()
+
+    def test_opp_stats_included(self, db: sqlite3.Connection) -> None:
+        """Opponent stats appear in game entries when nhl_team_stats has data."""
+        _insert_team_stats(db, "MTL", wins=25, losses=30, ot_losses=5, points=55,
+                           goals_for_per_game=2.8, goals_against_per_game=3.5,
+                           l10_record="3-6-1", streak="L3")
+
+        result = get_schedule_analysis(db, "TOR", "20252026", days_ahead=7)
+        assert result is not None
+        assert len(result["games"]) == 1
+        game = result["games"][0]
+        assert "opp" in game
+        assert game["opp"]["rec"] == "25-30-5"
+        assert game["opp"]["gf_g"] == 2.8
+        assert game["opp"]["streak"] == "L3"
+        assert "l14" in game["opp"]
+
+    def test_no_opp_stats_graceful(self, db: sqlite3.Connection) -> None:
+        """Schedule works normally when nhl_team_stats is empty."""
+        result = get_schedule_analysis(db, "TOR", "20252026", days_ahead=7)
+        assert result is not None
+        assert len(result["games"]) == 1
+        assert "opp" not in result["games"][0]

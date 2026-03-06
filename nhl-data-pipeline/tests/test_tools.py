@@ -176,7 +176,7 @@ class TestToolDefinitions:
     """Tests for the TOOLS list structure."""
 
     def test_correct_tool_count(self) -> None:
-        assert len(TOOLS) == 12  # 3 convenience tools commented out for A/B testing
+        assert len(TOOLS) == 13  # 3 convenience tools commented out for A/B testing
 
     def test_all_tools_have_required_fields(self) -> None:
         for tool in TOOLS:
@@ -195,7 +195,7 @@ class TestToolDefinitions:
             "get_my_roster", "get_roster_analysis", "search_free_agents",
             "get_player_stats", "compare_players", "get_player_trends",
             "get_news_briefing", "get_schedule_analysis",
-            "get_league_standings", "get_injuries",
+            "get_league_standings", "get_nhl_standings", "get_injuries",
             # "get_trade_targets", "get_roster_moves",  # commented out for A/B testing
             "get_team_roster",  # "suggest_trades",  # commented out for A/B testing
             "web_search",
@@ -308,6 +308,38 @@ class TestDispatchTool:
     def test_get_league_standings(self, ctx: SessionContext) -> None:
         result = dispatch_tool("get_league_standings", {}, ctx)
         assert "My Team" in result
+
+    def test_get_nhl_standings(self, ctx: SessionContext) -> None:
+        ctx.conn.execute(
+            "INSERT OR REPLACE INTO nhl_team_stats "
+            "(team, season, games_played, wins, losses, ot_losses, points, "
+            "goals_for, goals_against, goals_for_per_game, goals_against_per_game, "
+            "l10_record, streak, division) "
+            "VALUES ('EDM', '20252026', 60, 35, 18, 7, 77, 210, 170, 3.5, 2.83, "
+            "'7-2-1', 'W3', 'Pacific')"
+        )
+        ctx.conn.commit()
+        result = dispatch_tool("get_nhl_standings", {}, ctx)
+        assert "EDM" in result
+        assert "3.5" in result
+
+    def test_get_nhl_standings_filtered(self, ctx: SessionContext) -> None:
+        ctx.conn.execute(
+            "INSERT OR REPLACE INTO nhl_team_stats "
+            "(team, season, games_played, wins, losses, ot_losses, points, "
+            "goals_for, goals_against, goals_for_per_game, goals_against_per_game, "
+            "l10_record, streak, division) "
+            "VALUES ('TOR', '20252026', 60, 30, 20, 10, 70, 180, 190, 3.0, 3.17, "
+            "'4-4-2', 'L6', 'Atlantic')"
+        )
+        ctx.conn.commit()
+        result = dispatch_tool("get_nhl_standings", {"team": "TOR"}, ctx)
+        assert "TOR" in result
+        assert "L6" in result
+
+    def test_get_nhl_standings_empty(self, ctx: SessionContext) -> None:
+        result = dispatch_tool("get_nhl_standings", {}, ctx)
+        assert "no nhl team stats" in result.lower()
 
     def test_get_injuries_my_roster(self, ctx: SessionContext) -> None:
         result = dispatch_tool("get_injuries", {"scope": "my_roster"}, ctx)

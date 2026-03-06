@@ -234,6 +234,92 @@ def _get_skater_season_stats(
     return result
 
 
+def _calc_goalie_start_rates(
+    conn: sqlite3.Connection, player_id: int, season: str
+) -> tuple[float, float]:
+    """Calculate goalie start rates using dressed games as denominator.
+
+    A goalie is "dressed" for a team game if they played OR were healthy
+    backup (i.e. gaps between appearances are <= MAX_GAP team games).
+    Gaps longer than MAX_GAP are treated as injury absences.
+
+    Returns:
+        (season_start_rate, l14_start_rate) as percentages.
+    """
+    MAX_GAP = 6  # consecutive missed team games before assuming injury
+
+    # Get goalie's team
+    player = conn.execute(
+        "SELECT team_abbrev FROM players WHERE id = ?", (player_id,),
+    ).fetchone()
+    if not player:
+        return 0.0, 0.0
+
+    team = player["team_abbrev"]
+
+    # Get goalie's per-game entries with decision flag
+    goalie_rows = conn.execute(
+        "SELECT game_date, "
+        "  CASE WHEN wins + losses + ot_losses > 0 THEN 1 ELSE 0 END "
+        "    AS has_decision "
+        "FROM goalie_stats "
+        "WHERE player_id = ? AND season = ? AND is_season_total = 0 "
+        "ORDER BY game_date",
+        (player_id, season),
+    ).fetchall()
+    if not goalie_rows:
+        return 0.0, 0.0
+
+    goalie_dates = {r["game_date"] for r in goalie_rows}
+    decision_dates = {r["game_date"] for r in goalie_rows if r["has_decision"]}
+    first_game = goalie_rows[0]["game_date"]
+    last_game = goalie_rows[-1]["game_date"]
+
+    # Get past team game dates between goalie's first and last appearance
+    today = date.today().isoformat()
+    upper = min(last_game, today)
+    team_dates = [
+        r["game_date"]
+        for r in conn.execute(
+            "SELECT game_date FROM team_games "
+            "WHERE team = ? AND season = ? "
+            "  AND game_date >= ? AND game_date <= ? "
+            "ORDER BY game_date",
+            (team, season, first_game, upper),
+        ).fetchall()
+    ]
+    if not team_dates:
+        return 0.0, 0.0
+
+    # Build list of dressed games: goalie played + backup gaps <= MAX_GAP
+    dressed: list[str] = []
+    gap: list[str] = []
+    for td in team_dates:
+        if td in goalie_dates:
+            # Goalie played — flush any accumulated backup gap
+            if gap and len(gap) <= MAX_GAP:
+                dressed.extend(gap)
+            gap = []
+            dressed.append(td)
+        else:
+            gap.append(td)
+    # Trailing gap (after last goalie game within range) is not counted
+
+    if not dressed:
+        return 0.0, 0.0
+
+    # Season start rate
+    total_decisions = sum(1 for d in dressed if d in decision_dates)
+    sr = round(total_decisions / len(dressed) * 100, 1)
+
+    # L14: last 14 dressed games for this goalie
+    last_14 = dressed[-14:]
+    l14_decisions = sum(1 for d in last_14 if d in decision_dates)
+    sr14 = round(l14_decisions / len(last_14) * 100, 1) if last_14 else 0.0
+
+    return sr, sr14
+
+
 def _get_goalie_season_stats(
     conn: sqlite3.Connection, player_id: int, season: str
 ) -> dict:
@@ -254,6 +340,11 @@ def _get_goalie_season_stats(
     ).fetchone()
 
     gp = gp_row["games_played"] if gp_row else 0
+
+    # Start rate: decisions / dressed games (games as starter or backup)
+    start_rate, start_rate_l14 = _calc_goalie_start_rates(
+        conn, player_id, season
+    )
 
     if totals is None and gp == 0:
         return {}
@@ -289,6 +380,8 @@ def _get_goalie_season_stats(
         "games_played": gp,
         "fantasy_points": round(fpts, 2),
         "fpts_per_game": fpts_per_game,
+        "start_rate": start_rate,
+        "start_rate_l14": start_rate_l14,
     }
 
 
@@ -412,6 +505,8 @@ def get_my_roster(
                 "shutouts": stats.get("shutouts", 0),
                 "gaa": stats.get("gaa", 0.0),
                 "sv_pct": stats.get("sv_pct", 0.0),
+                "start_rate": stats.get("start_rate", 0.0),
+                "start_rate_l14": stats.get("start_rate_l14", 0.0),
             })
         else:
             entry.update({
@@ -586,6 +681,8 @@ def search_free_agents(
                 "gaa": stats.get("gaa", 0.0),
                 "sv_pct": stats.get("sv_pct", 0.0),
                 "peripheral_fpg": 0.0,
+                "start_rate": stats.get("start_rate", 0.0),
+                "start_rate_l14": stats.get("start_rate_l14", 0.0),
             })
         else:
             hits = stats.get("hits", 0)
@@ -984,6 +1081,32 @@ def get_schedule_analysis(
         for r in rows
     ]
 
+    # Enrich games with opponent team stats
+    opp_abbrevs = list({g["opponent"] for g in games if g["opponent"]})
+    if opp_abbrevs:
+        placeholders = ",".join("?" for _ in opp_abbrevs)
+        opp_rows = conn.execute(
+            f"SELECT team, wins, losses, ot_losses, points, "
+            f"goals_for_per_game, goals_against_per_game, l10_record, l14_record, streak "
+            f"FROM nhl_team_stats WHERE season = ? AND team IN ({placeholders})",
+            (season, *opp_abbrevs),
+        ).fetchall()
+        opp_stats = {
+            r["team"]: {
+                "rec": f"{r['wins']}-{r['losses']}-{r['ot_losses']}",
+                "pts": r["points"],
+                "gf_g": round(r["goals_for_per_game"], 2),
+                "ga_g": round(r["goals_against_per_game"], 2),
+                "l10": r["l10_record"],
+                "l14": r["l14_record"],
+                "streak": r["streak"],
+            }
+            for r in opp_rows
+        }
+        for g in games:
+            if g["opponent"] in opp_stats:
+                g["opp"] = opp_stats[g["opponent"]]
+
     # Detect back-to-backs
     back_to_backs = []
     dates = [g["game_date"] for g in games]
@@ -1043,6 +1166,34 @@ def get_league_standings(conn: sqlite3.Connection) -> list[dict]:
         results.append(entry)
 
     return results
+
+
+def get_nhl_standings(
+    conn: sqlite3.Connection,
+    season: str,
+    team: str | None = None,
+) -> list[dict]:
+    """Get NHL team standings and performance stats.
+
+    Args:
+        conn: Database connection.
+        season: Season string.
+        team: Optional 3-letter abbreviation to filter to one team.
+
+    Returns:
+        List of team stat dicts ordered by points descending.
+    """
+    if team:
+        rows = conn.execute(
+            "SELECT * FROM nhl_team_stats WHERE season = ? AND team = ?",
+            (season, team.upper()),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM nhl_team_stats WHERE season = ? ORDER BY points DESC",
+            (season,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_injuries(

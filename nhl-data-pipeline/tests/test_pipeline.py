@@ -1120,3 +1120,30 @@ class TestSafePrint:
         with patch("builtins.print", side_effect=[err, None]) as mock_print:
             _safe_print("Flame of Ud\u00fbn")
             assert mock_print.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Team stats pipeline step
+# ---------------------------------------------------------------------------
+
+class TestTeamStats:
+    """Tests for _run_team_stats pipeline step."""
+
+    def test_team_stats_step_registered(self) -> None:
+        """team-stats is in PIPELINE_STEPS and _STEP_RUNNERS."""
+        assert "team-stats" in PIPELINE_STEPS
+        assert "team-stats" in _STEP_RUNNERS
+
+    @patch("pipeline.fetch_nhl_standings")
+    def test_run_team_stats(self, mock_fetch, db: sqlite3.Connection) -> None:
+        """_run_team_stats fetches and saves standings."""
+        mock_fetch.return_value = [{
+            "team": "TOR", "games_played": 60,
+            "wins": 30, "losses": 20, "ot_losses": 10, "points": 70,
+            "goals_for": 180, "goals_against": 190,
+            "goals_for_per_game": 3.0, "goals_against_per_game": 3.17,
+            "l10_record": "5-3-2", "streak": "L6", "division": "Atlantic",
+        }]
+        result = _STEP_RUNNERS["team-stats"](db, "20252026")
+        assert result["teams_updated"] == 1
+        mock_fetch.assert_called_once()

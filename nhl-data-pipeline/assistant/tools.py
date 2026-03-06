@@ -235,6 +235,31 @@ TOOLS = [
         },
     },
     {
+        "name": "get_nhl_standings",
+        "description": (
+            "Get real NHL team standings and performance stats. "
+            "Returns every NHL team's record (W-L-OTL), points, "
+            "goals for per game (GF/G), goals against per game (GA/G), "
+            "last-10 record, last-14 record, current streak, and division. "
+            "Use this to check if a team is actually good/bad, "
+            "scoring a lot, or has a strong/weak defense. "
+            "Do NOT guess team performance from memory — always use this tool."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "team": {
+                    "type": "string",
+                    "description": (
+                        "Optional 3-letter team abbreviation to filter to one team "
+                        "(e.g. 'TOR'). Omit to get all 32 teams."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "get_injuries",
         "description": (
             "Get injury report. Can show injuries for the user's roster, "
@@ -599,6 +624,11 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
         if tool_name == "get_league_standings":
             data = queries.get_league_standings(conn)
             return formatters.format_standings(data)
+
+        if tool_name == "get_nhl_standings":
+            team = tool_input.get("team")
+            data = queries.get_nhl_standings(conn, season, team=team)
+            return formatters.format_nhl_standings(data)
 
         if tool_name == "get_injuries":
             scope = tool_input.get("scope", "my_roster")

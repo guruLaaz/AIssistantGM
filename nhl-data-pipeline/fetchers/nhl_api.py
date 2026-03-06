@@ -464,6 +464,80 @@ def fetch_all_goalie_seasontotals_bulk(
     return stats
 
 
+# ---------------------------------------------------------------------------
+# NHL team standings
+# ---------------------------------------------------------------------------
+
+def fetch_nhl_standings(
+    session: requests.Session | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch current NHL standings from the Web API.
+
+    Returns one row per team (32 total) with record, goals, L10, streak.
+    """
+    if session is None:
+        session = requests.Session()
+
+    logger.info("Fetching NHL standings...")
+    response = _api_get(session, f"{NHL_API_BASE}/standings/now")
+    data = response.json()
+    standings = data.get("standings", [])
+    logger.info("  Got %d team standings rows", len(standings))
+
+    result: list[dict[str, Any]] = []
+    for t in standings:
+        gp = t.get("gamesPlayed", 0) or 1  # avoid division by zero
+        gf = t.get("goalFor", 0)
+        ga = t.get("goalAgainst", 0)
+        result.append({
+            "team": t.get("teamAbbrev", {}).get("default", ""),
+            "games_played": t.get("gamesPlayed", 0),
+            "wins": t.get("wins", 0),
+            "losses": t.get("losses", 0),
+            "ot_losses": t.get("otLosses", 0),
+            "points": t.get("points", 0),
+            "goals_for": gf,
+            "goals_against": ga,
+            "goals_for_per_game": round(gf / gp, 2),
+            "goals_against_per_game": round(ga / gp, 2),
+            "l10_record": f"{t.get('l10Wins', 0)}-{t.get('l10Losses', 0)}-{t.get('l10OtLosses', 0)}",
+            "streak": f"{t.get('streakCode', '')}{t.get('streakCount', '')}",
+            "division": t.get("divisionName", ""),
+        })
+
+    return result
+
+
+def save_nhl_standings(
+    conn: sqlite3.Connection,
+    season: str,
+    standings: list[dict[str, Any]],
+) -> int:
+    """Save NHL standings to nhl_team_stats table.
+
+    Returns number of rows saved.
+    """
+    for t in standings:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO nhl_team_stats
+                (team, season, games_played, wins, losses, ot_losses, points,
+                 goals_for, goals_against, goals_for_per_game, goals_against_per_game,
+                 l10_record, l14_record, streak, division)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                t["team"], season, t["games_played"],
+                t["wins"], t["losses"], t["ot_losses"], t["points"],
+                t["goals_for"], t["goals_against"],
+                t["goals_for_per_game"], t["goals_against_per_game"],
+                t["l10_record"], t.get("l14_record"), t["streak"], t["division"],
+            ),
+        )
+    conn.commit()
+    return len(standings)
+
+
 def fetch_roster(
     team_abbrev: str,
     session: requests.Session | None = None
@@ -794,15 +868,30 @@ def fetch_team_schedule(
         if home_team == team_abbrev:
             home_away = "home"
             opponent = away_team
+            team_score = game.get("homeTeam", {}).get("score")
+            opp_score = game.get("awayTeam", {}).get("score")
         else:
             home_away = "away"
             opponent = home_team
+            team_score = game.get("awayTeam", {}).get("score")
+            opp_score = game.get("homeTeam", {}).get("score")
+
+        # Determine result for completed games
+        result = None
+        if game.get("gameState") == "OFF" and team_score is not None and opp_score is not None:
+            period_type = game.get("gameOutcome", {}).get("lastPeriodType", "REG")
+            if team_score > opp_score:
+                result = "W"
+            elif period_type in ("OT", "SO"):
+                result = "OTL"
+            else:
+                result = "L"
 
         games.append({
             "game_date": game.get("gameDate"),
             "opponent": opponent,
             "home_away": home_away,
-            "result": None,  # Can be populated from game outcome if needed
+            "result": result,
         })
 
     return games

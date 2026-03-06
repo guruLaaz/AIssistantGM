@@ -33,6 +33,20 @@ Note: A shutout win = Win (2) + Shutout (1) = 3 total points.
 - Consider GP limits when evaluating roster decisions late in the season
 - **Trade deadline urgency:** When the trade deadline is within 7 days, treat it as a hard constraint. Do NOT advise "wait and see", "save for insurance", or "hold your claim" for pickups or trades — other managers will claim desirable players first, and no trades are possible after the deadline. NHL trade deadline moves (players changing teams) affect deployment but should be a reason to act sooner, not later. Recommend decisive action and flag the deadline as a reason to move now. A claim "saved for insurance" near the deadline is almost always a wasted claim — the best available FAs disappear daily, and a marginal upgrade NOW is worth more than a hypothetical replacement LATER when the pool is depleted.
 
+## NHL Team Data
+
+- Use get_nhl_standings to check actual team performance — NEVER guess from training data
+- Key fields: GF/G (goals for per game), GA/G (goals against per game), L10 record, streak
+- Schedule analysis (get_schedule_analysis) includes opponent records and GF/G for each upcoming game
+- When evaluating a player, consider their team's offensive output (high GF/G = more scoring chances)
+
+## Goalie-Specific Fields
+
+- **sr** (start rate %): decisions (W/L/OTL) divided by dressed games (games as starter or backup). Excludes injury absences automatically
+- **sr14** (start rate last 14 dressed games): same metric over the goalie's last 14 games on the roster — shows recent usage trend
+- A goalie with sr=90%+ is an established starter; sr=50-70% suggests a timeshare; sr<50% is a backup
+- Compare sr vs sr14 to detect role changes: sr14 >> sr means the goalie is getting MORE starts recently
+
 ## Important Notes
 
 - Fantasy points per game (FP/G) is the primary evaluation metric

@@ -32,6 +32,8 @@ from fetchers.nhl_api import (
     save_goalie_stats,
     save_skater_stats,
     save_team_schedule,
+    fetch_nhl_standings,
+    save_nhl_standings,
 )
 from assistant.scoring import calc_skater_fpts
 from fetchers.fantrax_league import sync_fantrax_league
@@ -49,8 +51,8 @@ DB_PATH = Path(__file__).parent / "db" / "nhl_data.db"
 LOG_DIR = Path(__file__).parent / "logs"
 
 PIPELINE_STEPS = [
-    "rosters", "schedules", "gamelogs", "seasontotals", "injuries",
-    "lines", "backfill-news", "fantrax-league",
+    "rosters", "schedules", "gamelogs", "seasontotals", "team-stats",
+    "injuries", "lines", "backfill-news", "fantrax-league",
 ]
 STEP_ALIASES: dict[str, list[str]] = {
     "stats": ["gamelogs", "seasontotals"],
@@ -268,11 +270,49 @@ def _run_fantrax_league(conn, season):
     return sync_fantrax_league(conn)
 
 
+def _compute_l14_records(conn, season):
+    """Compute last-14-games W-L-OTL record for each team from team_games."""
+    teams = conn.execute(
+        "SELECT DISTINCT team FROM nhl_team_stats WHERE season = ?", (season,)
+    ).fetchall()
+    updated = 0
+    for row in teams:
+        team = row["team"]
+        recent = conn.execute(
+            "SELECT result FROM team_games "
+            "WHERE team = ? AND season = ? AND result IS NOT NULL "
+            "ORDER BY game_date DESC LIMIT 14",
+            (team, season),
+        ).fetchall()
+        if not recent:
+            continue
+        w = sum(1 for r in recent if r["result"] == "W")
+        l = sum(1 for r in recent if r["result"] == "L")
+        otl = sum(1 for r in recent if r["result"] == "OTL")
+        l14 = f"{w}-{l}-{otl}"
+        conn.execute(
+            "UPDATE nhl_team_stats SET l14_record = ? WHERE team = ? AND season = ?",
+            (l14, team, season),
+        )
+        updated += 1
+    conn.commit()
+    return updated
+
+
+def _run_team_stats(conn, season):
+    standings = fetch_nhl_standings()
+    count = save_nhl_standings(conn, season, standings)
+    l14_count = _compute_l14_records(conn, season)
+    logger.info("Computed L14 records for %d teams", l14_count)
+    return {"teams_updated": count}
+
+
 _STEP_RUNNERS: dict[str, Any] = {
     "rosters": _run_rosters,
     "schedules": _run_schedules,
     "gamelogs": _run_gamelogs,
     "seasontotals": _run_seasontotals,
+    "team-stats": _run_team_stats,
     "injuries": _run_injuries,
     "lines": _run_lines,
     "backfill-news": _run_backfill_news,
@@ -544,6 +584,7 @@ _STEP_LABELS = {
     "schedules": ("games_saved", "games"),
     "gamelogs": (None, "game logs"),
     "seasontotals": (None, "players updated"),
+    "team-stats": ("teams_updated", "teams"),
     "injuries": ("injuries_upserted", "injuries"),
     "lines": ("players_saved", "line assignments"),
     "backfill-news": ("new_inserted", "articles"),

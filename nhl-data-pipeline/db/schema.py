@@ -21,7 +21,7 @@ class PlayerDict(TypedDict, total=False):
 
 
 def init_db(db_path: Path) -> None:
-    """Create all 9 tables if they don't exist.
+    """Create all tables if they don't exist.
 
     Idempotent - safe to call multiple times.
 
@@ -107,6 +107,29 @@ def init_db(db_path: Path) -> None:
             home_away TEXT,
             result TEXT,
             UNIQUE (team, season, game_date)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS nhl_team_stats (
+            team TEXT NOT NULL,
+            season TEXT NOT NULL,
+            games_played INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            ot_losses INTEGER DEFAULT 0,
+            points INTEGER DEFAULT 0,
+            goals_for INTEGER DEFAULT 0,
+            goals_against INTEGER DEFAULT 0,
+            goals_for_per_game REAL DEFAULT 0,
+            goals_against_per_game REAL DEFAULT 0,
+            l10_record TEXT,
+            l14_record TEXT,
+            streak TEXT,
+            division TEXT,
+            UNIQUE (team, season)
         )
         """
     )
@@ -260,6 +283,12 @@ def init_db(db_path: Path) -> None:
         cursor.execute(
             "ALTER TABLE skater_stats ADD COLUMN pp_toi INTEGER NOT NULL DEFAULT 0"
         )
+
+    # Migration: add l14_record to nhl_team_stats if missing
+    cursor.execute("PRAGMA table_info(nhl_team_stats)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if columns and "l14_record" not in columns:
+        cursor.execute("ALTER TABLE nhl_team_stats ADD COLUMN l14_record TEXT")
 
     conn.commit()
     conn.close()

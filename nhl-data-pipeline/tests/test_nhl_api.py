@@ -1014,6 +1014,51 @@ class TestTeamSchedule:
             assert games[1]["opponent"] == "VAN"
             assert games[1]["home_away"] == "away"
 
+    def test_fetch_team_schedule_extracts_results(self) -> None:
+        """Extracts W/L/OTL results from completed games."""
+        mock_json = {
+            "games": [
+                {  # Win in regulation
+                    "gameDate": "2024-01-15",
+                    "awayTeam": {"abbrev": "CGY", "score": 2},
+                    "homeTeam": {"abbrev": "EDM", "score": 4},
+                    "gameState": "OFF",
+                    "gameOutcome": {"lastPeriodType": "REG"},
+                },
+                {  # OTL (lost in OT)
+                    "gameDate": "2024-01-17",
+                    "awayTeam": {"abbrev": "EDM", "score": 2},
+                    "homeTeam": {"abbrev": "VAN", "score": 3},
+                    "gameState": "OFF",
+                    "gameOutcome": {"lastPeriodType": "OT"},
+                },
+                {  # Loss in regulation
+                    "gameDate": "2024-01-19",
+                    "awayTeam": {"abbrev": "DAL", "score": 5},
+                    "homeTeam": {"abbrev": "EDM", "score": 1},
+                    "gameState": "OFF",
+                    "gameOutcome": {"lastPeriodType": "REG"},
+                },
+                {  # Future game (no result)
+                    "gameDate": "2024-04-15",
+                    "awayTeam": {"abbrev": "EDM"},
+                    "homeTeam": {"abbrev": "LAK"},
+                    "gameState": "FUT",
+                },
+            ]
+        }
+        with patch("fetchers.nhl_api.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get.return_value = make_mock_response(mock_json)
+            mock_session_cls.return_value = mock_session
+
+            games = fetch_team_schedule("EDM", "20232024")
+
+            assert games[0]["result"] == "W"
+            assert games[1]["result"] == "OTL"
+            assert games[2]["result"] == "L"
+            assert games[3]["result"] is None
+
     def test_save_team_schedule_no_duplicates(self, db: sqlite3.Connection) -> None:
         """Re-running inserts same games doesn't create duplicates (INSERT OR REPLACE)."""
         games = [
@@ -2001,3 +2046,90 @@ class TestDiscoverMissingPlayers:
         """Live: discovers at least some players not on current rosters."""
         discovered = discover_missing_players(db, "20252026", rate_limit=0.1)
         assert discovered > 50  # Should find ~146 missing players
+
+
+# ---------------------------------------------------------------------------
+# NHL standings
+# ---------------------------------------------------------------------------
+
+
+class TestFetchNhlStandings:
+    """Tests for fetch_nhl_standings and save_nhl_standings."""
+
+    def test_parses_standings_response(self) -> None:
+        """Parses Web API standings response into team dicts."""
+        from fetchers.nhl_api import fetch_nhl_standings
+
+        mock_data = {
+            "standings": [
+                {
+                    "teamAbbrev": {"default": "TOR"},
+                    "gamesPlayed": 60,
+                    "wins": 30, "losses": 20, "otLosses": 10,
+                    "points": 70,
+                    "goalFor": 180, "goalAgainst": 190,
+                    "l10Wins": 5, "l10Losses": 3, "l10OtLosses": 2,
+                    "streakCode": "L", "streakCount": 6,
+                    "divisionName": "Atlantic",
+                },
+            ],
+        }
+
+        mock_response = Mock()
+        mock_response.json.return_value = mock_data
+        with patch("fetchers.nhl_api._api_get", return_value=mock_response):
+            result = fetch_nhl_standings()
+
+        assert len(result) == 1
+        t = result[0]
+        assert t["team"] == "TOR"
+        assert t["wins"] == 30
+        assert t["goals_for"] == 180
+        assert t["goals_for_per_game"] == 3.0
+        assert t["goals_against_per_game"] == round(190 / 60, 2)
+        assert t["l10_record"] == "5-3-2"
+        assert t["streak"] == "L6"
+        assert t["division"] == "Atlantic"
+
+    def test_save_nhl_standings(self, db: sqlite3.Connection) -> None:
+        """Saves standings to nhl_team_stats table."""
+        from fetchers.nhl_api import save_nhl_standings
+
+        standings = [
+            {
+                "team": "TOR", "games_played": 60,
+                "wins": 30, "losses": 20, "ot_losses": 10, "points": 70,
+                "goals_for": 180, "goals_against": 190,
+                "goals_for_per_game": 3.0, "goals_against_per_game": 3.17,
+                "l10_record": "5-3-2", "streak": "L6", "division": "Atlantic",
+            },
+        ]
+        count = save_nhl_standings(db, "20252026", standings)
+        assert count == 1
+
+        row = db.execute(
+            "SELECT * FROM nhl_team_stats WHERE team = 'TOR'"
+        ).fetchone()
+        assert row["wins"] == 30
+        assert row["streak"] == "L6"
+
+    def test_save_nhl_standings_upsert(self, db: sqlite3.Connection) -> None:
+        """Second save overwrites existing row."""
+        from fetchers.nhl_api import save_nhl_standings
+
+        standings = [{
+            "team": "TOR", "games_played": 60,
+            "wins": 30, "losses": 20, "ot_losses": 10, "points": 70,
+            "goals_for": 180, "goals_against": 190,
+            "goals_for_per_game": 3.0, "goals_against_per_game": 3.17,
+            "l10_record": "5-3-2", "streak": "L6", "division": "Atlantic",
+        }]
+        save_nhl_standings(db, "20252026", standings)
+
+        standings[0]["wins"] = 31
+        standings[0]["streak"] = "W1"
+        save_nhl_standings(db, "20252026", standings)
+
+        row = db.execute("SELECT * FROM nhl_team_stats WHERE team = 'TOR'").fetchone()
+        assert row["wins"] == 31
+        assert row["streak"] == "W1"
