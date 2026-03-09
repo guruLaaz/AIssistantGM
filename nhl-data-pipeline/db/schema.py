@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+
+from config.infra_constants import DB_TIMEOUT
 from typing import Any, TypedDict
 
 
@@ -304,7 +306,7 @@ def get_db(db_path: Path) -> sqlite3.Connection:
     Returns:
         Connection with row_factory=sqlite3.Row for column-name access.
     """
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = sqlite3.connect(db_path, timeout=DB_TIMEOUT)
     conn.row_factory = sqlite3.Row
     return conn
 

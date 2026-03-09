@@ -24,6 +24,7 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
+from config.infra_constants import HTTP_TIMEOUT, ROTOWIRE_SEARCH_DELAY
 from db.schema import get_db, init_db, upsert_player
 
 logger = logging.getLogger("pipeline.rotowire")
@@ -294,7 +295,7 @@ def fetch_injuries(
         session = requests.Session()
 
     logger.debug("Fetching injuries from Rotowire")
-    response = session.get(INJURY_URL, headers=BROWSER_HEADERS, timeout=30)
+    response = session.get(INJURY_URL, headers=BROWSER_HEADERS, timeout=HTTP_TIMEOUT)
     response.raise_for_status()
 
     data = response.json()
@@ -378,7 +379,7 @@ def search_rotowire_player(
         session = requests.Session()
 
     response = session.get(
-        SEARCH_URL, params={"searchTerm": name}, timeout=30
+        SEARCH_URL, params={"searchTerm": name}, timeout=HTTP_TIMEOUT
     )
     response.raise_for_status()
 
@@ -431,7 +432,7 @@ def discover_rotowire_ids(
             continue
 
         if i > 0:
-            time.sleep(0.5)
+            time.sleep(ROTOWIRE_SEARCH_DELAY)
 
         try:
             results = search_rotowire_player(full_name, session)

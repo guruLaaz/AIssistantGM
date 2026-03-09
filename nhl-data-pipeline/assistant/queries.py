@@ -22,26 +22,29 @@ from assistant.player_match import (
     resolve_fantrax_to_nhl,
     get_rostered_nhl_ids,
 )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-_FORWARD_POSITIONS = {"C", "L", "R"}
-
-# League GP limits per position group (roster slots × 82 games)
-GP_LIMITS = {"F": 984, "D": 492, "G": 82}
-
-# Salary cap: NHL cap ($95.5M) + 15%
-SALARY_CAP = 109_825_000
-
-# Bayesian regression: at K games, 50/50 weight on observed vs prior (pool median).
-REGRESSION_K = 25
-
-# Fantrax roster slot status IDs
-IR_SLOT_STATUS = "3"  # Fantrax status_id for IR slot
-IR_SLOT_LIMIT = 1     # League has 1 IR slot per team
+from config.fantasy_constants import (
+    FORWARD_POSITIONS as _FORWARD_POSITIONS,
+    GP_LIMITS,
+    SALARY_CAP,
+    REGRESSION_K,
+    IR_SLOT_STATUS,
+    IR_SLOT_LIMIT,
+    RECENT_GAMES_WINDOW,
+    PERIPHERAL_STATS_WINDOW,
+    HOT_THRESHOLD_MULTIPLIER,
+    COLD_THRESHOLD_MULTIPLIER,
+    TREND_HOT_THRESHOLD_7_DAY,
+    TREND_COLD_THRESHOLD_7_DAY,
+    GOALIE_MAX_GAP_GAMES,
+    TRADE_SEND_PLAYER_APPEARANCE_CAP,
+    INJURY_SEASON_ENDING_DAYS,
+    INJURY_MODERATE_DAYS,
+    CROSS_POSITION_GP_THRESHOLD,
+    FORWARD_PLAYABLE_TOI_PER_GAME,
+    DEFENSEMAN_PLAYABLE_TOI_PER_GAME,
+    TRADE_TARGET_ELIGIBLE_EV_LINES,
+    TRADE_TARGET_ELIGIBLE_PP_UNITS,
+)
 
 def _is_goalie(conn: sqlite3.Connection, player_id: int) -> bool:
     """Check if a player is a goalie."""
@@ -114,7 +117,7 @@ def _get_recent_pp_toi(
     conn: sqlite3.Connection,
     player_id: int,
     season: str,
-    n: int = 30,
+    n: int = PERIPHERAL_STATS_WINDOW,
 ) -> list[int]:
     """Return per-game PP TOI (seconds) for the last *n* games, newest first."""
     rows = conn.execute(
@@ -246,7 +249,7 @@ def _calc_goalie_start_rates(
     Returns:
         (season_start_rate, l14_start_rate) as percentages.
     """
-    MAX_GAP = 6  # consecutive missed team games before assuming injury
+    MAX_GAP = GOALIE_MAX_GAP_GAMES
 
     # Get goalie's team
     player = conn.execute(
@@ -313,7 +316,7 @@ def _calc_goalie_start_rates(
     sr = round(total_decisions / len(dressed) * 100, 1)
 
     # L14: last 14 dressed games for this goalie
-    last_14 = dressed[-14:]
+    last_14 = dressed[-RECENT_GAMES_WINDOW:]
     l14_decisions = sum(1 for d in last_14 if d in decision_dates)
     sr14 = round(l14_decisions / len(last_14) * 100, 1) if last_14 else 0.0
 
@@ -520,13 +523,13 @@ def get_my_roster(
 
         # Recent trend and line context
         fpts_list = _get_recent_fpts_list(conn, nhl_id, season, is_goalie=goalie)
-        recent_14 = fpts_list[:14]
+        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
         recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
         entry["recent_14_fpg"] = recent_14_fpg
         season_fpg = entry["fpts_per_game"]
-        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.20:
+        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
             entry["trend"] = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.80:
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
             entry["trend"] = "cold"
         else:
             entry["trend"] = "neutral"
@@ -701,13 +704,13 @@ def search_free_agents(
 
         # Hot/cold trend based on last 14 games vs season average
         fpts_list = _get_recent_fpts_list(conn, pid, season, is_goalie=goalie)
-        recent_14 = fpts_list[:14]
+        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
         recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
         entry["recent_14_fpg"] = recent_14_fpg
         season_fpg = entry["fpts_per_game"]
-        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.20:
+        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
             entry["trend"] = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.80:
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
             entry["trend"] = "cold"
         else:
             entry["trend"] = "neutral"
@@ -939,12 +942,12 @@ def get_player_trends(
 
     season_avg = avg(all_fpts)
     last_7_avg = avg(all_fpts[:7])
-    last_14_avg = avg(all_fpts[:14])
+    last_14_avg = avg(all_fpts[:RECENT_GAMES_WINDOW])
     last_30_avg = avg(all_fpts[:30])
 
-    if season_avg > 0 and last_7_avg > season_avg * 1.25:
+    if season_avg > 0 and last_7_avg > season_avg * TREND_HOT_THRESHOLD_7_DAY:
         trend = "hot"
-    elif season_avg > 0 and last_7_avg < season_avg * 0.75:
+    elif season_avg > 0 and last_7_avg < season_avg * TREND_COLD_THRESHOLD_7_DAY:
         trend = "cold"
     else:
         trend = "neutral"
@@ -953,7 +956,7 @@ def get_player_trends(
         "player": resolved,
         "windows": {
             "last_7": {"fpts_per_game": last_7_avg, "games": min(7, len(all_fpts))},
-            "last_14": {"fpts_per_game": last_14_avg, "games": min(14, len(all_fpts))},
+            "last_14": {"fpts_per_game": last_14_avg, "games": min(RECENT_GAMES_WINDOW, len(all_fpts))},
             "last_30": {"fpts_per_game": last_30_avg, "games": min(30, len(all_fpts))},
             "season": {"fpts_per_game": season_avg, "games": len(all_fpts)},
         },
@@ -1327,16 +1330,16 @@ def get_trade_candidates(
 
         last_7_fpg = round(sum(fpts_list[:7]) / 7, 2)
 
-        if last_7_fpg <= season_fpg * 1.20:
+        if last_7_fpg <= season_fpg * HOT_THRESHOLD_MULTIPLIER:
             continue
 
         trend_pct = round((last_7_fpg / season_fpg - 1) * 100, 1)
 
-        recent_14 = fpts_list[:14]
+        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
         recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
-        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.20:
+        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
             trend = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.80:
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
             trend = "cold"
         else:
             trend = "neutral"
@@ -1416,29 +1419,36 @@ def get_trade_candidates(
             continue
         tpg = stats.get("toi_per_game", 0)
         pos = resolved["position"]
-        # Forwards > 960s (16 min/game), Defensemen > 1200s (20 min/game)
-        if pos in ("C", "L", "R") and tpg > 960:
+        if pos in ("C", "L", "R") and tpg > FORWARD_PLAYABLE_TOI_PER_GAME:
             pass  # qualifies
-        elif pos == "D" and tpg > 1200:
+        elif pos == "D" and tpg > DEFENSEMAN_PLAYABLE_TOI_PER_GAME:
             pass  # qualifies
         else:
+            continue
+
+        # Filter by line deployment: must be on an eligible EV line or PP unit
+        line_ctx = _get_line_context(conn, resolved["id"])
+        ev = line_ctx["ev_line"] if line_ctx else None
+        pp = line_ctx["pp_unit"] if line_ctx else None
+        if not (
+            (ev is not None and ev in TRADE_TARGET_ELIGIBLE_EV_LINES)
+            or (pp is not None and pp in TRADE_TARGET_ELIGIBLE_PP_UNITS)
+        ):
             continue
 
         all_fpts = _get_recent_fpts_list(conn, resolved["id"], season, False)
         last_7 = all_fpts[:7]
         last_7_fpg = round(sum(last_7) / len(last_7), 2) if last_7 else 0.0
-        recent_14 = all_fpts[:14]
+        recent_14 = all_fpts[:RECENT_GAMES_WINDOW]
         recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
-        if sfpg > 0 and recent_14_fpg > sfpg * 1.20:
+        if sfpg > 0 and recent_14_fpg > sfpg * HOT_THRESHOLD_MULTIPLIER:
             trend = "hot"
-        elif sfpg > 0 and recent_14_fpg < sfpg * 0.80:
+        elif sfpg > 0 and recent_14_fpg < sfpg * COLD_THRESHOLD_MULTIPLIER:
             trend = "cold"
         else:
             trend = "neutral"
 
         injury = _get_injury_status(conn, resolved["id"])
-
-        line_ctx = _get_line_context(conn, resolved["id"])
 
         news_rows = conn.execute(
             "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
@@ -1525,13 +1535,13 @@ def get_drop_candidates(
         gp = stats.get("games_played", 0) if stats else 0
 
         fpts_list = _get_recent_fpts_list(conn, nhl_id, season, is_goalie=goalie)
-        recent_14 = fpts_list[:14]
+        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
         recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
 
         # Trend: same 20% threshold as other 14-game comparisons
-        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.20:
+        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
             trend = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.80:
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
             trend = "cold"
         else:
             trend = "neutral"
@@ -1691,12 +1701,12 @@ def suggest_trades(
         nhl_id = resolved["id"]
         goalie = resolved["position"] == "G"
         fpts_list = _get_recent_fpts_list(conn, nhl_id, season, is_goalie=goalie)
-        recent_14 = fpts_list[:14]
+        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
         recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
         season_fpg = player.get("fpts_per_game", 0.0)
-        if season_fpg > 0 and recent_14_fpg > season_fpg * 1.20:
+        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
             trend = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * 0.80:
+        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
             trend = "cold"
         else:
             trend = "neutral"
@@ -1837,7 +1847,7 @@ def suggest_trades(
         if key in seen:
             continue
         sender = s["send_player"]
-        if send_count.get(sender, 0) >= 2:
+        if send_count.get(sender, 0) >= TRADE_SEND_PLAYER_APPEARANCE_CAP:
             continue
         seen.add(key)
         send_count[sender] = send_count.get(sender, 0) + 1
@@ -2019,9 +2029,9 @@ def get_pickup_recommendations(
         injury = fa.get("injury")
         if injury:
             days_out = fa.get("days_out", 0)
-            if days_out > 60:
+            if days_out > INJURY_SEASON_ENDING_DAYS:
                 fa_est_games = 0  # likely season-ending
-            elif days_out > 30:
+            elif days_out > INJURY_MODERATE_DAYS:
                 fa_est_games = max(0, est_games - int(days_out / 3))
             # DTD / recently played: no reduction
         return {
@@ -2053,6 +2063,17 @@ def get_pickup_recommendations(
             "reason": reason,
         }
 
+    def _fa_has_eligible_deployment(fa: dict) -> bool:
+        """Check if a skater FA is on an eligible line/PP unit for claims."""
+        if fa.get("position") == "G":
+            return True  # goalies don't have line deployment
+        ev = fa.get("ev_line")
+        pp = fa.get("pp_unit")
+        return (
+            (ev is not None and ev in TRADE_TARGET_ELIGIBLE_EV_LINES)
+            or (pp is not None and pp in TRADE_TARGET_ELIGIBLE_PP_UNITS)
+        )
+
     # Build all possible (drop, pickup) pairs.
     # Use recent 14-game FP/G for both sides so the comparison reflects
     # current production, not season-long averages that mask role changes.
@@ -2064,6 +2085,8 @@ def get_pickup_recommendations(
         drop_recent_fpg = drop["recent_14_fpg"]
         est_games = games_per_player.get(drop_pg, 10)
         for fa in fa_by_pos.get(drop_pg, []):
+            if not _fa_has_eligible_deployment(fa):
+                continue
             fa_gp = fa.get("games_played", 0)
             prior = fa_pool_median.get(drop_pg, 0.0)
             fa_regressed = _regress_fpg(
@@ -2080,7 +2103,7 @@ def get_pickup_recommendations(
         drop_pg = _position_group(drop["position"])
         drop_limit = gp_limits_data.get(drop_pg, {}).get("limit", GP_LIMITS.get(drop_pg, 1))
         drop_gp_pct = gp_used[drop_pg] / drop_limit * 100 if drop_limit > 0 else 0
-        if drop_gp_pct < 75:
+        if drop_gp_pct < CROSS_POSITION_GP_THRESHOLD:
             continue
         drop_recent_fpg = drop["recent_14_fpg"]
         for target_pg in ("F", "D", "G"):
@@ -2090,6 +2113,8 @@ def get_pickup_recommendations(
                 continue
             est_games = games_per_player.get(target_pg, 10)
             for fa in fa_by_pos.get(target_pg, []):
+                if not _fa_has_eligible_deployment(fa):
+                    continue
                 fa_gp = fa.get("games_played", 0)
                 prior = fa_pool_median.get(target_pg, 0.0)
                 fa_regressed = _regress_fpg(
@@ -2137,9 +2162,9 @@ def get_pickup_recommendations(
 
             days_out = fa.get("days_out", 0)
             est = games_per_player.get(fa_pg, 10)
-            if days_out > 60:
+            if days_out > INJURY_SEASON_ENDING_DAYS:
                 ir_est_games = 0
-            elif days_out > 30:
+            elif days_out > INJURY_MODERATE_DAYS:
                 ir_est_games = max(0, est - int(days_out / 3))
             else:
                 ir_est_games = est

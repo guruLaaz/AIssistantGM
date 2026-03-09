@@ -1,15 +1,6 @@
 """Fantasy scoring calculations for the Hockeyclub league."""
 
-# Fantasy scoring constants
-SKATER_SCORING = {"goals": 1.0, "assists": 1.0, "blocks": 0.1, "hits": 0.1}
-GOALIE_SCORING = {
-    "goals": 1.0,
-    "assists": 1.0,
-    "wins": 2.0,
-    "shutouts": 1.0,
-    "ot_losses": 1.0,
-    "losses": 0.0,
-}
+from config.fantasy_constants import SKATER_SCORING, GOALIE_SCORING
 
 
 def calc_skater_fpts(goals: float, assists: float, blocks: float, hits: float) -> float:

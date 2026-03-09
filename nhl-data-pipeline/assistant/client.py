@@ -41,13 +41,14 @@ def _safe_json(obj: object) -> str:
     except Exception:
         return str(obj)
 
-MAX_TOKENS = 16_000
-_PROMPT_PATH = Path(__file__).parent / "system_prompt.txt"
+from config.infra_constants import (
+    MAX_TOKENS,
+    DEFAULT_MODEL as _DEFAULT_MODEL,
+    DEEP_MODEL as _DEEP_MODEL,
+    DEFAULT_THINKING_BUDGET as _DEFAULT_THINKING_BUDGET,
+)
 
-# Model and thinking configuration
-_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-_DEEP_MODEL = "claude-opus-4-6"
-_DEFAULT_THINKING_BUDGET = 4_096
+_PROMPT_PATH = Path(__file__).parent / "system_prompt.txt"
 
 
 class AssistantClient:

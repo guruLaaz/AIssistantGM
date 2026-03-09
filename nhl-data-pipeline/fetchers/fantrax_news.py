@@ -41,7 +41,8 @@ logger = logging.getLogger("pipeline.fantrax_news")
 
 FANTRAX_NEWS_URL = "https://www.fantrax.com/news/nhl/player-news"
 FANTRAX_LOGIN_URL = "https://www.fantrax.com/login"
-FANTRAX_API_URL = "https://www.fantrax.com/fxpa/req"
+from config.infra_constants import FANTRAX_API_URL, HTTP_TIMEOUT
+from config.fantasy_constants import STALE_SCROLL_THRESHOLD
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -360,7 +361,7 @@ def fetch_news_page(
 
                 if current_count == prev_count:
                     stale_count += 1
-                    if stale_count >= 3:
+                    if stale_count >= STALE_SCROLL_THRESHOLD:
                         logger.info(
                             "No new items for 3 scrolls, stopping at %d items",
                             current_count,
@@ -477,7 +478,7 @@ def fetch_news_api(
         FANTRAX_API_URL,
         params={"leagueId": config["league_id"]},
         json=payload,
-        timeout=30,
+        timeout=HTTP_TIMEOUT,
     )
     data = resp.json()
 

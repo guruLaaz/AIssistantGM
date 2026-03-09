@@ -269,7 +269,7 @@ def _run_lines(conn, season):
     return fetch_all_lines(conn)
 
 
-_BACKFILL_MAX_SCROLLS = 5000
+from config.infra_constants import BACKFILL_MAX_SCROLLS as _BACKFILL_MAX_SCROLLS
 
 
 def _run_backfill_news(conn, season):

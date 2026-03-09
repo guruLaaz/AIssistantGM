@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import requests
 
 from assistant import queries, formatters
+from config.infra_constants import BRAVE_SEARCH_URL, BRAVE_SEARCH_TIMEOUT, WEB_SEARCH_MIN_RESULTS, WEB_SEARCH_MAX_RESULTS
+from config.fantasy_constants import GP_WARNING_THRESHOLD
 
 logger = logging.getLogger("pipeline.tools")
 
@@ -418,9 +420,6 @@ TOOLS = [
 # Web search helper
 # ---------------------------------------------------------------------------
 
-BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
-
-
 def _web_search(query: str, num_results: int = 5) -> str:
     """Execute a web search via the Brave Search API."""
     api_key = os.environ.get("BRAVE_SEARCH_API_KEY")
@@ -431,7 +430,7 @@ def _web_search(query: str, num_results: int = 5) -> str:
             "Get a free API key at https://brave.com/search/api/"
         )
 
-    num_results = max(1, min(10, num_results))
+    num_results = max(WEB_SEARCH_MIN_RESULTS, min(WEB_SEARCH_MAX_RESULTS, num_results))
 
     try:
         response = requests.get(
@@ -447,7 +446,7 @@ def _web_search(query: str, num_results: int = 5) -> str:
                 "search_lang": "en",
                 "freshness": "pw",
             },
-            timeout=10,
+            timeout=BRAVE_SEARCH_TIMEOUT,
         )
         response.raise_for_status()
         data = response.json()
@@ -546,7 +545,7 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
                         f"  {g}: {used}/{limit} used "
                         f"({remaining} remaining) [{pct:.1f}%]"
                     )
-                    if pct >= 85:
+                    if pct >= GP_WARNING_THRESHOLD:
                         warnings.append(g)
                 if warnings:
                     groups = ", ".join(warnings)

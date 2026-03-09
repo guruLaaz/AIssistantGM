@@ -22,8 +22,15 @@ from utils.time import toi_to_seconds
 
 logger = logging.getLogger("pipeline.nhl_api")
 
-NHL_API_BASE = "https://api-web.nhle.com/v1"
-NHL_STATS_API_BASE = "https://api.nhle.com/stats/rest/en"
+from config.infra_constants import (
+    NHL_API_BASE,
+    NHL_STATS_API_BASE,
+    HTTP_TIMEOUT,
+    NHL_RATE_LIMIT as DEFAULT_RATE_LIMIT,
+    BACKOFF_MAX_RETRIES as _BACKOFF_MAX_RETRIES,
+    BACKOFF_BASE as _BACKOFF_BASE,
+    NHL_STATS_PAGE_SIZE,
+)
 
 ALL_TEAMS = [
     "ANA", "BOS", "BUF", "CGY", "CAR", "CHI", "COL", "CBJ", "DAL", "DET",
@@ -32,16 +39,12 @@ ALL_TEAMS = [
     "WSH", "WPG"
 ]
 
-DEFAULT_RATE_LIMIT = 0.2  # seconds between requests
-
-_BACKOFF_MAX_RETRIES = 4
-_BACKOFF_BASE = 1  # seconds; doubles each retry: 1, 2, 4, 8
 
 
 def _api_get(
     session: requests.Session,
     url: str,
-    timeout: int = 30,
+    timeout: int = HTTP_TIMEOUT,
 ) -> requests.Response:
     """GET with adaptive retry on HTTP 429.
 
@@ -84,7 +87,7 @@ def _paginate_stats_api(
     session: requests.Session,
     url: str,
     params: dict[str, str],
-    page_size: int = 100,
+    page_size: int = NHL_STATS_PAGE_SIZE,
 ) -> list[dict[str, Any]]:
     """Paginate through a Stats API endpoint, collecting all rows.
 

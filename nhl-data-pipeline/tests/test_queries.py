@@ -29,6 +29,7 @@ from assistant.queries import (
     _position_group,
     _get_fantasy_gp,
 )
+from config.fantasy_constants import FORWARD_PLAYABLE_TOI_PER_GAME
 
 
 @pytest.fixture
@@ -768,13 +769,19 @@ class TestHighToiUnderperformer:
             "INSERT INTO fantasy_roster_slots (team_id, player_name, position_short, status_id, salary) "
             "VALUES ('team2', 'Slow Forward', 'L', 'active', 2000000)"
         )
+        # Line deployment: L2/PP1 so the player passes the line filter
+        db.execute(
+            "INSERT INTO line_combinations "
+            "(player_id, team_abbrev, player_name, position, ev_line, pp_unit, updated_at) "
+            "VALUES (8888888, 'TST', 'Slow Forward', 'L', 2, 1, datetime('now'))"
+        )
         db.commit()
 
         candidates = get_trade_candidates(db, "team1", "20252026")
         high_toi = [c for c in candidates if c.get("signal") == "high_toi_underperformer"]
         assert len(high_toi) >= 1
         assert high_toi[0]["player_name"] == "Slow Forward"
-        assert high_toi[0]["toi_per_game"] > 960
+        assert high_toi[0]["toi_per_game"] > FORWARD_PLAYABLE_TOI_PER_GAME
 
     def test_trending_up_signal(self, db: sqlite3.Connection) -> None:
         """Existing trending-up candidates have signal = 'trending_up'."""

@@ -22,6 +22,8 @@ import requests
 from db.schema import get_db, init_db
 from fetchers.rotowire import match_player_name
 
+from config.infra_constants import DAILYFACEOFF_RATE_LIMIT
+
 logger = logging.getLogger("pipeline.dailyfaceoff")
 
 BASE_URL = "https://www.dailyfaceoff.com/teams"
@@ -62,7 +64,7 @@ TEAM_SLUGS: dict[str, str] = {
     "WPG": "winnipeg-jets",
 }
 
-DEFAULT_RATE_LIMIT = 2.0  # seconds between team requests
+DEFAULT_RATE_LIMIT = DAILYFACEOFF_RATE_LIMIT
 
 BROWSER_HEADERS = {
     "User-Agent": (

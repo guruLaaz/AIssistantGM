@@ -17,8 +17,14 @@ from typing import Any
 import requests
 
 from db.schema import get_db, init_db
-from fetchers.fantrax_news import (
+from config.infra_constants import (
     FANTRAX_API_URL,
+    HTTP_TIMEOUT,
+    FANTRAX_SALARY_PAGE_SIZE,
+    FANTRAX_MAX_SALARY_PAGES,
+    FANTRAX_PAGE_DELAY,
+)
+from fetchers.fantrax_news import (
     _load_env,
     _load_cookies_for_session,
 )
@@ -63,7 +69,7 @@ def _fantrax_api_call(
         FANTRAX_API_URL,
         params={"leagueId": league_id},
         json=payload,
-        timeout=30,
+        timeout=HTTP_TIMEOUT,
     )
     resp.raise_for_status()
 
@@ -609,7 +615,7 @@ def save_gp_per_position(
 def fetch_player_salaries(
     session: requests.Session,
     league_id: str,
-    max_pages: int = 20,
+    max_pages: int = FANTRAX_MAX_SALARY_PAGES,
 ) -> list[dict[str, Any]]:
     """Fetch all player salaries from the Fantrax players page.
 
@@ -633,7 +639,7 @@ def fetch_player_salaries(
             session, league_id, "getPlayerStats",
             extra_data={
                 "statusOrTeamFilter": "ALL",
-                "maxResultsPerPage": "500",
+                "maxResultsPerPage": FANTRAX_SALARY_PAGE_SIZE,
                 "pageNumber": str(page),
             },
         )
@@ -666,7 +672,7 @@ def fetch_player_salaries(
         if page >= total_pages:
             break
         page += 1
-        time.sleep(1)
+        time.sleep(FANTRAX_PAGE_DELAY)
 
     logger.info("Fetched %d total player salaries", len(results))
     return results
