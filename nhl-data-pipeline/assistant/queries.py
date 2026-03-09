@@ -919,6 +919,14 @@ def search_free_agents(
         results.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
         final = results[:limit]
 
+    # --- Filter: eligible line deployment (skip AHL/scratched skaters) ---
+    final = [
+        fa for fa in final
+        if fa.get("position") == "G"
+        or (fa.get("ev_line") is not None and fa["ev_line"] in TRADE_TARGET_ELIGIBLE_EV_LINES)
+        or (fa.get("pp_unit") is not None and fa["pp_unit"] in TRADE_TARGET_ELIGIBLE_PP_UNITS)
+    ]
+
     # --- Filter season-ending IR and cap remaining IR players ---
     ir_count = 0
     capped: list[dict] = []

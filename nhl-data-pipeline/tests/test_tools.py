@@ -157,6 +157,13 @@ def db(db_path: Path) -> sqlite3.Connection:
         "VALUES ('lg1', 'team2', 5, 35, 35, 70, 4000.0, 4100.0, 'L2', 70, 57.1)"
     )
 
+    # Line deployment for free agents (required by deployment filter)
+    conn.execute(
+        "INSERT INTO line_combinations "
+        "(player_id, team_abbrev, player_name, position, ev_line, pp_unit, updated_at) "
+        "VALUES (8479318, 'EDM', 'Leon Draisaitl', 'C', 1, 1, datetime('now'))"
+    )
+
     conn.commit()
     yield conn
     conn.close()

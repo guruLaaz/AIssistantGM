@@ -230,6 +230,13 @@ def db(db_path: Path) -> sqlite3.Connection:
         "VALUES ('EDM', '20252026', ?, 'SEA', 'home')", (next_week,)
     )
 
+    # --- Line deployment for free agents (required by deployment filter) ---
+    conn.execute(
+        "INSERT INTO line_combinations "
+        "(player_id, team_abbrev, player_name, position, ev_line, pp_unit, updated_at) "
+        "VALUES (8477934, 'EDM', 'Leon Draisaitl', 'C', 1, 1, datetime('now'))"
+    )
+
     conn.commit()
     return conn
 
@@ -2033,6 +2040,11 @@ class TestSearchFreeAgentsEdgeCases:
                 "hits, blocks, shots, plus_minus, pim, toi) "
                 f"VALUES (1111113, '{gd}', '20252026', 0, {g}, {a}, {g + a}, {h}, {b}, 5, 0, 0, 1000)"
             )
+        db.execute(
+            "INSERT INTO line_combinations "
+            "(player_id, team_abbrev, player_name, position, ev_line, pp_unit, updated_at) "
+            "VALUES (1111113, 'TST', 'Hot FA', 'C', 2, NULL, datetime('now'))"
+        )
         db.commit()
         fa = search_free_agents(db, "20252026", min_games=1)
         hot = next(p for p in fa if p["player_name"] == "Hot FA")
@@ -2343,6 +2355,11 @@ class TestPickupCrossPositionAndReasons:
             "(player_id, source, injury_type, status, updated_at) "
             "VALUES (1111114, 'rotowire', 'Knee', 'Day-to-Day', '2026-02-01')"
         )
+        db.execute(
+            "INSERT INTO line_combinations "
+            "(player_id, team_abbrev, player_name, position, ev_line, pp_unit, updated_at) "
+            "VALUES (1111114, 'TST', 'MidTerm Injured', 'C', 3, NULL, datetime('now'))"
+        )
 
         # Strong IR FA (picked as regular recommendation → skipped in IR stash)
         upsert_player(db, {
@@ -2368,6 +2385,11 @@ class TestPickupCrossPositionAndReasons:
             "INSERT INTO player_injuries "
             "(player_id, source, injury_type, status, updated_at) "
             "VALUES (1111116, 'rotowire', 'Shoulder', 'IR', '2026-02-20')"
+        )
+        db.execute(
+            "INSERT INTO line_combinations "
+            "(player_id, team_abbrev, player_name, position, ev_line, pp_unit, updated_at) "
+            "VALUES (1111116, 'TST', 'Strong IR FA', 'C', 2, 1, datetime('now'))"
         )
 
         db.commit()
