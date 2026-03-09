@@ -1,1 +1,0 @@
-"""Tests for Fantrax CLI."""
