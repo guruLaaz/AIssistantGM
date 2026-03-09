@@ -1078,3 +1078,82 @@ class TestFormatTradeSuggestions:
         assert t["send"] == "Player A"
         assert t["recv"] == "Player B"
         assert t["upgrade"] == 0.30
+
+
+class TestFormatFreeAgentsDropEnrichment:
+    """Tests for drop candidate / verdict fields in format_free_agents."""
+
+    def test_drops_and_verdict_present(self) -> None:
+        data = [{
+            "player_name": "Pickup FA", "team": "EDM",
+            "position": "C", "games_played": 50,
+            "goals": 20, "assists": 30, "hits": 40, "blocks": 15,
+            "fpts_per_game": 1.5, "injury": None,
+            "drop_candidates": [
+                {"player_name": "Drop A", "position": "C",
+                 "fpts_per_game": 0.5, "recent_14_fpg": 0.4, "net_fpg": 1.0,
+                 "verdict": "strong"},
+                {"player_name": "Drop B", "position": "L",
+                 "fpts_per_game": 0.6, "recent_14_fpg": 0.5, "net_fpg": 0.9,
+                 "verdict": "strong"},
+            ],
+        }]
+        result = _parse(format_free_agents(data))
+        p = result[0]
+        assert "drops" in p
+        assert len(p["drops"]) == 2
+        assert p["drops"][0]["name"] == "Drop A"
+        assert p["drops"][0]["net"] == 1.0
+        assert p["drops"][0]["verdict"] == "strong"
+        assert p["drops"][1]["name"] == "Drop B"
+        assert p["drops"][1]["verdict"] == "strong"
+
+    def test_no_drops_when_empty(self) -> None:
+        data = [{
+            "player_name": "FA", "team": "NYR",
+            "position": "C", "games_played": 30,
+            "goals": 10, "assists": 10, "hits": 20, "blocks": 10,
+            "fpts_per_game": 1.0, "injury": None,
+            "drop_candidates": [],
+            "verdict": "no room",
+        }]
+        result = _parse(format_free_agents(data))
+        p = result[0]
+        assert "drops" not in p
+        assert p["verdict"] == "no room"
+
+    def test_no_enrichment_keys_when_not_present(self) -> None:
+        """Backward compat: no drop_candidates key in data → no drops in output."""
+        data = [{
+            "player_name": "Plain FA", "team": "BOS",
+            "position": "D", "games_played": 40,
+            "goals": 5, "assists": 15, "hits": 60, "blocks": 80,
+            "fpts_per_game": 0.8, "injury": None,
+        }]
+        result = _parse(format_free_agents(data))
+        p = result[0]
+        assert "drops" not in p
+        assert "verdict" not in p
+
+    def test_drop_candidate_news_included(self) -> None:
+        """Drop candidates with news have it passed through to output."""
+        data = [{
+            "player_name": "FA", "team": "EDM",
+            "position": "C", "games_played": 50,
+            "goals": 20, "assists": 30, "hits": 40, "blocks": 15,
+            "fpts_per_game": 1.5, "injury": None,
+            "drop_candidates": [
+                {"player_name": "Drop A", "position": "C",
+                 "fpts_per_game": 0.5, "recent_14_fpg": 0.4, "net_fpg": 1.0,
+                 "verdict": "strong",
+                 "news": [{"date": "2026-03-01", "hl": "Demoted to 4th line"}]},
+                {"player_name": "Drop B", "position": "L",
+                 "fpts_per_game": 0.6, "recent_14_fpg": 0.5, "net_fpg": 0.9,
+                 "verdict": "strong"},
+            ],
+        }]
+        result = _parse(format_free_agents(data))
+        drops = result[0]["drops"]
+        assert "news" in drops[0]
+        assert drops[0]["news"][0]["hl"] == "Demoted to 4th line"
+        assert "news" not in drops[1]  # no news for Drop B

@@ -149,6 +149,23 @@ def format_free_agents(data: list[dict], claims_remaining: int | None = None) ->
         sal = p.get("salary", 0) or 0
         if sal > 0:
             row["sal"] = round(sal / 1e6, 1)
+        # Drop candidate enrichment (from VAR analysis)
+        drops = p.get("drop_candidates", [])
+        if drops:
+            drop_rows = []
+            for d in drops:
+                dr: dict = {
+                    "name": d["player_name"], "pos": _fpos(d["position"]),
+                    "fpg": d["fpts_per_game"], "net": d["net_fpg"],
+                    "verdict": d.get("verdict", ""),
+                }
+                if d.get("news"):
+                    dr["news"] = d["news"]
+                drop_rows.append(dr)
+            row["drops"] = drop_rows
+        verdict = p.get("verdict")
+        if verdict:
+            row["verdict"] = verdict  # "no room" when no drops available
         rows.append(row)
     if result:
         result["players"] = rows

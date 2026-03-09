@@ -34,6 +34,7 @@ DEFAULT_FA_LIMIT = 20        # default free-agent results limit
 DEFAULT_RECENT_GAMES = 5     # game log entries to show
 DEFAULT_SCHEDULE_DAYS = 14   # schedule lookahead (days)
 DEFAULT_NEWS_LIMIT = 15      # news briefing items
+NEWS_RECENCY_DAYS = 42       # news window for player context (days)
 STALE_SCROLL_THRESHOLD = 3   # consecutive stale scrolls before stopping
 
 # ---------------------------------------------------------------------------
@@ -94,3 +95,13 @@ DEFENSEMAN_PLAYABLE_TOI_PER_GAME = 1080  # 18 min/game for defensemen
 TRADE_TARGET_ELIGIBLE_EV_LINES = {1, 2, 3}
 # Must be on a power-play unit (PP1 or PP2) OR on an eligible EV line
 TRADE_TARGET_ELIGIBLE_PP_UNITS = {1, 2}
+
+# ---------------------------------------------------------------------------
+# Drop Candidate / Value Above Replacement
+# ---------------------------------------------------------------------------
+
+DROP_CANDIDATES_COUNT = 3                 # drop candidates to return per FA result
+DROP_FPG_CEILING = {"F": 0.9, "D": 0.8}  # never suggest dropping above this L14 FP/G
+VERDICT_STRONG_THRESHOLD = 0.5            # net FP/G >= this = "strong"
+VERDICT_MARGINAL_THRESHOLD = 0.2          # net FP/G >= this = "marginal"
+MIN_ROSTER_FALLBACK = {"F": 12, "D": 6, "G": 2}  # safe default when no schedule data

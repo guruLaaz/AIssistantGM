@@ -83,7 +83,10 @@ TOOLS = [
             "Returns: name, team, position, GP, "
             "stats (skaters: G/A/H/B; goalies: W/SO/GAA), "
             "FP/G, peripheral FP/G (hits+blocks contribution for skaters), "
-            "and line deployment (Lx/Dx/PPx)."
+            "and line deployment (Lx/Dx/PPx). "
+            "Each result includes up to 3 pre-computed drop candidates "
+            "(worst rostered players you could drop) with net FP/G gain, "
+            "and a verdict (strong/marginal/not worth a claim/no room)."
         ),
         "input_schema": {
             "type": "object",
@@ -563,6 +566,7 @@ def dispatch_tool(tool_name: str, tool_input: dict, context: SessionContext) -> 
                 sort_by=tool_input.get("sort_by", "fpts_per_game"),
                 min_games=tool_input.get("min_games", 10),
                 limit=tool_input.get("limit", 20),
+                team_id=team_id,
             )
             claims_row = conn.execute(
                 "SELECT claims_remaining FROM fantasy_standings WHERE team_id = ?",

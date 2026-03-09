@@ -44,7 +44,15 @@ from config.fantasy_constants import (
     DEFENSEMAN_PLAYABLE_TOI_PER_GAME,
     TRADE_TARGET_ELIGIBLE_EV_LINES,
     TRADE_TARGET_ELIGIBLE_PP_UNITS,
+    DROP_CANDIDATES_COUNT,
+    DROP_FPG_CEILING,
+    DEFAULT_MIN_GAMES,
+    VERDICT_STRONG_THRESHOLD,
+    VERDICT_MARGINAL_THRESHOLD,
+    MIN_ROSTER_FALLBACK,
+    NEWS_RECENCY_DAYS,
 )
+from math import ceil
 
 def _is_goalie(conn: sqlite3.Connection, player_id: int) -> bool:
     """Check if a player is a goalie."""
@@ -63,6 +71,128 @@ def _position_group(position: str | None) -> str:
     if position == "D":
         return "D"
     return "F"
+
+
+def _compute_min_roster(
+    conn: sqlite3.Connection,
+    team_id: str,
+    roster: list[dict] | None = None,
+) -> dict[str, int]:
+    """Compute minimum roster counts per position from remaining GP.
+
+    Uses real GP data and the NHL schedule to determine how many players
+    are needed at each position to fill the remaining games.
+
+    Returns:
+        Dict like {"F": 13, "D": 7, "G": 2}.
+    """
+    gp_data = _get_fantasy_gp(conn, team_id, roster)
+
+    # Max remaining games any NHL team has
+    row = conn.execute(
+        "SELECT MAX(cnt) as max_games FROM ("
+        "  SELECT COUNT(*) as cnt FROM team_games"
+        "  WHERE game_date > date('now') GROUP BY team"
+        ")"
+    ).fetchone()
+    max_team_games = row["max_games"] if row and row["max_games"] else 0
+
+    if max_team_games == 0:
+        return dict(MIN_ROSTER_FALLBACK)
+
+    min_roster: dict[str, int] = {}
+    for pos in ("F", "D", "G"):
+        remaining = gp_data.get(pos, {}).get("remaining", 0)
+        if remaining <= 0 or max_team_games <= 0:
+            min_roster[pos] = 2
+        else:
+            min_roster[pos] = max(2, ceil(remaining / max_team_games))
+    return min_roster
+
+
+def _effective_fpg(player: dict) -> float:
+    """Get the best available FP/G for a player (L14, fallback to season)."""
+    r14 = player.get("recent_14_fpg", 0.0)
+    if r14 > 0:
+        return r14
+    return player.get("fpts_per_game", 0.0)
+
+
+def _find_drop_candidates(
+    roster: list[dict],
+    fa_position_group: str,
+    min_roster: dict[str, int],
+    count: int = DROP_CANDIDATES_COUNT,
+) -> list[dict]:
+    """Find the best drop candidates for a given FA pickup.
+
+    Walks the roster sorted by effective FP/G ascending (worst first) and
+    returns up to *count* players whose removal keeps every position group
+    at or above the dynamic minimum.
+
+    Args:
+        roster: Full roster list from get_my_roster().
+        fa_position_group: Position group of the FA being picked up ('F','D','G').
+        min_roster: Minimum viable player counts per position group.
+        count: Number of drop candidates to return.
+
+    Returns:
+        List of drop-candidate dicts (worst-first), each with:
+        player_name, position, fpts_per_game, recent_14_fpg.
+    """
+    # Current position-group counts
+    pos_counts: dict[str, int] = {"F": 0, "D": 0, "G": 0}
+    for p in roster:
+        grp = _position_group(p.get("position"))
+        pos_counts[grp] = pos_counts.get(grp, 0) + 1
+
+    sorted_roster = sorted(roster, key=_effective_fpg)
+
+    candidates: list[dict] = []
+    for player in sorted_roster:
+        if len(candidates) >= count:
+            break
+
+        # --- Filters ---
+        # 1. Exclude IR-slotted players
+        if player.get("roster_status") == IR_SLOT_STATUS:
+            continue
+
+        # 2. Exclude players below minimum games
+        if player.get("games_played", 0) < DEFAULT_MIN_GAMES:
+            continue
+
+        # 3. FP/G ceiling by position
+        eff = _effective_fpg(player)
+        drop_group = _position_group(player.get("position"))
+        ceiling = DROP_FPG_CEILING.get(drop_group)
+        if ceiling is not None and eff >= ceiling:
+            continue
+
+        # 4. Position viability: simulate swap
+        new_counts = pos_counts.copy()
+        new_counts[fa_position_group] = new_counts.get(fa_position_group, 0) + 1
+        new_counts[drop_group] -= 1
+        if any(new_counts.get(g, 0) < min_roster.get(g, 2) for g in min_roster):
+            continue
+
+        candidates.append({
+            "player_name": player["player_name"],
+            "position": player.get("position", ""),
+            "fpts_per_game": player.get("fpts_per_game", 0.0),
+            "recent_14_fpg": player.get("recent_14_fpg", 0.0),
+            "nhl_id": player.get("nhl_id"),
+        })
+    return candidates
+
+
+def _claim_verdict(net_fpg: float) -> str:
+    """Classify a net FP/G into a human-readable verdict."""
+    if net_fpg >= VERDICT_STRONG_THRESHOLD:
+        return "strong"
+    if net_fpg >= VERDICT_MARGINAL_THRESHOLD:
+        return "marginal"
+    return "not worth a claim"
 
 
 def _get_fantasy_gp(
@@ -605,6 +735,7 @@ def search_free_agents(
     sort_by: str = "fpts_per_game",
     min_games: int = 10,
     limit: int = 20,
+    team_id: str | None = None,
 ) -> list[dict]:
     """Find the best available free agents (not on any fantasy roster).
 
@@ -615,6 +746,7 @@ def search_free_agents(
         sort_by: Sort key ('fpts_per_game' or 'fantasy_points').
         min_games: Minimum games played.
         limit: Max results.
+        team_id: If provided, enrich results with drop candidates and net value.
 
     Returns:
         List of player dicts with stats and FP/G.
@@ -735,7 +867,7 @@ def search_free_agents(
 
         news_rows = conn.execute(
             "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            "AND published_at >= date('now', '-42 days') "
+            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
             "ORDER BY published_at DESC LIMIT 5",
             (pid,),
         ).fetchall()
@@ -754,10 +886,52 @@ def search_free_agents(
         skater_cap = limit - goalie_cap
         merged = skaters[:skater_cap] + goalies[:goalie_cap]
         merged.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
-        return merged[:limit]
+        final = merged[:limit]
+    else:
+        results.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
+        final = results[:limit]
 
-    results.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
-    return results[:limit]
+    # --- Enrich with drop candidates and net value ---
+    if team_id is not None:
+        roster = get_my_roster(conn, team_id, season)
+        min_roster = _compute_min_roster(conn, team_id, roster)
+        for fa in final:
+            fa_pos_group = _position_group(fa["position"])
+            fa_eff = _effective_fpg(fa)
+            candidates = _find_drop_candidates(roster, fa_pos_group, min_roster)
+            drop_list = []
+            for c in candidates:
+                c_eff = _effective_fpg(c)
+                net = round(fa_eff - c_eff, 2)
+                drop_entry: dict = {
+                    "player_name": c["player_name"],
+                    "position": c["position"],
+                    "fpts_per_game": round(c["fpts_per_game"], 2),
+                    "recent_14_fpg": round(c["recent_14_fpg"], 2),
+                    "net_fpg": net,
+                }
+                # Attach recent news for the drop candidate
+                nhl_id = c.get("nhl_id")
+                if nhl_id:
+                    news_rows = conn.execute(
+                        "SELECT headline, published_at FROM player_news "
+                        "WHERE player_id = ? "
+                        f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
+                        "ORDER BY published_at DESC LIMIT 3",
+                        (nhl_id,),
+                    ).fetchall()
+                    if news_rows:
+                        drop_entry["news"] = [
+                            {"date": r["published_at"][:10], "hl": r["headline"]}
+                            for r in news_rows
+                        ]
+                drop_entry["verdict"] = _claim_verdict(net)
+                drop_list.append(drop_entry)
+            fa["drop_candidates"] = drop_list
+            if not drop_list:
+                fa["verdict"] = "no room"
+
+    return final
 
 
 def get_player_stats(
@@ -1350,7 +1524,7 @@ def get_trade_candidates(
 
         news_rows = conn.execute(
             "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            "AND published_at >= date('now', '-42 days') "
+            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
             "ORDER BY published_at DESC LIMIT 5",
             (nhl_id,),
         ).fetchall()
@@ -1452,7 +1626,7 @@ def get_trade_candidates(
 
         news_rows = conn.execute(
             "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            "AND published_at >= date('now', '-42 days') "
+            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
             "ORDER BY published_at DESC LIMIT 5",
             (resolved["id"],),
         ).fetchall()
@@ -1550,7 +1724,7 @@ def get_drop_candidates(
 
         news_rows = conn.execute(
             "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            "AND published_at >= date('now', '-42 days') "
+            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
             "ORDER BY published_at DESC LIMIT 5",
             (nhl_id,),
         ).fetchall()
@@ -1714,7 +1888,7 @@ def suggest_trades(
         line_ctx = _get_line_context(conn, nhl_id)
         news_rows = conn.execute(
             "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            "AND published_at >= date('now', '-42 days') "
+            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
             "ORDER BY published_at DESC LIMIT 5",
             (nhl_id,),
         ).fetchall()
@@ -1947,7 +2121,7 @@ def get_pickup_recommendations(
         if resolved_fa:
             news_rows = conn.execute(
                 "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-                "AND published_at >= date('now', '-42 days') "
+                f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
                 "ORDER BY published_at DESC LIMIT 5",
                 (resolved_fa["id"],),
             ).fetchall()

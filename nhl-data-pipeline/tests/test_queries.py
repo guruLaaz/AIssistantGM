@@ -28,6 +28,10 @@ from assistant.queries import (
     _is_goalie,
     _position_group,
     _get_fantasy_gp,
+    _find_drop_candidates,
+    _claim_verdict,
+    _compute_min_roster,
+    _effective_fpg,
 )
 from config.fantasy_constants import FORWARD_PLAYABLE_TOI_PER_GAME
 
@@ -2499,3 +2503,418 @@ class TestScheduleEnrichment:
         assert result is not None
         assert len(result["games"]) == 1
         assert "opp" not in result["games"][0]
+
+
+# ---------------------------------------------------------------------------
+# Drop candidate / Value Above Replacement helpers
+# ---------------------------------------------------------------------------
+
+
+def _mock_player(
+    name: str,
+    pos: str,
+    gp: int = 50,
+    fpg: float = 0.5,
+    r14: float = 0.5,
+    status: str = "active",
+) -> dict:
+    """Create a minimal roster player dict for _find_drop_candidates tests."""
+    return {
+        "player_name": name,
+        "position": pos,
+        "games_played": gp,
+        "fpts_per_game": fpg,
+        "recent_14_fpg": r14,
+        "roster_status": status,
+    }
+
+
+def _build_roster(
+    forwards: int = 12,
+    defense: int = 6,
+    goalies: int = 2,
+    f_fpg: float = 1.0,
+    d_fpg: float = 0.7,
+    g_fpg: float = 2.0,
+) -> list[dict]:
+    """Build a roster with the given position counts and uniform FP/G."""
+    roster: list[dict] = []
+    for i in range(forwards):
+        roster.append(_mock_player(f"F{i+1}", "C", fpg=f_fpg, r14=f_fpg))
+    for i in range(defense):
+        roster.append(_mock_player(f"D{i+1}", "D", fpg=d_fpg, r14=d_fpg))
+    for i in range(goalies):
+        roster.append(_mock_player(f"G{i+1}", "G", fpg=g_fpg, r14=g_fpg))
+    return roster
+
+
+class TestFindDropCandidates:
+    """Tests for _find_drop_candidates helper (pure function, no DB)."""
+
+    def test_same_position_returns_worst(self) -> None:
+        """Picking up a F should suggest dropping the worst F."""
+        roster = _build_roster()
+        # Add one weak forward
+        roster.append(_mock_player("Weak F", "C", fpg=0.3, r14=0.3))
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster)
+        assert len(result) >= 1
+        assert result[0]["player_name"] == "Weak F"
+
+    def test_cross_position_respects_min_roster(self) -> None:
+        """Can't drop a D if it would go below minimum D count."""
+        # Exactly at minimum: 12F, 6D, 2G
+        roster = _build_roster(forwards=12, defense=6, goalies=2)
+        # Add a weak D (would be best drop candidate by FPG)
+        roster[12] = _mock_player("Weak D", "D", fpg=0.1, r14=0.1)
+        # Picking up a F: dropping a D would put D at 5, below min of 6
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster)
+        # Weak D should NOT appear (would violate D minimum)
+        drop_names = [c["player_name"] for c in result]
+        assert "Weak D" not in drop_names
+
+    def test_cross_position_allowed_when_above_min(self) -> None:
+        """Can drop a D if there's a surplus above minimum."""
+        roster = _build_roster(forwards=12, defense=7, goalies=2)  # 7D > min 6
+        # Make one D very weak
+        roster[12] = _mock_player("Weak D", "D", fpg=0.1, r14=0.1)
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster)
+        drop_names = [c["player_name"] for c in result]
+        assert "Weak D" in drop_names
+
+    def test_ir_players_excluded(self) -> None:
+        """IR-slotted players should never be drop candidates."""
+        roster = _build_roster()
+        roster.append(_mock_player("IR Guy", "C", fpg=0.1, r14=0.1, status="3"))
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster)
+        drop_names = [c["player_name"] for c in result]
+        assert "IR Guy" not in drop_names
+
+    def test_fpg_ceiling_excludes_good_forwards(self) -> None:
+        """Forwards with L14 FP/G >= 0.9 should be excluded."""
+        roster = _build_roster(forwards=13)
+        # Make one forward just above ceiling
+        roster[0] = _mock_player("Good F", "C", fpg=0.95, r14=0.95)
+        # Make another below ceiling
+        roster[1] = _mock_player("OK F", "C", fpg=0.4, r14=0.4)
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster)
+        drop_names = [c["player_name"] for c in result]
+        assert "Good F" not in drop_names
+        assert "OK F" in drop_names
+
+    def test_fpg_ceiling_excludes_good_defensemen(self) -> None:
+        """Defensemen with L14 FP/G >= 0.8 should be excluded."""
+        roster = _build_roster(defense=7)
+        roster[12] = _mock_player("Good D", "D", fpg=0.85, r14=0.85)
+        roster[13] = _mock_player("Weak D", "D", fpg=0.3, r14=0.3)
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "D", min_roster)
+        drop_names = [c["player_name"] for c in result]
+        assert "Good D" not in drop_names
+        assert "Weak D" in drop_names
+
+    def test_no_ceiling_for_goalies(self) -> None:
+        """Goalies have no FPG ceiling — even high-FPG goalies are droppable."""
+        roster = _build_roster(goalies=3)
+        # One goalie with high FPG but still droppable (3 > min 2)
+        roster[-1] = _mock_player("Good G", "G", fpg=3.0, r14=3.0)
+        roster[-2] = _mock_player("OK G", "G", fpg=1.5, r14=1.5)
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "G", min_roster)
+        drop_names = [c["player_name"] for c in result]
+        assert "OK G" in drop_names
+
+    def test_min_games_excludes_low_gp(self) -> None:
+        """Players below DEFAULT_MIN_GAMES should be excluded."""
+        roster = _build_roster(forwards=13)
+        roster[0] = _mock_player("Newbie", "C", gp=5, fpg=0.1, r14=0.1)
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster)
+        drop_names = [c["player_name"] for c in result]
+        assert "Newbie" not in drop_names
+
+    def test_returns_up_to_count(self) -> None:
+        """Returns at most `count` candidates, sorted worst-first."""
+        roster = _build_roster(forwards=16)
+        for i in range(4):
+            roster[i] = _mock_player(f"Weak{i}", "C", fpg=0.1 * (i + 1), r14=0.1 * (i + 1))
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster, count=3)
+        assert len(result) == 3
+        # Sorted worst-first
+        fpgs = [_effective_fpg(c) for c in result]
+        assert fpgs == sorted(fpgs)
+
+    def test_empty_when_no_viable_drops(self) -> None:
+        """All roster players above ceiling → empty result."""
+        roster = _build_roster(f_fpg=1.5, d_fpg=1.2)  # all above ceiling
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster)
+        assert result == []
+
+    def test_cant_drop_last_at_minimum(self) -> None:
+        """Can't drop a goalie if only 2 goalies (= minimum)."""
+        roster = _build_roster(goalies=2)
+        # Make one goalie weak
+        roster[-1] = _mock_player("Weak G", "G", fpg=0.5, r14=0.5)
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        # Picking up a F, try to drop the weak goalie
+        result = _find_drop_candidates(roster, "F", min_roster)
+        drop_names = [c["player_name"] for c in result]
+        # Goalies can't be dropped because 2-1=1 < min 2
+        assert "Weak G" not in drop_names
+
+    def test_recent_14_fpg_used_over_season(self) -> None:
+        """Sorting uses recent_14_fpg when available, not season fpg."""
+        roster = _build_roster(forwards=14)
+        # High season FPG but terrible recent → should be droppable
+        roster[0] = _mock_player("Slumping", "C", fpg=1.2, r14=0.3)
+        # Low season FPG but good recent → should NOT be droppable
+        roster[1] = _mock_player("Rising", "C", fpg=0.3, r14=1.2)
+        min_roster = {"F": 12, "D": 6, "G": 2}
+        result = _find_drop_candidates(roster, "F", min_roster)
+        drop_names = [c["player_name"] for c in result]
+        assert "Slumping" in drop_names
+        # Rising has r14=1.2 which is above F ceiling (0.9), so excluded
+        assert "Rising" not in drop_names
+
+
+class TestClaimVerdict:
+    """Tests for _claim_verdict threshold boundaries."""
+
+    def test_strong(self) -> None:
+        assert _claim_verdict(0.6) == "strong"
+
+    def test_strong_boundary(self) -> None:
+        assert _claim_verdict(0.5) == "strong"
+
+    def test_marginal(self) -> None:
+        assert _claim_verdict(0.3) == "marginal"
+
+    def test_marginal_boundary(self) -> None:
+        assert _claim_verdict(0.2) == "marginal"
+
+    def test_not_worth(self) -> None:
+        assert _claim_verdict(0.1) == "not worth a claim"
+
+    def test_not_worth_boundary(self) -> None:
+        assert _claim_verdict(0.19) == "not worth a claim"
+
+    def test_negative(self) -> None:
+        assert _claim_verdict(-0.5) == "not worth a claim"
+
+
+class TestComputeMinRoster:
+    """Tests for _compute_min_roster (needs DB for schedule + GP data)."""
+
+    def test_computes_from_gp_and_schedule(self, db: sqlite3.Connection) -> None:
+        """Returns min counts based on remaining GP and future games."""
+        # Insert GP data
+        db.execute(
+            "INSERT OR REPLACE INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'F', 800, 984, 184)"
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'D', 400, 492, 92)"
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'G', 70, 82, 12)"
+        )
+        # Add future games for a different team to avoid UNIQUE conflict
+        # (existing fixture already has EDM games)
+        for d in range(1, 19):
+            gd = (date.today() + timedelta(days=d)).isoformat()
+            db.execute(
+                "INSERT OR IGNORE INTO team_games (team, season, game_date, opponent, home_away) "
+                "VALUES ('PIT', '20252026', ?, 'NYR', 'home')", (gd,)
+            )
+        db.commit()
+
+        result = _compute_min_roster(db, "team1")
+        # 18 future games for PIT: F=ceil(184/18)=11, D=ceil(92/18)=6, G=ceil(12/18)=2
+        assert result["F"] >= 2
+        assert result["D"] >= 2
+        assert result["G"] >= 2
+        # F should be higher than G
+        assert result["F"] > result["G"]
+
+    def test_fallback_when_no_future_games(self, db: sqlite3.Connection) -> None:
+        """When team_games has no future games, use safe fallback."""
+        # Remove all future games
+        db.execute("DELETE FROM team_games WHERE game_date > date('now')")
+        db.commit()
+        result = _compute_min_roster(db, "team1")
+        assert result == {"F": 12, "D": 6, "G": 2}
+
+    def test_clamps_to_minimum_2(self, db: sqlite3.Connection) -> None:
+        """Every position should have at least 2 players minimum."""
+        # GP almost fully used: very little remaining
+        db.execute(
+            "INSERT OR REPLACE INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'G', 82, 82, 0)"
+        )
+        db.commit()
+        result = _compute_min_roster(db, "team1")
+        assert result["G"] >= 2
+
+
+class TestSearchFreeAgentsDropEnrichment:
+    """Integration tests for drop candidate enrichment in search_free_agents."""
+
+    @pytest.fixture
+    def full_roster_db(self, db: sqlite3.Connection) -> sqlite3.Connection:
+        """Expand the base fixture to have enough players for min roster checks."""
+        # Add more forwards to team1 (base has McDavid + Crosby = 2F)
+        forward_ids = list(range(9900001, 9900012))  # 11 more forwards
+        for i, pid in enumerate(forward_ids):
+            upsert_player(db, {
+                "id": pid, "full_name": f"TestFwd{i+1}",
+                "first_name": f"TestFwd{i+1}", "last_name": f"Fwd",
+                "team_abbrev": "TST", "position": "C",
+            })
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES ({pid}, NULL, '20252026', 1, 10, 10, 20, 50, 30, 80, 0, 0, 40000)"
+            )
+            # Per-game rows for GP count
+            for d in range(15):
+                gd = f"2025-10-{d+10:02d}"
+                db.execute(
+                    "INSERT INTO skater_stats "
+                    "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                    "hits, blocks, shots, plus_minus, pim, toi) "
+                    f"VALUES ({pid}, '{gd}', '20252026', 0, 1, 1, 2, 3, 2, 5, 0, 0, 1000)"
+                )
+            db.execute(
+                "INSERT INTO fantasy_roster_slots "
+                "(team_id, player_name, position_short, status_id, salary) "
+                f"VALUES ('team1', 'TestFwd{i+1}', 'C', 'active', 1000000)"
+            )
+
+        # Add more D (base has Makar = 1D, need at least 6)
+        defense_ids = list(range(9900020, 9900026))  # 6 more D
+        for i, pid in enumerate(defense_ids):
+            upsert_player(db, {
+                "id": pid, "full_name": f"TestDef{i+1}",
+                "first_name": f"TestDef{i+1}", "last_name": f"Def",
+                "team_abbrev": "TST", "position": "D",
+            })
+            db.execute(
+                "INSERT INTO skater_stats "
+                "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                "hits, blocks, shots, plus_minus, pim, toi) "
+                f"VALUES ({pid}, NULL, '20252026', 1, 5, 10, 15, 40, 60, 60, 0, 0, 45000)"
+            )
+            for d in range(15):
+                gd = f"2025-10-{d+10:02d}"
+                db.execute(
+                    "INSERT INTO skater_stats "
+                    "(player_id, game_date, season, is_season_total, goals, assists, points, "
+                    "hits, blocks, shots, plus_minus, pim, toi) "
+                    f"VALUES ({pid}, '{gd}', '20252026', 0, 0, 1, 1, 3, 4, 4, 0, 0, 1100)"
+                )
+            db.execute(
+                "INSERT INTO fantasy_roster_slots "
+                "(team_id, player_name, position_short, status_id, salary) "
+                f"VALUES ('team1', 'TestDef{i+1}', 'D', 'active', 1000000)"
+            )
+
+        # Add 1 more goalie (base has Saros = 1G, need 2)
+        upsert_player(db, {
+            "id": 9900030, "full_name": "TestGoalie1",
+            "first_name": "TestGoalie1", "last_name": "G",
+            "team_abbrev": "TST", "position": "G",
+        })
+        db.execute(
+            "INSERT INTO goalie_stats "
+            "(player_id, game_date, season, is_season_total, "
+            "wins, losses, ot_losses, shutouts, saves, goals_against, shots_against, toi) "
+            "VALUES (9900030, NULL, '20252026', 1, 10, 8, 2, 1, 800, 50, 850, 54000)"
+        )
+        for d in range(10):
+            gd = f"2025-10-{d+10:02d}"
+            db.execute(
+                "INSERT INTO goalie_stats "
+                "(player_id, game_date, season, is_season_total, "
+                "wins, losses, ot_losses, shutouts, saves, goals_against, shots_against, toi) "
+                f"VALUES (9900030, '{gd}', '20252026', 0, 1, 0, 0, 0, 30, 3, 33, 3600)"
+            )
+        db.execute(
+            "INSERT INTO fantasy_roster_slots "
+            "(team_id, player_name, position_short, status_id, salary) "
+            "VALUES ('team1', 'TestGoalie1', 'G', 'active', 2000000)"
+        )
+
+        # Add GP data
+        db.execute(
+            "INSERT OR REPLACE INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'F', 800, 984, 184)"
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'D', 400, 492, 92)"
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO fantasy_gp_per_position "
+            "(team_id, position, gp_used, gp_limit, gp_remaining) "
+            "VALUES ('team1', 'G', 70, 82, 12)"
+        )
+
+        db.commit()
+        return db
+
+    def test_enrichment_present_with_team_id(
+        self, full_roster_db: sqlite3.Connection
+    ) -> None:
+        """search_free_agents with team_id returns drop_candidates with per-candidate verdict."""
+        results = search_free_agents(
+            full_roster_db, "20252026", min_games=1, team_id="team1"
+        )
+        assert len(results) > 0
+        for fa in results:
+            assert "drop_candidates" in fa
+            assert isinstance(fa["drop_candidates"], list)
+            if fa["drop_candidates"]:
+                for dc in fa["drop_candidates"]:
+                    assert "verdict" in dc
+                    assert dc["verdict"] in ("strong", "marginal", "not worth a claim")
+            else:
+                # No viable drops → FA-level "no room" verdict
+                assert fa.get("verdict") == "no room"
+
+    def test_no_enrichment_without_team_id(self, db: sqlite3.Connection) -> None:
+        """search_free_agents without team_id has no enrichment (backward compat)."""
+        results = search_free_agents(db, "20252026", min_games=1)
+        assert len(results) > 0
+        for fa in results:
+            assert "drop_candidates" not in fa
+            assert "verdict" not in fa
+
+    def test_drop_candidates_have_net_fpg(
+        self, full_roster_db: sqlite3.Connection
+    ) -> None:
+        """Each drop candidate dict has the expected fields."""
+        results = search_free_agents(
+            full_roster_db, "20252026", min_games=1, team_id="team1"
+        )
+        for fa in results:
+            for dc in fa["drop_candidates"]:
+                assert "player_name" in dc
+                assert "position" in dc
+                assert "fpts_per_game" in dc
+                assert "recent_14_fpg" in dc
+                assert "net_fpg" in dc
