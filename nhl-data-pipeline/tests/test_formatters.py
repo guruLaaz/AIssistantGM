@@ -3,7 +3,6 @@
 import json
 
 from assistant.formatters import (
-    _deploy_tag,
     _line_tag,
     format_roster,
     format_free_agents,
@@ -15,10 +14,6 @@ from assistant.formatters import (
     format_news,
     format_injuries,
     format_team_roster,
-    format_trade_suggestions,
-    format_trade_targets,
-    format_drop_candidates,
-    format_roster_moves,
     format_web_search_results,
 )
 
@@ -704,218 +699,6 @@ class TestFormatInjuries:
 
 
 # ---------------------------------------------------------------------------
-# format_trade_targets
-# ---------------------------------------------------------------------------
-
-
-class TestFormatTradeTargets:
-    def test_empty_list(self) -> None:
-        assert "No buy-low" in format_trade_targets([])
-
-    def test_single_target(self) -> None:
-        data = [{
-            "player_name": "J.T. Miller", "owner_team_name": "Rival Team",
-            "position": "C", "games_played": 50,
-            "season_fpg": 1.20, "recent_7_fpg": 1.60,
-            "trend_pct": 33.3, "owner_rank": 15,
-        }]
-        result = _parse(format_trade_targets(data))
-        assert result[0]["name"] == "J.T. Miller"
-        assert result[0]["owner"] == "Rival Team"
-        assert result[0]["trend_pct"] == 33.3
-
-    def test_high_toi_signal(self) -> None:
-        data = [{
-            "player_name": "Slow Starter", "owner_team_name": "Other",
-            "position": "LW", "games_played": 50,
-            "season_fpg": 0.80, "recent_7_fpg": 0.0,
-            "trend_pct": -15.0, "owner_rank": 10,
-            "toi_per_game": 1200,
-            "signal": "high_toi_underperformer",
-        }]
-        result = _parse(format_trade_targets(data))
-        assert result[0]["signal"] == "high_toi_underperformer"
-        assert result[0]["toi"] == "20:00"
-
-    def test_line_info(self) -> None:
-        data = [{
-            "player_name": "Buy Low", "owner_team_name": "Rival",
-            "position": "C", "games_played": 50,
-            "season_fpg": 1.00, "recent_7_fpg": 1.50,
-            "trend_pct": 50.0, "owner_rank": 10,
-            "signal": "trending_up",
-            "line_info": {"ev_line": 2, "pp_unit": 1},
-        }]
-        result = _parse(format_trade_targets(data))
-        assert result[0]["line"] == "L2/PP1"
-
-
-# ---------------------------------------------------------------------------
-# format_drop_candidates
-# ---------------------------------------------------------------------------
-
-
-class TestFormatDropCandidates:
-    def test_empty_list(self) -> None:
-        assert "No drop candidates" in format_drop_candidates([])
-
-    def test_trends(self) -> None:
-        for trend in ("cold", "hot", "neutral"):
-            data = [{
-                "player_name": "Test", "position": "LW",
-                "games_played": 40, "season_fpg": 1.0,
-                "recent_14_fpg": 0.5, "trend": trend, "injury": None,
-            }]
-            result = _parse(format_drop_candidates(data))
-            assert result[0]["trend"] == trend
-
-    def test_with_injury(self) -> None:
-        data = [{
-            "player_name": "Hurt", "position": "C",
-            "games_played": 20, "season_fpg": 0.8,
-            "recent_14_fpg": 0.0, "trend": "cold",
-            "injury": {"status": "IR"},
-        }]
-        result = _parse(format_drop_candidates(data))
-        assert result[0]["inj"] == "IR"
-
-    def test_line_info(self) -> None:
-        data = [{
-            "player_name": "Drop Me", "position": "LW",
-            "games_played": 40, "season_fpg": 0.80,
-            "recent_14_fpg": 0.40, "trend": "cold", "injury": None,
-            "line_info": {"ev_line": 4, "pp_unit": None},
-        }]
-        result = _parse(format_drop_candidates(data))
-        assert result[0]["line"] == "L4"
-
-
-# ---------------------------------------------------------------------------
-# format_roster_moves
-# ---------------------------------------------------------------------------
-
-
-class TestFormatRosterMoves:
-    def test_empty_both(self) -> None:
-        result = _parse(format_roster_moves([], []))
-        assert result["drops"] == []
-        assert result["pickups"] == []
-
-    def test_drops_only(self) -> None:
-        drops = [{
-            "player_name": "Drop Me", "position": "C",
-            "season_fpg": 0.5, "recent_14_fpg": 0.3,
-            "trend": "cold", "injury": None,
-        }]
-        result = _parse(format_roster_moves(drops, []))
-        assert result["drops"][0]["name"] == "Drop Me"
-
-    def test_pickups_only(self) -> None:
-        pickups = [{
-            "pickup_name": "Pick Me", "pickup_position": "C",
-            "pickup_fpg": 1.5, "drop_name": "Drop Me",
-            "drop_fpg": 0.5, "fpg_upgrade": 1.0,
-            "reason": "+1.00 FP/G upgrade",
-        }]
-        result = _parse(format_roster_moves([], pickups))
-        assert result["pickups"][0]["name"] == "Pick Me"
-
-    def test_claims_banner(self) -> None:
-        pickup_data = {
-            "claims_remaining": 5,
-            "recommendations": [],
-        }
-        result = _parse(format_roster_moves([], pickup_data))
-        assert result["claims"] == 5
-
-    def test_no_claims_when_none(self) -> None:
-        pickup_data = {"claims_remaining": None, "recommendations": []}
-        result = _parse(format_roster_moves([], pickup_data))
-        assert "claims" not in result
-
-    def test_gp_remaining(self) -> None:
-        pickup_data = {
-            "claims_remaining": 5,
-            "gp_remaining": {"F": 321, "D": 54, "G": 31},
-            "recommendations": [],
-        }
-        result = _parse(format_roster_moves([], pickup_data))
-        assert result["gp_rem"]["F"] == 321
-
-    def test_total_value(self) -> None:
-        pickup_data = {
-            "claims_remaining": 5,
-            "recommendations": [{
-                "pickup_name": "Pick", "pickup_position": "C",
-                "pickup_season_fpg": 1.0, "pickup_recent_fpg": 1.0,
-                "drop_name": "Drop",
-                "fpg_upgrade": 0.70, "est_games": 25,
-                "total_value": 17.5,
-            }],
-        }
-        result = _parse(format_roster_moves([], pickup_data))
-        p = result["pickups"][0]
-        assert p["value"] == 17.5
-        assert p["est_gp"] == 25
-
-    def test_pickup_with_injury_tag(self) -> None:
-        pickup_data = {
-            "claims_remaining": 5,
-            "recommendations": [{
-                "pickup_name": "Hurt Guy", "pickup_position": "C",
-                "pickup_team": "BOS",
-                "pickup_injury": {"status": "DTD", "injury_type": "Lower Body"},
-                "drop_name": "Drop", "fpg_upgrade": 0.5,
-            }],
-        }
-        result = _parse(format_roster_moves([], pickup_data))
-        assert result["pickups"][0]["inj"] == "DTD"
-
-    def test_drops_with_injury_tag(self) -> None:
-        drops = [{
-            "player_name": "Injured Drop", "position": "D",
-            "season_fpg": 0.5, "recent_14_fpg": 0.0,
-            "trend": "cold", "injury": {"status": "IR"},
-        }]
-        result = _parse(format_roster_moves(drops, []))
-        assert result["drops"][0]["inj"] == "IR"
-
-
-class TestFormatIRStash:
-    def test_ir_stash_shown(self) -> None:
-        pickup_data = {
-            "claims_remaining": 5,
-            "recommendations": [],
-            "ir_slot_open": True,
-            "ir_stash": [{
-                "pickup_name": "Hurt Player", "pickup_position": "C",
-                "pickup_team": "MTL",
-                "pickup_season_fpg": 0.80, "pickup_recent_fpg": 0.90,
-                "pickup_regressed_fpg": 0.75, "pickup_games_played": 30,
-                "est_games": 15, "total_value": 11.3,
-            }],
-        }
-        result = _parse(format_roster_moves([], pickup_data))
-        assert result["ir_stash"][0]["name"] == "Hurt Player"
-
-    def test_ir_stash_hidden_when_closed(self) -> None:
-        pickup_data = {
-            "claims_remaining": 5, "recommendations": [],
-            "ir_slot_open": False, "ir_stash": [],
-        }
-        result = _parse(format_roster_moves([], pickup_data))
-        assert "ir_stash" not in result
-
-    def test_ir_stash_empty(self) -> None:
-        pickup_data = {
-            "claims_remaining": 5, "recommendations": [],
-            "ir_slot_open": True, "ir_stash": [],
-        }
-        result = _parse(format_roster_moves([], pickup_data))
-        assert "ir_stash" not in result
-
-
-# ---------------------------------------------------------------------------
 # format_web_search_results
 # ---------------------------------------------------------------------------
 
@@ -985,28 +768,6 @@ class TestLineTag:
 
 
 # ---------------------------------------------------------------------------
-# _deploy_tag helper
-# ---------------------------------------------------------------------------
-
-
-class TestDeployTag:
-    def test_both_ev_and_pp(self) -> None:
-        assert _deploy_tag(1, 1) == "L1/PP1"
-
-    def test_ev_only(self) -> None:
-        assert _deploy_tag(2, None) == "L2"
-
-    def test_pp_only(self) -> None:
-        assert _deploy_tag(None, 1) == "PP1"
-
-    def test_none_both(self) -> None:
-        assert _deploy_tag(None, None) == "-"
-
-    def test_defense_prefix(self) -> None:
-        assert _deploy_tag(1, None, position="D") == "D1"
-
-
-# ---------------------------------------------------------------------------
 # format_team_roster
 # ---------------------------------------------------------------------------
 
@@ -1037,47 +798,6 @@ class TestFormatTeamRoster:
         assert result["short"] == "RT"
         assert result["rank"] == 5
         assert result["roster"][0]["name"] == "Player One"
-
-
-# ---------------------------------------------------------------------------
-# format_trade_suggestions
-# ---------------------------------------------------------------------------
-
-
-class TestFormatTradeSuggestions:
-    def test_none_data(self) -> None:
-        assert format_trade_suggestions(None) == "Could not generate trade suggestions."
-
-    def test_empty_dict(self) -> None:
-        assert format_trade_suggestions({}) == "Could not generate trade suggestions."
-
-    def test_no_suggestions(self) -> None:
-        data = {
-            "opponent": {"name": "Other Team", "rank": 10, "avg_fpg": {"F": 1.0, "D": 0.8, "G": 1.5}},
-            "my_team": {"avg_fpg": {"F": 1.2, "D": 0.9, "G": 1.3}},
-            "suggestions": [],
-        }
-        result = _parse(format_trade_suggestions(data))
-        assert result["opponent"] == "Other Team"
-        assert result["trades"] == []
-
-    def test_with_suggestions(self) -> None:
-        data = {
-            "opponent": {"name": "Rival", "rank": 8, "avg_fpg": {"F": 1.0, "D": 0.8, "G": 1.5}},
-            "my_team": {"avg_fpg": {"F": 1.2, "D": 0.9, "G": 1.3}},
-            "suggestions": [{
-                "send_player": "Player A", "send_position": "C",
-                "send_fpg": 0.8, "send_recent_14_fpg": 0.75,
-                "receive_player": "Player B", "receive_position": "C",
-                "receive_fpg": 1.1, "receive_recent_14_fpg": 1.05,
-                "my_upgrade": 0.30,
-            }],
-        }
-        result = _parse(format_trade_suggestions(data))
-        t = result["trades"][0]
-        assert t["send"] == "Player A"
-        assert t["recv"] == "Player B"
-        assert t["upgrade"] == 0.30
 
 
 class TestFormatFreeAgentsDropEnrichment:

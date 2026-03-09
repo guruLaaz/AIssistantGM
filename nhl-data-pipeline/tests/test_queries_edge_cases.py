@@ -20,9 +20,6 @@ from assistant.queries import (
     get_schedule_analysis,
     get_league_standings,
     get_injuries,
-    get_trade_candidates,
-    get_drop_candidates,
-    get_pickup_recommendations,
 )
 
 
@@ -183,18 +180,6 @@ class TestEmptyDB:
     def test_get_recent_news_empty_db(self, empty_db: sqlite3.Connection) -> None:
         assert get_recent_news(empty_db) == []
 
-    def test_get_trade_candidates_empty_db(self, empty_db: sqlite3.Connection) -> None:
-        assert get_trade_candidates(empty_db, "team1", "20252026") == []
-
-    def test_get_drop_candidates_empty_db(self, empty_db: sqlite3.Connection) -> None:
-        assert get_drop_candidates(empty_db, "team1", "20252026") == []
-
-    def test_get_pickup_recommendations_empty_db(self, empty_db: sqlite3.Connection) -> None:
-        data = get_pickup_recommendations(empty_db, "team1", "20252026")
-        assert isinstance(data, dict)
-        assert data["recommendations"] == []
-        assert data["claims_remaining"] is None
-
 
 # ---------------------------------------------------------------------------
 # Boundary values
@@ -247,10 +232,6 @@ class TestBoundaryValues:
         result = get_schedule_analysis(db, "TOR", "20252026", days_ahead=0)
         assert result is not None
         assert result["game_count"] == 0
-
-    def test_trade_candidates_limit_zero(self, db: sqlite3.Connection) -> None:
-        """limit=0 returns empty."""
-        assert get_trade_candidates(db, "team1", "20252026", limit=0) == []
 
 
 # ---------------------------------------------------------------------------

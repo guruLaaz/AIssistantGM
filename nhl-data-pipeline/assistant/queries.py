@@ -107,6 +107,70 @@ def _effective_fpg(player: dict) -> float:
     return player.get("fpts_per_game", 0.0)
 
 
+def _calc_trend(
+    conn: sqlite3.Connection,
+    player_id: int,
+    season: str,
+    is_goalie: bool,
+    season_fpg: float,
+) -> tuple[float, str]:
+    """Compute L14 FP/G and hot/cold/neutral trend label."""
+    fpts_list = _get_recent_fpts_list(conn, player_id, season, is_goalie=is_goalie)
+    recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
+    recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
+    if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
+        trend = "hot"
+    elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
+        trend = "cold"
+    else:
+        trend = "neutral"
+    return recent_14_fpg, trend
+
+
+def _get_player_news(
+    conn: sqlite3.Connection,
+    player_id: int,
+    limit: int = 5,
+    recency_days: int | None = NEWS_RECENCY_DAYS,
+    include_content: bool = True,
+) -> list[dict]:
+    """Fetch recent news for a player.
+
+    Returns list of dicts with keys: headline, date, and optionally content.
+    """
+    cols = "headline, content, published_at" if include_content else "headline, published_at"
+    recency = (
+        f"AND published_at >= date('now', '-{recency_days} days') "
+        if recency_days is not None
+        else ""
+    )
+    rows = conn.execute(
+        f"SELECT {cols} FROM player_news WHERE player_id = ? "
+        f"{recency}"
+        "ORDER BY published_at DESC LIMIT ?",
+        (player_id, limit),
+    ).fetchall()
+    result = []
+    for r in rows:
+        item: dict = {"headline": r["headline"], "date": r["published_at"]}
+        if include_content:
+            item["content"] = r["content"]
+        result.append(item)
+    return result
+
+
+def _get_season_stats(
+    conn: sqlite3.Connection,
+    player_id: int,
+    season: str,
+    is_goalie: bool,
+) -> dict | None:
+    """Dispatch to goalie or skater season stats."""
+    if is_goalie:
+        return _get_goalie_season_stats(conn, player_id, season)
+    return _get_skater_season_stats(conn, player_id, season)
+
+
 def _find_drop_candidates(
     roster: list[dict],
     fa_position_group: str,
@@ -680,17 +744,9 @@ def get_my_roster(
             })
 
         # Recent trend and line context
-        fpts_list = _get_recent_fpts_list(conn, nhl_id, season, is_goalie=goalie)
-        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
-        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
-        entry["recent_14_fpg"] = recent_14_fpg
-        season_fpg = entry["fpts_per_game"]
-        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
-            entry["trend"] = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
-            entry["trend"] = "cold"
-        else:
-            entry["trend"] = "neutral"
+        r14_fpg, trend = _calc_trend(conn, nhl_id, season, goalie, entry["fpts_per_game"])
+        entry["recent_14_fpg"] = r14_fpg
+        entry["trend"] = trend
 
         line_ctx = _get_line_context(conn, nhl_id)
         entry["ev_line"] = line_ctx["ev_line"] if line_ctx else None
@@ -863,17 +919,9 @@ def search_free_agents(
             })
 
         # Hot/cold trend based on last 14 games vs season average
-        fpts_list = _get_recent_fpts_list(conn, pid, season, is_goalie=goalie)
-        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
-        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
-        entry["recent_14_fpg"] = recent_14_fpg
-        season_fpg = entry["fpts_per_game"]
-        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
-            entry["trend"] = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
-            entry["trend"] = "cold"
-        else:
-            entry["trend"] = "neutral"
+        r14_fpg, trend = _calc_trend(conn, pid, season, goalie, entry["fpts_per_game"])
+        entry["recent_14_fpg"] = r14_fpg
+        entry["trend"] = trend
 
         entry["injury"] = _get_injury_status(conn, pid)
 
@@ -893,13 +941,7 @@ def search_free_agents(
             entry["pp_toi_recent"] = []
             entry["pp_toi_per_game"] = 0
 
-        news_rows = conn.execute(
-            "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
-            "ORDER BY published_at DESC LIMIT 5",
-            (pid,),
-        ).fetchall()
-        entry["recent_news"] = [{"headline": r["headline"], "content": r["content"], "date": r["published_at"]} for r in news_rows]
+        entry["recent_news"] = _get_player_news(conn, pid)
 
         results.append(entry)
 
@@ -971,17 +1013,11 @@ def search_free_agents(
                 # Attach recent news for the drop candidate
                 nhl_id = c.get("nhl_id")
                 if nhl_id:
-                    news_rows = conn.execute(
-                        "SELECT headline, published_at FROM player_news "
-                        "WHERE player_id = ? "
-                        f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
-                        "ORDER BY published_at DESC LIMIT 3",
-                        (nhl_id,),
-                    ).fetchall()
-                    if news_rows:
+                    drop_news = _get_player_news(conn, nhl_id, limit=3, include_content=False)
+                    if drop_news:
                         drop_entry["news"] = [
-                            {"date": r["published_at"][:10], "hl": r["headline"]}
-                            for r in news_rows
+                            {"date": n["date"][:10], "hl": n["headline"]}
+                            for n in drop_news
                         ]
                 drop_entry["verdict"] = _claim_verdict(net)
                 drop_list.append(drop_entry)
@@ -1567,25 +1603,13 @@ def get_trade_candidates(
 
         trend_pct = round((last_7_fpg / season_fpg - 1) * 100, 1)
 
-        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
-        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
-        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
-            trend = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
-            trend = "cold"
-        else:
-            trend = "neutral"
+        recent_14_fpg, trend = _calc_trend(conn, nhl_id, season, goalie, season_fpg)
 
         injury = _get_injury_status(conn, nhl_id)
 
         line_ctx = _get_line_context(conn, nhl_id)
 
-        news_rows = conn.execute(
-            "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
-            "ORDER BY published_at DESC LIMIT 5",
-            (nhl_id,),
-        ).fetchall()
+        news = _get_player_news(conn, nhl_id)
 
         candidates.append({
             "player_name": resolved["full_name"],
@@ -1602,7 +1626,7 @@ def get_trade_candidates(
             "pp_toi": stats.get("pp_toi", 0),
             "signal": "trending_up",
             "injury": injury,
-            "recent_news": [{"headline": r["headline"], "content": r["content"], "date": r["published_at"]} for r in news_rows],
+            "recent_news": news,
             "line_info": {
                 "ev_line": line_ctx["ev_line"] if line_ctx else None,
                 "pp_unit": line_ctx["pp_unit"] if line_ctx else None,
@@ -1671,23 +1695,11 @@ def get_trade_candidates(
         all_fpts = _get_recent_fpts_list(conn, resolved["id"], season, False)
         last_7 = all_fpts[:7]
         last_7_fpg = round(sum(last_7) / len(last_7), 2) if last_7 else 0.0
-        recent_14 = all_fpts[:RECENT_GAMES_WINDOW]
-        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
-        if sfpg > 0 and recent_14_fpg > sfpg * HOT_THRESHOLD_MULTIPLIER:
-            trend = "hot"
-        elif sfpg > 0 and recent_14_fpg < sfpg * COLD_THRESHOLD_MULTIPLIER:
-            trend = "cold"
-        else:
-            trend = "neutral"
+        recent_14_fpg, trend = _calc_trend(conn, resolved["id"], season, False, sfpg)
 
         injury = _get_injury_status(conn, resolved["id"])
 
-        news_rows = conn.execute(
-            "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
-            "ORDER BY published_at DESC LIMIT 5",
-            (resolved["id"],),
-        ).fetchall()
+        news = _get_player_news(conn, resolved["id"])
 
         high_toi_candidates.append({
             "player_name": resolved["full_name"],
@@ -1704,7 +1716,7 @@ def get_trade_candidates(
             "pp_toi": stats.get("pp_toi", 0),
             "signal": "high_toi_underperformer",
             "injury": injury,
-            "recent_news": [{"headline": r["headline"], "content": r["content"], "date": r["published_at"]} for r in news_rows],
+            "recent_news": news,
             "line_info": {
                 "ev_line": line_ctx["ev_line"] if line_ctx else None,
                 "pp_unit": line_ctx["pp_unit"] if line_ctx else None,
@@ -1770,26 +1782,11 @@ def get_drop_candidates(
         season_fpg = stats.get("fpts_per_game", 0.0) if stats else 0.0
         gp = stats.get("games_played", 0) if stats else 0
 
-        fpts_list = _get_recent_fpts_list(conn, nhl_id, season, is_goalie=goalie)
-        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
-        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
-
-        # Trend: same 20% threshold as other 14-game comparisons
-        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
-            trend = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
-            trend = "cold"
-        else:
-            trend = "neutral"
+        recent_14_fpg, trend = _calc_trend(conn, nhl_id, season, goalie, season_fpg)
 
         injury = _get_injury_status(conn, nhl_id)
 
-        news_rows = conn.execute(
-            "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
-            "ORDER BY published_at DESC LIMIT 5",
-            (nhl_id,),
-        ).fetchall()
+        news = _get_player_news(conn, nhl_id)
 
         line_ctx = _get_line_context(conn, nhl_id)
         players.append({
@@ -1802,7 +1799,7 @@ def get_drop_candidates(
             "games_played": gp,
             "salary": slot["salary"],
             "roster_status": slot["status_id"],
-            "recent_news": [{"headline": r["headline"], "content": r["content"], "date": r["published_at"]} for r in news_rows],
+            "recent_news": news,
             "line_info": {
                 "ev_line": line_ctx["ev_line"] if line_ctx else None,
                 "pp_unit": line_ctx["pp_unit"] if line_ctx else None,
@@ -1936,29 +1933,16 @@ def suggest_trades(
                     "ev_line": None, "pp_unit": None}
         nhl_id = resolved["id"]
         goalie = resolved["position"] == "G"
-        fpts_list = _get_recent_fpts_list(conn, nhl_id, season, is_goalie=goalie)
-        recent_14 = fpts_list[:RECENT_GAMES_WINDOW]
-        recent_14_fpg = round(sum(recent_14) / len(recent_14), 2) if recent_14 else 0.0
-        season_fpg = player.get("fpts_per_game", 0.0)
-        if season_fpg > 0 and recent_14_fpg > season_fpg * HOT_THRESHOLD_MULTIPLIER:
-            trend = "hot"
-        elif season_fpg > 0 and recent_14_fpg < season_fpg * COLD_THRESHOLD_MULTIPLIER:
-            trend = "cold"
-        else:
-            trend = "neutral"
+        recent_14_fpg, trend = _calc_trend(
+            conn, nhl_id, season, goalie, player.get("fpts_per_game", 0.0)
+        )
         injury = _get_injury_status(conn, nhl_id)
         line_ctx = _get_line_context(conn, nhl_id)
-        news_rows = conn.execute(
-            "SELECT headline, content, published_at FROM player_news WHERE player_id = ? "
-            f"AND published_at >= date('now', '-{NEWS_RECENCY_DAYS} days') "
-            "ORDER BY published_at DESC LIMIT 5",
-            (nhl_id,),
-        ).fetchall()
         return {
             "trend": trend,
             "recent_14_fpg": recent_14_fpg,
             "injury": injury,
-            "recent_news": [{"headline": r["headline"], "content": r["content"], "date": r["published_at"]} for r in news_rows],
+            "recent_news": _get_player_news(conn, nhl_id),
             "ev_line": line_ctx["ev_line"] if line_ctx else None,
             "pp_unit": line_ctx["pp_unit"] if line_ctx else None,
         }
