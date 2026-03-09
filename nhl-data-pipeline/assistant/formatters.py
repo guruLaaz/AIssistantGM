@@ -53,6 +53,49 @@ def _inj_str(injury: dict | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Shared player row helpers
+# ---------------------------------------------------------------------------
+
+
+def _add_salary(row: dict, p: dict) -> None:
+    """Add salary field (in $M) if positive."""
+    sal = p.get("salary", 0) or 0
+    if sal > 0:
+        row["sal"] = round(sal / 1e6, 1)
+
+
+def _player_row(p: dict) -> dict:
+    """Build a standard player row with position-branched stats."""
+    raw_pos = p.get("position", "")
+    row: dict = {
+        "name": p.get("player_name") or "",
+        "pos": _fpos(raw_pos),
+        "gp": p.get("games_played", 0),
+        "fp": round(p.get("fantasy_points", 0.0), 1),
+        "fpg": round(p.get("fpts_per_game", 0.0), 2),
+        "r14": round(p.get("recent_14_fpg", 0.0), 2),
+        "trend": p.get("trend", "neutral"),
+        "line": _line_tag({"ev_line": p.get("ev_line"), "pp_unit": p.get("pp_unit")}, raw_pos) or "-",
+    }
+    _add_salary(row, p)
+    if raw_pos == "G":
+        row["w"] = p.get("wins", 0)
+        row["l"] = p.get("losses", 0)
+        row["so"] = p.get("shutouts", 0)
+        row["sr"] = p.get("start_rate", 0.0)
+        row["sr14"] = p.get("start_rate_l14", 0.0)
+    else:
+        row["g"] = p.get("goals", 0)
+        row["a"] = p.get("assists", 0)
+        row["h"] = p.get("hits", 0)
+        row["b"] = p.get("blocks", 0)
+    inj = p.get("injury")
+    if inj:
+        row["inj"] = _inj_str(inj)
+    return row
+
+
+# ---------------------------------------------------------------------------
 # Roster
 # ---------------------------------------------------------------------------
 
@@ -60,38 +103,7 @@ def _inj_str(injury: dict | None) -> str | None:
 def format_roster(data: list[dict]) -> str:
     if not data:
         return "No players on roster."
-    rows = []
-    for p in data:
-        raw_pos = p.get("position", "")
-        inj = p.get("injury")
-        row: dict = {
-            "name": p.get("player_name") or "",
-            "pos": _fpos(raw_pos),
-            "gp": p.get("games_played", 0),
-            "fp": round(p.get("fantasy_points", 0.0), 1),
-            "fpg": round(p.get("fpts_per_game", 0.0), 2),
-            "r14": round(p.get("recent_14_fpg", 0.0), 2),
-            "trend": p.get("trend", "neutral"),
-            "line": _line_tag({"ev_line": p.get("ev_line"), "pp_unit": p.get("pp_unit")}, raw_pos) or "-",
-        }
-        sal = p.get("salary", 0) or 0
-        if sal > 0:
-            row["sal"] = round(sal / 1e6, 1)
-        if raw_pos == "G":
-            row["w"] = p.get("wins", 0)
-            row["l"] = p.get("losses", 0)
-            row["so"] = p.get("shutouts", 0)
-            row["sr"] = p.get("start_rate", 0.0)
-            row["sr14"] = p.get("start_rate_l14", 0.0)
-        else:
-            row["g"] = p.get("goals", 0)
-            row["a"] = p.get("assists", 0)
-            row["h"] = p.get("hits", 0)
-            row["b"] = p.get("blocks", 0)
-        if inj:
-            row["inj"] = _inj_str(inj)
-        rows.append(row)
-    return _json(rows)
+    return _json([_player_row(p) for p in data])
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +147,7 @@ def format_free_agents(data: list[dict], claims_remaining: int | None = None) ->
         inj = p.get("injury")
         if inj:
             row["inj"] = _inj_str(inj)
-        sal = p.get("salary", 0) or 0
-        if sal > 0:
-            row["sal"] = round(sal / 1e6, 1)
+        _add_salary(row, p)
         # Drop candidate enrichment (from VAR analysis)
         drops = p.get("drop_candidates", [])
         if drops:
@@ -245,7 +255,7 @@ def format_player_card(data: dict) -> str:
     news = data.get("news", [])
     if news:
         result["news"] = [
-            {"date": (n.get("published_at") or "")[:10], "hl": n.get("headline", "")}
+            {"date": (n.get("date") or "")[:10], "hl": n.get("headline", "")}
             for n in news
         ]
     return _json(result)
@@ -440,41 +450,7 @@ def format_team_roster(data: dict) -> str:
         "pf": round(info.get("points_for", 0), 1),
         "fpg": round(info.get("fpg", 0), 2),
     }
-    # Inline roster as JSON array instead of calling format_roster
-    # to avoid double-encoding
-    roster = data["roster"]
-    players = []
-    for p in roster:
-        raw_pos = p.get("position", "")
-        row: dict = {
-            "name": p.get("player_name", ""),
-            "pos": _fpos(raw_pos),
-            "gp": p.get("games_played", 0),
-            "fp": round(p.get("fantasy_points", 0.0), 1),
-            "fpg": round(p.get("fpts_per_game", 0.0), 2),
-            "r14": round(p.get("recent_14_fpg", 0.0), 2),
-            "trend": p.get("trend", "neutral"),
-            "line": _line_tag({"ev_line": p.get("ev_line"), "pp_unit": p.get("pp_unit")}, raw_pos) or "-",
-        }
-        sal = p.get("salary", 0) or 0
-        if sal > 0:
-            row["sal"] = round(sal / 1e6, 1)
-        if raw_pos == "G":
-            row["w"] = p.get("wins", 0)
-            row["l"] = p.get("losses", 0)
-            row["so"] = p.get("shutouts", 0)
-            row["sr"] = p.get("start_rate", 0.0)
-            row["sr14"] = p.get("start_rate_l14", 0.0)
-        else:
-            row["g"] = p.get("goals", 0)
-            row["a"] = p.get("assists", 0)
-            row["h"] = p.get("hits", 0)
-            row["b"] = p.get("blocks", 0)
-        inj = p.get("injury")
-        if inj:
-            row["inj"] = _inj_str(inj)
-        players.append(row)
-    result["roster"] = players
+    result["roster"] = [_player_row(p) for p in data["roster"]]
     return _json(result)
 
 
