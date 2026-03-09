@@ -156,7 +156,10 @@ def format_free_agents(data: list[dict], claims_remaining: int | None = None) ->
             for d in drops:
                 dr: dict = {
                     "name": d["player_name"], "pos": _fpos(d["position"]),
-                    "fpg": d["fpts_per_game"], "net": d["net_fpg"],
+                    "fpg": d["fpts_per_game"],
+                    "r14": d.get("recent_14_fpg", 0.0),
+                    "trend": d.get("trend", "neutral"),
+                    "net": d["net_fpg"],
                     "verdict": d.get("verdict", ""),
                 }
                 if d.get("news"):

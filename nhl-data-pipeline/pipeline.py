@@ -53,7 +53,7 @@ LOG_DIR = Path(__file__).parent / "logs"
 
 PIPELINE_STEPS = [
     "rosters", "schedules", "gamelogs", "seasontotals", "team-stats",
-    "injuries", "lines", "backfill-news", "fantrax-league",
+    "injuries", "moneypuck-injuries", "lines", "backfill-news", "fantrax-league",
 ]
 STEP_ALIASES: dict[str, list[str]] = {
     "stats": ["gamelogs", "seasontotals"],
@@ -64,7 +64,7 @@ STEP_ALIASES: dict[str, list[str]] = {
 # api-web.nhle.com and api.nhle.com/stats).  Non-NHL fetchers (Fantrax,
 # Rotowire, DailyFaceoff) can safely run alongside an NHL caller.
 PHASE_1 = ["rosters", "fantrax-league", "backfill-news"]  # rosters=NHL
-PHASE_2 = ["schedules", "injuries", "lines"]               # schedules=NHL
+PHASE_2 = ["schedules", "injuries", "moneypuck-injuries", "lines"]  # schedules=NHL
 PHASE_3 = ["gamelogs"]                                      # gamelogs=NHL stats
 PHASE_4 = ["seasontotals", "team-stats"]                    # seasontotals=NHL stats, team-stats=1 req
 
@@ -265,6 +265,13 @@ def _run_injuries(conn, season):
     return {"injuries_upserted": upserted, "unmatched": unmatched}
 
 
+def _run_moneypuck_injuries(conn, season):
+    from fetchers.moneypuck import fetch_injuries as mp_fetch, save_injuries as mp_save
+    data = mp_fetch()
+    upserted, unmatched = mp_save(conn, data)
+    return {"injuries_upserted": upserted, "unmatched": unmatched}
+
+
 def _run_lines(conn, season):
     return fetch_all_lines(conn)
 
@@ -324,6 +331,7 @@ _STEP_RUNNERS: dict[str, Any] = {
     "seasontotals": _run_seasontotals,
     "team-stats": _run_team_stats,
     "injuries": _run_injuries,
+    "moneypuck-injuries": _run_moneypuck_injuries,
     "lines": _run_lines,
     "backfill-news": _run_backfill_news,
     "fantrax-league": _run_fantrax_league,

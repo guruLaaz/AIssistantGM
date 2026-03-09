@@ -100,8 +100,15 @@ TRADE_TARGET_ELIGIBLE_PP_UNITS = {1, 2}
 # Drop Candidate / Value Above Replacement
 # ---------------------------------------------------------------------------
 
+FA_MAX_IR_RESULTS = 1                    # max IR players in FA search results
 DROP_CANDIDATES_COUNT = 3                 # drop candidates to return per FA result
 DROP_FPG_CEILING = {"F": 0.9, "D": 0.8}  # never suggest dropping above this L14 FP/G
 VERDICT_STRONG_THRESHOLD = 0.5            # net FP/G >= this = "strong"
 VERDICT_MARGINAL_THRESHOLD = 0.2          # net FP/G >= this = "marginal"
-MIN_ROSTER_FALLBACK = {"F": 12, "D": 6, "G": 2}  # safe default when no schedule data
+
+# ---------------------------------------------------------------------------
+# Season-Ending IR Filter
+# ---------------------------------------------------------------------------
+
+IR_SEASON_CUTOFF_DATE = "2026-03-10"  # ignore IR players returning after this date
+IR_MAX_DAYS_OUT = 90                   # ignore IR players returning 90+ days from now

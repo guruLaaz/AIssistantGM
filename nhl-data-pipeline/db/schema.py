@@ -159,6 +159,7 @@ def init_db(db_path: Path) -> None:
             injury_type TEXT,
             status TEXT,
             updated_at TEXT,
+            expected_return TEXT,
             FOREIGN KEY (player_id) REFERENCES players(id),
             UNIQUE (player_id, source)
         )
@@ -291,6 +292,12 @@ def init_db(db_path: Path) -> None:
     columns = [row[1] for row in cursor.fetchall()]
     if columns and "l14_record" not in columns:
         cursor.execute("ALTER TABLE nhl_team_stats ADD COLUMN l14_record TEXT")
+
+    # Migration: add expected_return to player_injuries if missing
+    cursor.execute("PRAGMA table_info(player_injuries)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if columns and "expected_return" not in columns:
+        cursor.execute("ALTER TABLE player_injuries ADD COLUMN expected_return TEXT")
 
     conn.commit()
     conn.execute("PRAGMA journal_mode=WAL")

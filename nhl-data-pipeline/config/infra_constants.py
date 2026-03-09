@@ -8,6 +8,7 @@ NHL_API_BASE = "https://api-web.nhle.com/v1"
 NHL_STATS_API_BASE = "https://api.nhle.com/stats/rest/en"
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 FANTRAX_API_URL = "https://www.fantrax.com/fxpa/req"
+MONEYPUCK_INJURIES_URL = "https://moneypuck.com/moneypuck/playerData/playerNews/current_injuries.csv"
 
 # ---------------------------------------------------------------------------
 # Timeouts & Retries

@@ -30,8 +30,10 @@ from assistant.queries import (
     _get_fantasy_gp,
     _find_drop_candidates,
     _claim_verdict,
-    _compute_min_roster,
+    _build_team_remaining,
+    _gp_capacity,
     _effective_fpg,
+    _is_season_ending_ir,
 )
 from config.fantasy_constants import FORWARD_PLAYABLE_TOI_PER_GAME
 
@@ -2517,6 +2519,7 @@ def _mock_player(
     fpg: float = 0.5,
     r14: float = 0.5,
     status: str = "active",
+    team: str = "TST",
 ) -> dict:
     """Create a minimal roster player dict for _find_drop_candidates tests."""
     return {
@@ -2526,6 +2529,7 @@ def _mock_player(
         "fpts_per_game": fpg,
         "recent_14_fpg": r14,
         "roster_status": status,
+        "team": team,
     }
 
 
@@ -2549,38 +2553,52 @@ def _build_roster(
 
 
 class TestFindDropCandidates:
-    """Tests for _find_drop_candidates helper (pure function, no DB)."""
+    """Tests for _find_drop_candidates helper (pure function, no DB).
+
+    Uses capacity-based viability: each TST player contributes 20 remaining
+    team games.  remaining_gp is set so capacity math mirrors the old
+    count-based tests.
+    """
+
+    # Every mock player is on "TST" with 20 remaining games.
+    # FA is on "OTH" with 20 remaining games.
+    TEAM_REM: dict[str, int] = {"TST": 20, "OTH": 20}
+
+    # Generous remaining GP so capacity is never the blocker unless
+    # the test specifically tightens it.
+    LOOSE_GP: dict[str, int] = {"F": 100, "D": 50, "G": 10}
 
     def test_same_position_returns_worst(self) -> None:
         """Picking up a F should suggest dropping the worst F."""
         roster = _build_roster()
-        # Add one weak forward
         roster.append(_mock_player("Weak F", "C", fpg=0.3, r14=0.3))
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster)
+        result = _find_drop_candidates(
+            roster, "F", self.LOOSE_GP, self.TEAM_REM, fa_team="OTH",
+        )
         assert len(result) >= 1
         assert result[0]["player_name"] == "Weak F"
 
-    def test_cross_position_respects_min_roster(self) -> None:
-        """Can't drop a D if it would go below minimum D count."""
-        # Exactly at minimum: 12F, 6D, 2G
+    def test_cross_position_blocked_by_capacity(self) -> None:
+        """Can't drop a D when D capacity would fall below remaining D GP."""
+        # 6D × 20 games = 120 capacity.  Set remaining D GP to 120 so
+        # losing one D (→ 100 capacity) would be insufficient.
         roster = _build_roster(forwards=12, defense=6, goalies=2)
-        # Add a weak D (would be best drop candidate by FPG)
         roster[12] = _mock_player("Weak D", "D", fpg=0.1, r14=0.1)
-        # Picking up a F: dropping a D would put D at 5, below min of 6
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster)
-        # Weak D should NOT appear (would violate D minimum)
+        tight_gp = {"F": 100, "D": 120, "G": 10}
+        result = _find_drop_candidates(
+            roster, "F", tight_gp, self.TEAM_REM, fa_team="OTH",
+        )
         drop_names = [c["player_name"] for c in result]
         assert "Weak D" not in drop_names
 
-    def test_cross_position_allowed_when_above_min(self) -> None:
-        """Can drop a D if there's a surplus above minimum."""
-        roster = _build_roster(forwards=12, defense=7, goalies=2)  # 7D > min 6
-        # Make one D very weak
+    def test_cross_position_allowed_when_surplus_capacity(self) -> None:
+        """Can drop a D when D capacity remains above remaining D GP."""
+        roster = _build_roster(forwards=12, defense=7, goalies=2)  # 7D × 20 = 140
         roster[12] = _mock_player("Weak D", "D", fpg=0.1, r14=0.1)
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster)
+        gp = {"F": 100, "D": 100, "G": 10}  # 140 - 20 = 120 > 100 ✓
+        result = _find_drop_candidates(
+            roster, "F", gp, self.TEAM_REM, fa_team="OTH",
+        )
         drop_names = [c["player_name"] for c in result]
         assert "Weak D" in drop_names
 
@@ -2588,20 +2606,20 @@ class TestFindDropCandidates:
         """IR-slotted players should never be drop candidates."""
         roster = _build_roster()
         roster.append(_mock_player("IR Guy", "C", fpg=0.1, r14=0.1, status="3"))
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster)
+        result = _find_drop_candidates(
+            roster, "F", self.LOOSE_GP, self.TEAM_REM, fa_team="OTH",
+        )
         drop_names = [c["player_name"] for c in result]
         assert "IR Guy" not in drop_names
 
     def test_fpg_ceiling_excludes_good_forwards(self) -> None:
         """Forwards with L14 FP/G >= 0.9 should be excluded."""
         roster = _build_roster(forwards=13)
-        # Make one forward just above ceiling
         roster[0] = _mock_player("Good F", "C", fpg=0.95, r14=0.95)
-        # Make another below ceiling
         roster[1] = _mock_player("OK F", "C", fpg=0.4, r14=0.4)
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster)
+        result = _find_drop_candidates(
+            roster, "F", self.LOOSE_GP, self.TEAM_REM, fa_team="OTH",
+        )
         drop_names = [c["player_name"] for c in result]
         assert "Good F" not in drop_names
         assert "OK F" in drop_names
@@ -2611,8 +2629,9 @@ class TestFindDropCandidates:
         roster = _build_roster(defense=7)
         roster[12] = _mock_player("Good D", "D", fpg=0.85, r14=0.85)
         roster[13] = _mock_player("Weak D", "D", fpg=0.3, r14=0.3)
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "D", min_roster)
+        result = _find_drop_candidates(
+            roster, "D", self.LOOSE_GP, self.TEAM_REM, fa_team="OTH",
+        )
         drop_names = [c["player_name"] for c in result]
         assert "Good D" not in drop_names
         assert "Weak D" in drop_names
@@ -2620,11 +2639,12 @@ class TestFindDropCandidates:
     def test_no_ceiling_for_goalies(self) -> None:
         """Goalies have no FPG ceiling — even high-FPG goalies are droppable."""
         roster = _build_roster(goalies=3)
-        # One goalie with high FPG but still droppable (3 > min 2)
         roster[-1] = _mock_player("Good G", "G", fpg=3.0, r14=3.0)
         roster[-2] = _mock_player("OK G", "G", fpg=1.5, r14=1.5)
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "G", min_roster)
+        # Use a high count to see past cheaper D players in the results
+        result = _find_drop_candidates(
+            roster, "G", self.LOOSE_GP, self.TEAM_REM, fa_team="OTH", count=10,
+        )
         drop_names = [c["player_name"] for c in result]
         assert "OK G" in drop_names
 
@@ -2632,8 +2652,9 @@ class TestFindDropCandidates:
         """Players below DEFAULT_MIN_GAMES should be excluded."""
         roster = _build_roster(forwards=13)
         roster[0] = _mock_player("Newbie", "C", gp=5, fpg=0.1, r14=0.1)
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster)
+        result = _find_drop_candidates(
+            roster, "F", self.LOOSE_GP, self.TEAM_REM, fa_team="OTH",
+        )
         drop_names = [c["player_name"] for c in result]
         assert "Newbie" not in drop_names
 
@@ -2642,45 +2663,76 @@ class TestFindDropCandidates:
         roster = _build_roster(forwards=16)
         for i in range(4):
             roster[i] = _mock_player(f"Weak{i}", "C", fpg=0.1 * (i + 1), r14=0.1 * (i + 1))
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster, count=3)
+        result = _find_drop_candidates(
+            roster, "F", self.LOOSE_GP, self.TEAM_REM, fa_team="OTH", count=3,
+        )
         assert len(result) == 3
-        # Sorted worst-first
         fpgs = [_effective_fpg(c) for c in result]
         assert fpgs == sorted(fpgs)
 
     def test_empty_when_no_viable_drops(self) -> None:
         """All roster players above ceiling → empty result."""
-        roster = _build_roster(f_fpg=1.5, d_fpg=1.2)  # all above ceiling
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster)
+        roster = _build_roster(f_fpg=1.5, d_fpg=1.2, g_fpg=5.0)
+        # Tighten G capacity so goalies can't be dropped either
+        tight_gp = {"F": 100, "D": 50, "G": 40}  # 2G × 20 = 40 = exact
+        result = _find_drop_candidates(
+            roster, "F", tight_gp, self.TEAM_REM, fa_team="OTH",
+        )
         assert result == []
 
-    def test_cant_drop_last_at_minimum(self) -> None:
-        """Can't drop a goalie if only 2 goalies (= minimum)."""
+    def test_cant_drop_goalie_when_capacity_tight(self) -> None:
+        """Can't drop a goalie when G capacity would fall below remaining G GP."""
         roster = _build_roster(goalies=2)
-        # Make one goalie weak
         roster[-1] = _mock_player("Weak G", "G", fpg=0.5, r14=0.5)
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        # Picking up a F, try to drop the weak goalie
-        result = _find_drop_candidates(roster, "F", min_roster)
+        # 2G × 20 = 40 capacity, need 40 → dropping one leaves 20 < 40
+        tight_gp = {"F": 100, "D": 50, "G": 40}
+        result = _find_drop_candidates(
+            roster, "F", tight_gp, self.TEAM_REM, fa_team="OTH",
+        )
         drop_names = [c["player_name"] for c in result]
-        # Goalies can't be dropped because 2-1=1 < min 2
         assert "Weak G" not in drop_names
 
     def test_recent_14_fpg_used_over_season(self) -> None:
         """Sorting uses recent_14_fpg when available, not season fpg."""
         roster = _build_roster(forwards=14)
-        # High season FPG but terrible recent → should be droppable
         roster[0] = _mock_player("Slumping", "C", fpg=1.2, r14=0.3)
-        # Low season FPG but good recent → should NOT be droppable
         roster[1] = _mock_player("Rising", "C", fpg=0.3, r14=1.2)
-        min_roster = {"F": 12, "D": 6, "G": 2}
-        result = _find_drop_candidates(roster, "F", min_roster)
+        result = _find_drop_candidates(
+            roster, "F", self.LOOSE_GP, self.TEAM_REM, fa_team="OTH",
+        )
         drop_names = [c["player_name"] for c in result]
         assert "Slumping" in drop_names
-        # Rising has r14=1.2 which is above F ceiling (0.9), so excluded
         assert "Rising" not in drop_names
+
+    def test_fa_team_capacity_counts(self) -> None:
+        """FA's team games are added to the position capacity."""
+        # 12F on TST (20 games each) = 240 capacity.  Need 240 F GP.
+        # Dropping one F → 220 capacity, but FA on OTH adds 20 → 240 ✓
+        roster = _build_roster(forwards=12)
+        roster[0] = _mock_player("Weak F", "C", fpg=0.3, r14=0.3)
+        tight_gp = {"F": 240, "D": 50, "G": 10}
+        result = _find_drop_candidates(
+            roster, "F", tight_gp, self.TEAM_REM, fa_team="OTH",
+        )
+        assert len(result) >= 1
+        assert result[0]["player_name"] == "Weak F"
+
+    def test_player_team_games_matter(self) -> None:
+        """Dropping a player on a team with more remaining games costs more capacity."""
+        roster = _build_roster(forwards=13)
+        # Player on team with 20 games left vs 5 games left
+        roster[0] = _mock_player("BigTeam F", "C", fpg=0.3, r14=0.3, team="BIG")
+        roster[1] = _mock_player("SmallTeam F", "C", fpg=0.3, r14=0.3, team="SML")
+        team_rem = {"TST": 20, "BIG": 20, "SML": 5, "OTH": 20}
+        # Tight capacity: 13 × ~20 = ~260, need 255.  Dropping BIG (-20) riskier
+        # than dropping SML (-5)
+        tight_gp = {"F": 255, "D": 50, "G": 10}
+        result = _find_drop_candidates(
+            roster, "F", tight_gp, team_rem, fa_team="OTH",
+        )
+        drop_names = [c["player_name"] for c in result]
+        # SmallTeam F should be viable (loses less capacity)
+        assert "SmallTeam F" in drop_names
 
 
 class TestClaimVerdict:
@@ -2708,64 +2760,87 @@ class TestClaimVerdict:
         assert _claim_verdict(-0.5) == "not worth a claim"
 
 
-class TestComputeMinRoster:
-    """Tests for _compute_min_roster (needs DB for schedule + GP data)."""
+class TestIsSeasonEndingIr:
+    """Tests for _is_season_ending_ir (pure function)."""
 
-    def test_computes_from_gp_and_schedule(self, db: sqlite3.Connection) -> None:
-        """Returns min counts based on remaining GP and future games."""
-        # Insert GP data
-        db.execute(
-            "INSERT OR REPLACE INTO fantasy_gp_per_position "
-            "(team_id, position, gp_used, gp_limit, gp_remaining) "
-            "VALUES ('team1', 'F', 800, 984, 184)"
-        )
-        db.execute(
-            "INSERT OR REPLACE INTO fantasy_gp_per_position "
-            "(team_id, position, gp_used, gp_limit, gp_remaining) "
-            "VALUES ('team1', 'D', 400, 492, 92)"
-        )
-        db.execute(
-            "INSERT OR REPLACE INTO fantasy_gp_per_position "
-            "(team_id, position, gp_used, gp_limit, gp_remaining) "
-            "VALUES ('team1', 'G', 70, 82, 12)"
-        )
-        # Add future games for a different team to avoid UNIQUE conflict
-        # (existing fixture already has EDM games)
-        for d in range(1, 19):
+    def test_ir_after_cutoff(self) -> None:
+        """IR player returning after IR_SEASON_CUTOFF_DATE is season-ending."""
+        inj = {"status": "IR", "expected_return": "2026-09-15"}
+        assert _is_season_ending_ir(inj) is True
+
+    def test_ir_indefinite(self) -> None:
+        """IR player with 2099-12-31 sentinel date is season-ending."""
+        inj = {"status": "IR", "expected_return": "2099-12-31"}
+        assert _is_season_ending_ir(inj) is True
+
+    def test_ir_returning_before_cutoff(self) -> None:
+        """IR player returning before cutoff and within 90 days is NOT filtered."""
+        inj = {"status": "IR", "expected_return": "2026-03-09"}
+        assert _is_season_ending_ir(inj) is False
+
+    def test_not_ir(self) -> None:
+        """Non-IR status is never season-ending."""
+        inj = {"status": "Day-To-Day", "expected_return": "2026-09-15"}
+        assert _is_season_ending_ir(inj) is False
+
+    def test_no_return_date(self) -> None:
+        """IR with no expected_return → False (let AI decide)."""
+        inj = {"status": "IR"}
+        assert _is_season_ending_ir(inj) is False
+
+    def test_none_injury(self) -> None:
+        """None injury dict → False."""
+        assert _is_season_ending_ir(None) is False
+
+    def test_healthy(self) -> None:
+        """Empty dict → False."""
+        assert _is_season_ending_ir({}) is False
+
+
+class TestBuildTeamRemaining:
+    """Tests for _build_team_remaining (needs DB with team_games)."""
+
+    def test_returns_future_games_per_team(self, db: sqlite3.Connection) -> None:
+        """Returns a dict mapping each team to its remaining game count."""
+        # Add future games for PIT
+        for d in range(1, 11):
             gd = (date.today() + timedelta(days=d)).isoformat()
             db.execute(
                 "INSERT OR IGNORE INTO team_games (team, season, game_date, opponent, home_away) "
                 "VALUES ('PIT', '20252026', ?, 'NYR', 'home')", (gd,)
             )
         db.commit()
+        result = _build_team_remaining(db)
+        assert result["PIT"] == 10
+        # EDM has future games from the base fixture
+        assert "EDM" in result
 
-        result = _compute_min_roster(db, "team1")
-        # 18 future games for PIT: F=ceil(184/18)=11, D=ceil(92/18)=6, G=ceil(12/18)=2
-        assert result["F"] >= 2
-        assert result["D"] >= 2
-        assert result["G"] >= 2
-        # F should be higher than G
-        assert result["F"] > result["G"]
-
-    def test_fallback_when_no_future_games(self, db: sqlite3.Connection) -> None:
-        """When team_games has no future games, use safe fallback."""
-        # Remove all future games
+    def test_empty_when_no_future_games(self, db: sqlite3.Connection) -> None:
+        """Returns empty dict when all games are in the past."""
         db.execute("DELETE FROM team_games WHERE game_date > date('now')")
         db.commit()
-        result = _compute_min_roster(db, "team1")
-        assert result == {"F": 12, "D": 6, "G": 2}
+        result = _build_team_remaining(db)
+        assert result == {}
 
-    def test_clamps_to_minimum_2(self, db: sqlite3.Connection) -> None:
-        """Every position should have at least 2 players minimum."""
-        # GP almost fully used: very little remaining
-        db.execute(
-            "INSERT OR REPLACE INTO fantasy_gp_per_position "
-            "(team_id, position, gp_used, gp_limit, gp_remaining) "
-            "VALUES ('team1', 'G', 82, 82, 0)"
-        )
-        db.commit()
-        result = _compute_min_roster(db, "team1")
-        assert result["G"] >= 2
+
+class TestGpCapacity:
+    """Tests for _gp_capacity (pure function)."""
+
+    def test_sums_remaining_games_for_position(self) -> None:
+        """Capacity = sum of remaining team games for players in the group."""
+        roster = [
+            _mock_player("F1", "C", team="DAL"),
+            _mock_player("F2", "C", team="VAN"),
+            _mock_player("D1", "D", team="DAL"),
+        ]
+        team_rem = {"DAL": 19, "VAN": 18}
+        assert _gp_capacity(roster, "F", team_rem) == 19 + 18  # F1 + F2
+        assert _gp_capacity(roster, "D", team_rem) == 19       # D1
+
+    def test_missing_team_contributes_zero(self) -> None:
+        """Players on teams not in team_remaining contribute 0."""
+        roster = [_mock_player("F1", "C", team="UNK")]
+        assert _gp_capacity(roster, "F", {"DAL": 19}) == 0
 
 
 class TestSearchFreeAgentsDropEnrichment:

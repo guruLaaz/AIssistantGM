@@ -44,15 +44,16 @@ from config.fantasy_constants import (
     DEFENSEMAN_PLAYABLE_TOI_PER_GAME,
     TRADE_TARGET_ELIGIBLE_EV_LINES,
     TRADE_TARGET_ELIGIBLE_PP_UNITS,
+    FA_MAX_IR_RESULTS,
     DROP_CANDIDATES_COUNT,
     DROP_FPG_CEILING,
     DEFAULT_MIN_GAMES,
     VERDICT_STRONG_THRESHOLD,
     VERDICT_MARGINAL_THRESHOLD,
-    MIN_ROSTER_FALLBACK,
     NEWS_RECENCY_DAYS,
+    IR_SEASON_CUTOFF_DATE,
+    IR_MAX_DAYS_OUT,
 )
-from math import ceil
 
 def _is_goalie(conn: sqlite3.Connection, player_id: int) -> bool:
     """Check if a player is a goalie."""
@@ -73,41 +74,29 @@ def _position_group(position: str | None) -> str:
     return "F"
 
 
-def _compute_min_roster(
-    conn: sqlite3.Connection,
-    team_id: str,
-    roster: list[dict] | None = None,
-) -> dict[str, int]:
-    """Compute minimum roster counts per position from remaining GP.
+def _build_team_remaining(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return remaining games per NHL team from the schedule.
 
-    Uses real GP data and the NHL schedule to determine how many players
-    are needed at each position to fill the remaining games.
-
-    Returns:
-        Dict like {"F": 13, "D": 7, "G": 2}.
+    Falls back to 0 for any team not in the schedule.
     """
-    gp_data = _get_fantasy_gp(conn, team_id, roster)
+    rows = conn.execute(
+        "SELECT team, COUNT(*) as cnt FROM team_games"
+        " WHERE game_date > date('now') GROUP BY team"
+    ).fetchall()
+    return {r["team"]: r["cnt"] for r in rows}
 
-    # Max remaining games any NHL team has
-    row = conn.execute(
-        "SELECT MAX(cnt) as max_games FROM ("
-        "  SELECT COUNT(*) as cnt FROM team_games"
-        "  WHERE game_date > date('now') GROUP BY team"
-        ")"
-    ).fetchone()
-    max_team_games = row["max_games"] if row and row["max_games"] else 0
 
-    if max_team_games == 0:
-        return dict(MIN_ROSTER_FALLBACK)
-
-    min_roster: dict[str, int] = {}
-    for pos in ("F", "D", "G"):
-        remaining = gp_data.get(pos, {}).get("remaining", 0)
-        if remaining <= 0 or max_team_games <= 0:
-            min_roster[pos] = 2
-        else:
-            min_roster[pos] = max(2, ceil(remaining / max_team_games))
-    return min_roster
+def _gp_capacity(
+    roster: list[dict],
+    pos_group: str,
+    team_remaining: dict[str, int],
+) -> int:
+    """Sum remaining team games for all roster players in *pos_group*."""
+    total = 0
+    for p in roster:
+        if _position_group(p.get("position")) == pos_group:
+            total += team_remaining.get(p.get("team", ""), 0)
+    return total
 
 
 def _effective_fpg(player: dict) -> float:
@@ -121,30 +110,33 @@ def _effective_fpg(player: dict) -> float:
 def _find_drop_candidates(
     roster: list[dict],
     fa_position_group: str,
-    min_roster: dict[str, int],
+    remaining_gp: dict[str, int],
+    team_remaining: dict[str, int],
+    fa_team: str = "",
     count: int = DROP_CANDIDATES_COUNT,
 ) -> list[dict]:
     """Find the best drop candidates for a given FA pickup.
 
     Walks the roster sorted by effective FP/G ascending (worst first) and
     returns up to *count* players whose removal keeps every position group
-    at or above the dynamic minimum.
+    with enough GP capacity to cover remaining fantasy GP.
 
     Args:
         roster: Full roster list from get_my_roster().
         fa_position_group: Position group of the FA being picked up ('F','D','G').
-        min_roster: Minimum viable player counts per position group.
+        remaining_gp: Remaining fantasy GP per position {'F': 232, 'D': 105, 'G': 13}.
+        team_remaining: NHL team → remaining games lookup.
+        fa_team: NHL team abbreviation of the FA (for capacity calculation).
         count: Number of drop candidates to return.
 
     Returns:
         List of drop-candidate dicts (worst-first), each with:
         player_name, position, fpts_per_game, recent_14_fpg.
     """
-    # Current position-group counts
-    pos_counts: dict[str, int] = {"F": 0, "D": 0, "G": 0}
-    for p in roster:
-        grp = _position_group(p.get("position"))
-        pos_counts[grp] = pos_counts.get(grp, 0) + 1
+    # Pre-compute current GP capacity per position group
+    capacity: dict[str, int] = {}
+    for grp in ("F", "D", "G"):
+        capacity[grp] = _gp_capacity(roster, grp, team_remaining)
 
     sorted_roster = sorted(roster, key=_effective_fpg)
 
@@ -169,20 +161,27 @@ def _find_drop_candidates(
         if ceiling is not None and eff >= ceiling:
             continue
 
-        # 4. Position viability: simulate swap
-        new_counts = pos_counts.copy()
-        new_counts[fa_position_group] = new_counts.get(fa_position_group, 0) + 1
-        new_counts[drop_group] -= 1
-        if any(new_counts.get(g, 0) < min_roster.get(g, 2) for g in min_roster):
-            continue
-
-        candidates.append({
-            "player_name": player["player_name"],
-            "position": player.get("position", ""),
-            "fpts_per_game": player.get("fpts_per_game", 0.0),
-            "recent_14_fpg": player.get("recent_14_fpg", 0.0),
-            "nhl_id": player.get("nhl_id"),
-        })
+        # 4. GP capacity viability: simulate swap
+        drop_team_games = team_remaining.get(player.get("team", ""), 0)
+        fa_team_games = team_remaining.get(fa_team, 0)
+        for grp in ("F", "D", "G"):
+            new_cap = capacity[grp]
+            if grp == drop_group:
+                new_cap -= drop_team_games
+            if grp == fa_position_group:
+                new_cap += fa_team_games
+            if new_cap < remaining_gp.get(grp, 0):
+                break
+        else:
+            candidates.append({
+                "player_name": player["player_name"],
+                "position": player.get("position", ""),
+                "fpts_per_game": player.get("fpts_per_game", 0.0),
+                "recent_14_fpg": player.get("recent_14_fpg", 0.0),
+                "trend": player.get("trend", "neutral"),
+                "nhl_id": player.get("nhl_id"),
+                "team": player.get("team", ""),
+            })
     return candidates
 
 
@@ -193,6 +192,27 @@ def _claim_verdict(net_fpg: float) -> str:
     if net_fpg >= VERDICT_MARGINAL_THRESHOLD:
         return "marginal"
     return "not worth a claim"
+
+
+def _is_season_ending_ir(injury: dict | None) -> bool:
+    """Return True if the player is on IR with a season-ending timeline.
+
+    Filters on two independent criteria (either disqualifies):
+    1. Expected return after IR_SEASON_CUTOFF_DATE (hard date)
+    2. Expected return more than IR_MAX_DAYS_OUT days from today
+    """
+    if not injury or injury.get("status") != "IR":
+        return False
+    ret = injury.get("expected_return")
+    if not ret:
+        return False  # no return date data → let the AI decide
+    ret_date = date.fromisoformat(ret)
+    cutoff = date.fromisoformat(IR_SEASON_CUTOFF_DATE)
+    if ret_date > cutoff:
+        return True
+    if (ret_date - date.today()).days > IR_MAX_DAYS_OUT:
+        return True
+    return False
 
 
 def _get_fantasy_gp(
@@ -519,19 +539,27 @@ def _get_goalie_season_stats(
 
 
 def _get_injury_status(conn: sqlite3.Connection, player_id: int) -> dict | None:
-    """Get current injury info for a player, or None if healthy."""
+    """Get current injury info for a player, or None if healthy.
+
+    Prefers the moneypuck source (has expected_return) over rotowire.
+    """
     row = conn.execute(
-        "SELECT injury_type, status, updated_at "
-        "FROM player_injuries WHERE player_id = ?",
+        "SELECT injury_type, status, updated_at, expected_return "
+        "FROM player_injuries WHERE player_id = ? "
+        "ORDER BY expected_return IS NOT NULL DESC, source = 'moneypuck' DESC "
+        "LIMIT 1",
         (player_id,),
     ).fetchone()
     if row is None:
         return None
-    return {
+    result: dict = {
         "injury_type": row["injury_type"],
         "status": row["status"],
         "updated_at": row["updated_at"],
     }
+    if row["expected_return"]:
+        result["expected_return"] = row["expected_return"]
+    return result
 
 
 def _get_line_context(
@@ -891,14 +919,36 @@ def search_free_agents(
         results.sort(key=lambda x: x.get(sort_by, 0), reverse=True)
         final = results[:limit]
 
+    # --- Filter season-ending IR and cap remaining IR players ---
+    ir_count = 0
+    capped: list[dict] = []
+    for fa in final:
+        inj = fa.get("injury")
+        if _is_season_ending_ir(inj):
+            continue
+        if isinstance(inj, dict) and inj.get("status") == "IR":
+            ir_count += 1
+            if ir_count > FA_MAX_IR_RESULTS:
+                continue
+        capped.append(fa)
+    final = capped
+
     # --- Enrich with drop candidates and net value ---
     if team_id is not None:
         roster = get_my_roster(conn, team_id, season)
-        min_roster = _compute_min_roster(conn, team_id, roster)
+        team_remaining = _build_team_remaining(conn)
+        gp_data = _get_fantasy_gp(conn, team_id, roster)
+        remaining_gp = {
+            pos: gp_data.get(pos, {}).get("remaining", 0)
+            for pos in ("F", "D", "G")
+        }
         for fa in final:
             fa_pos_group = _position_group(fa["position"])
             fa_eff = _effective_fpg(fa)
-            candidates = _find_drop_candidates(roster, fa_pos_group, min_roster)
+            candidates = _find_drop_candidates(
+                roster, fa_pos_group, remaining_gp, team_remaining,
+                fa_team=fa.get("team", ""),
+            )
             drop_list = []
             for c in candidates:
                 c_eff = _effective_fpg(c)
@@ -1652,6 +1702,10 @@ def get_trade_candidates(
                 "pp_unit": line_ctx["pp_unit"] if line_ctx else None,
             },
         })
+
+    # Filter out season-ending IR from both pools
+    candidates = [c for c in candidates if not _is_season_ending_ir(c.get("injury"))]
+    high_toi_candidates = [c for c in high_toi_candidates if not _is_season_ending_ir(c.get("injury"))]
 
     candidates.sort(key=lambda c: c["trend_pct"], reverse=True)
     # Reserve up to 5 slots for high-TOI underperformers so they aren't
