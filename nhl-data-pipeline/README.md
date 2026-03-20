@@ -82,6 +82,7 @@ Each step continues on failure so one broken step doesn't block the rest.
 
 - **NHL Web API** (`api-web.nhle.com/v1`) — rosters, schedules
 - **NHL Stats API** (`api.nhle.com/stats/rest/en`) — game logs, season totals (bulk; includes hits/blocks)
+- **PuckPedia** (`depth-charts.puckpedia.com`) — line combinations (EV lines, PP/PK units) for all 32 teams. Scraped via Playwright (React SSR page); throttled to 1 req/sec
 - **Rotowire** (`rotowire.com`) — injury reports (JSON endpoint)
 - **Fantrax** (`fantrax.com`) — fantasy league data and player news
   - League API (`fantrax.com/fxpa/req`) — standings, team rosters, fantasy points
@@ -149,7 +150,7 @@ SQLite at `db/nhl_data.db` with 13 tables:
 - `fantasy_roster_slots` — player roster assignments per fantasy team (player_name, position, salary, fantasy points)
 - `fantasy_gp_per_position` — actual fantasy games-played per position group (F/D/G) per team, from Fantrax
 - `fantrax_players` — all ~8,400 players with Fantrax ID, name, team, position, and NHL salary
-- `line_combinations` — even-strength lines, PP units, PK units per team (from DailyFaceoff via Rotowire)
+- `line_combinations` — even-strength lines, PP units, PK units per team (from PuckPedia depth charts)
 
 ## Data quirks & known limitations
 

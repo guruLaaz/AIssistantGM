@@ -585,13 +585,13 @@ class TestLinesStep:
         self, mock_fetch: MagicMock, db_path: Path
     ) -> None:
         """Lines step failure returns error StepResult."""
-        mock_fetch.side_effect = ConnectionError("DailyFaceoff down")
+        mock_fetch.side_effect = ConnectionError("PuckPedia down")
 
         result = run_step("lines", db_path, "20252026")
 
         assert result.name == "lines"
         assert result.status == "error"
-        assert "DailyFaceoff down" in result.error
+        assert "PuckPedia down" in result.error
         assert result.duration_s >= 0
 
 

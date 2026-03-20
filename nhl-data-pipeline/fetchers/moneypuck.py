@@ -78,6 +78,7 @@ def save_injuries(
 
         if player_id is None:
             unmatched += 1
+            logger.warning("Unmatched: %s (%s)", player_name, team)
 
         # Normalize status
         raw_status = row.get("playerInjuryStatus", "")

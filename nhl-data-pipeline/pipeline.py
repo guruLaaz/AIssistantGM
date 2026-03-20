@@ -39,7 +39,7 @@ from fetchers.nhl_api import (
 from assistant.scoring import calc_skater_fpts
 from fetchers.fantrax_league import sync_fantrax_league
 from fetchers.fantrax_news import backfill_fantrax_news
-from fetchers.dailyfaceoff import fetch_all_lines
+from fetchers.puckpedia import fetch_all_lines
 from fetchers.rotowire import (
     backfill_news_player_ids,
     fetch_injuries,
@@ -62,7 +62,7 @@ STEP_ALIASES: dict[str, list[str]] = {
 # Parallel execution phases — each phase waits for the previous to complete.
 # CONSTRAINT: only ONE NHL API caller per phase (shared rate limit across
 # api-web.nhle.com and api.nhle.com/stats).  Non-NHL fetchers (Fantrax,
-# Rotowire, DailyFaceoff) can safely run alongside an NHL caller.
+# Rotowire, PuckPedia) can safely run alongside an NHL caller.
 PHASE_1 = ["rosters", "fantrax-league", "backfill-news"]  # rosters=NHL
 PHASE_2 = ["schedules", "injuries", "moneypuck-injuries", "lines"]  # schedules=NHL
 PHASE_3 = ["gamelogs"]                                      # gamelogs=NHL stats

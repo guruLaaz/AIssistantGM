@@ -1,4 +1,4 @@
-"""Tests for fetchers/dailyfaceoff.py — DailyFaceoff line combinations fetcher."""
+"""Tests for fetchers/puckpedia.py — PuckPedia line combinations fetcher."""
 
 from __future__ import annotations
 
@@ -6,16 +6,14 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 
 from db.schema import get_db, init_db, upsert_player
-from fetchers.dailyfaceoff import (
-    TEAM_SLUGS,
+from fetchers.puckpedia import (
+    TEAM_ABBREVS,
     fetch_all_lines,
-    fetch_team_lines,
     parse_team_lines,
     save_team_lines,
 )
@@ -63,139 +61,66 @@ def db(db_path: Path) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
-# Mock helpers — matches current DailyFaceoff __NEXT_DATA__ structure
+# Mock data — matches the dict returned by fetch_team_lines (Playwright)
 # ---------------------------------------------------------------------------
 
-def _make_player(
-    name: str,
-    position: str = "c",
-    rating: float | None = 8.5,
-    category: str = "ev",
-    group_id: str = "f1",
-) -> dict:
-    """Build a player entry matching the current DailyFaceoff flat structure."""
-    return {
-        "name": name,
-        "positionIdentifier": position,
-        "rating": rating,
-        "categoryIdentifier": category,
-        "groupIdentifier": group_id,
-    }
-
-
-# The current DailyFaceoff structure: combinations is a dict with a flat
-# "players" list.  Each player carries its own category/group identifiers.
-# The same player appears once per category (EV, PP, PK).
-MOCK_COMBINATIONS: dict[str, Any] = {
-    "teamId": 1,
-    "teamAbbreviation": "EDM",
-    "teamName": "Edmonton Oilers",
-    "teamSlug": "edmonton-oilers",
-    "players": [
-        # EV forward line 1
-        _make_player("Zach Hyman", "lw", 8.0, "ev", "f1"),
-        _make_player("Connor McDavid", "c", 8.5, "ev", "f1"),
-        _make_player("Someone Else", "rw", 7.0, "ev", "f1"),
-        # EV forward line 2
-        _make_player("Leon Draisaitl", "c", 8.0, "ev", "f2"),
-        _make_player("Another Guy", "lw", 6.5, "ev", "f2"),
-        _make_player("Third Guy", "rw", 6.0, "ev", "f2"),
-        # PP unit 1
-        _make_player("Connor McDavid", "c", 8.5, "pp", "pp1"),
-        _make_player("Leon Draisaitl", "c", 8.0, "pp", "pp1"),
-        _make_player("Zach Hyman", "lw", 8.0, "pp", "pp1"),
-        _make_player("PP Dman", "d", 7.0, "pp", "pp1"),
-        _make_player("PP Dman2", "d", 6.5, "pp", "pp1"),
-        # PP unit 2
-        _make_player("Another Guy", "lw", 6.5, "pp", "pp2"),
-        _make_player("Third Guy", "rw", 6.0, "pp", "pp2"),
-        # PK unit 1
-        _make_player("Connor McDavid", "c", 8.5, "pk", "pk1"),
-        _make_player("Zach Hyman", "lw", 8.0, "pk", "pk1"),
-        # EV defense pair 1
-        _make_player("Top D1", "d", 7.5, "ev", "d1"),
-        _make_player("Top D2", "d", 7.0, "ev", "d1"),
-        # Off-ice player — should be skipped
-        _make_player("Benched Guy", "c", 5.0, "oi", "oi"),
-        # Goalie — should be skipped
-        _make_player("Some Goalie", "g", 8.0, "ev", "g"),
+MOCK_RAW: dict[str, Any] = {
+    "lw": [
+        {"id": "1", "name": "Zach Hyman"},
+        {"id": "2", "name": "Another Guy"},
     ],
-    "lines": [],
+    "centers": [
+        {"id": "3", "name": "Connor McDavid"},
+        {"id": "4", "name": "Leon Draisaitl"},
+    ],
+    "rw": [
+        {"id": "5", "name": "Someone Else"},
+        {"id": "6", "name": "Third Guy"},
+    ],
+    "ld": [
+        {"id": "7", "name": "Top D1"},
+    ],
+    "rd": [
+        {"id": "8", "name": "Top D2"},
+    ],
+    "goalies": [
+        {"id": "9", "name": "Some Goalie"},
+    ],
+    "pp1": [
+        {"id": "3", "name": "Connor McDavid"},
+        {"id": "4", "name": "Leon Draisaitl"},
+        {"id": "1", "name": "Zach Hyman"},
+        {"id": "10", "name": "PP Dman"},
+        {"id": "11", "name": "PP Dman2"},
+    ],
+    "pp2": [
+        {"id": "2", "name": "Another Guy"},
+        {"id": "6", "name": "Third Guy"},
+    ],
+    "pk1": [
+        {"id": "3", "name": "Connor McDavid"},
+        {"id": "1", "name": "Zach Hyman"},
+    ],
+    "pk2": [
+        {"id": "4", "name": "Leon Draisaitl"},
+        {"id": "2", "name": "Another Guy"},
+    ],
 }
 
 
-def _build_html(combinations: dict) -> str:
-    """Build a minimal HTML page with __NEXT_DATA__ containing combinations."""
-    next_data = {
-        "props": {
-            "pageProps": {
-                "combinations": combinations,
-            }
-        }
-    }
-    return (
-        '<html><head></head><body>'
-        f'<script id="__NEXT_DATA__" type="application/json">'
-        f'{json.dumps(next_data)}'
-        '</script></body></html>'
-    )
-
-
-def _make_response(html: str, status_code: int = 200) -> Mock:
-    resp = Mock()
-    resp.status_code = status_code
-    resp.text = html
-    resp.raise_for_status.return_value = None
-    return resp
-
-
 # =============================================================================
-# TEAM_SLUGS Tests
+# TEAM_ABBREVS Tests
 # =============================================================================
 
 
-class TestTeamSlugs:
+class TestTeamAbbrevs:
     def test_all_32_teams_present(self) -> None:
-        assert len(TEAM_SLUGS) == 32
+        assert len(TEAM_ABBREVS) == 32
 
     def test_known_teams(self) -> None:
-        assert TEAM_SLUGS["TOR"] == "toronto-maple-leafs"
-        assert TEAM_SLUGS["EDM"] == "edmonton-oilers"
-        assert TEAM_SLUGS["MTL"] == "montreal-canadiens"
-
-
-# =============================================================================
-# fetch_team_lines Tests
-# =============================================================================
-
-
-class TestFetchTeamLines:
-    def test_extracts_combinations(self) -> None:
-        html = _build_html(MOCK_COMBINATIONS)
-        session = MagicMock()
-        session.get.return_value = _make_response(html)
-
-        combos = fetch_team_lines("edmonton-oilers", session=session)
-
-        assert isinstance(combos, dict)
-        assert "players" in combos
-        assert len(combos["players"]) == len(MOCK_COMBINATIONS["players"])
-
-    def test_raises_on_missing_next_data(self) -> None:
-        session = MagicMock()
-        session.get.return_value = _make_response("<html><body>No data</body></html>")
-
-        with pytest.raises(ValueError, match="Could not find __NEXT_DATA__"):
-            fetch_team_lines("edmonton-oilers", session=session)
-
-    def test_raises_on_http_error(self) -> None:
-        session = MagicMock()
-        resp = Mock()
-        resp.raise_for_status.side_effect = requests.HTTPError("404")
-        session.get.return_value = resp
-
-        with pytest.raises(requests.HTTPError):
-            fetch_team_lines("fake-team", session=session)
+        assert "TOR" in TEAM_ABBREVS
+        assert "EDM" in TEAM_ABBREVS
+        assert "MTL" in TEAM_ABBREVS
 
 
 # =============================================================================
@@ -205,22 +130,21 @@ class TestFetchTeamLines:
 
 class TestParseTeamLines:
     def test_groups_by_player(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         names = {p["player_name"] for p in players}
         assert "Connor McDavid" in names
         assert "Leon Draisaitl" in names
         assert "Zach Hyman" in names
 
-    def test_skips_off_ice_and_goalies(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+    def test_goalies_excluded(self) -> None:
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         names = {p["player_name"] for p in players}
-        assert "Benched Guy" not in names
         assert "Some Goalie" not in names
 
     def test_ev_line_assignment(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         mcdavid = next(p for p in players if p["player_name"] == "Connor McDavid")
         assert mcdavid["ev_line"] == 1
@@ -230,8 +154,20 @@ class TestParseTeamLines:
         assert drai["ev_line"] == 2
         assert drai["ev_group"] == "f2"
 
+    def test_forward_position_assignment(self) -> None:
+        players = parse_team_lines(MOCK_RAW, "EDM")
+
+        hyman = next(p for p in players if p["player_name"] == "Zach Hyman")
+        assert hyman["position"] == "lw"
+
+        mcdavid = next(p for p in players if p["player_name"] == "Connor McDavid")
+        assert mcdavid["position"] == "c"
+
+        other = next(p for p in players if p["player_name"] == "Someone Else")
+        assert other["position"] == "rw"
+
     def test_pp_unit_assignment(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         mcdavid = next(p for p in players if p["player_name"] == "Connor McDavid")
         assert mcdavid["pp_unit"] == 1
@@ -241,13 +177,18 @@ class TestParseTeamLines:
         assert another["pp_unit"] == 2
 
     def test_pk_unit_assignment(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         mcdavid = next(p for p in players if p["player_name"] == "Connor McDavid")
         assert mcdavid["pk_unit"] == 1
+        assert mcdavid["pk_group"] == "pk1"
+
+        drai = next(p for p in players if p["player_name"] == "Leon Draisaitl")
+        assert drai["pk_unit"] == 2
+        assert drai["pk_group"] == "pk2"
 
     def test_ev_linemates(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         mcdavid = next(p for p in players if p["player_name"] == "Connor McDavid")
         assert "Zach Hyman" in mcdavid["ev_linemates"]
@@ -255,38 +196,57 @@ class TestParseTeamLines:
         assert "Connor McDavid" not in mcdavid["ev_linemates"]
 
     def test_pp_linemates(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         mcdavid = next(p for p in players if p["player_name"] == "Connor McDavid")
         assert "Leon Draisaitl" in mcdavid["pp_linemates"]
         assert len(mcdavid["pp_linemates"]) == 4
 
     def test_defense_line_number(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         d1 = next(p for p in players if p["player_name"] == "Top D1")
         assert d1["ev_line"] == 1
         assert d1["ev_group"] == "d1"
+        assert d1["position"] == "d"
 
-    def test_rating_extracted(self) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+    def test_defense_linemates(self) -> None:
+        players = parse_team_lines(MOCK_RAW, "EDM")
+
+        d1 = next(p for p in players if p["player_name"] == "Top D1")
+        assert d1["ev_linemates"] == ["Top D2"]
+
+    def test_rating_always_none(self) -> None:
+        players = parse_team_lines(MOCK_RAW, "EDM")
 
         mcdavid = next(p for p in players if p["player_name"] == "Connor McDavid")
-        assert mcdavid["rating"] == 8.5
+        assert mcdavid["rating"] is None
 
-    def test_empty_combinations(self) -> None:
-        players = parse_team_lines({"players": []}, "EDM")
+    def test_empty_data(self) -> None:
+        empty_raw = {
+            "lw": [], "centers": [], "rw": [],
+            "ld": [], "rd": [], "goalies": [],
+            "pp1": [], "pp2": [], "pk1": [], "pk2": [],
+        }
+        players = parse_team_lines(empty_raw, "EDM")
         assert players == []
 
-    def test_player_with_no_name_skipped(self) -> None:
-        combos = {
-            "players": [
-                {"name": "", "positionIdentifier": "c", "rating": 5,
-                 "categoryIdentifier": "ev", "groupIdentifier": "f1"},
-            ],
-        }
-        players = parse_team_lines(combos, "EDM")
-        assert len(players) == 0
+    def test_pp_only_player_gets_record(self) -> None:
+        """A player appearing only in PP (not EV) should still get a record."""
+        players = parse_team_lines(MOCK_RAW, "EDM")
+
+        pp_dman = next(p for p in players if p["player_name"] == "PP Dman")
+        assert pp_dman["pp_unit"] == 1
+        assert pp_dman["ev_line"] is None
+
+    def test_merge_ev_pp_pk(self) -> None:
+        """Player appearing in EV + PP + PK should have all fields merged."""
+        players = parse_team_lines(MOCK_RAW, "EDM")
+
+        mcdavid = next(p for p in players if p["player_name"] == "Connor McDavid")
+        assert mcdavid["ev_line"] == 1
+        assert mcdavid["pp_unit"] == 1
+        assert mcdavid["pk_unit"] == 1
 
 
 # =============================================================================
@@ -296,7 +256,7 @@ class TestParseTeamLines:
 
 class TestSaveTeamLines:
     def test_saves_players_to_db(self, db: sqlite3.Connection) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
         saved, unmatched = save_team_lines(db, "EDM", players)
 
         assert saved > 0
@@ -304,7 +264,7 @@ class TestSaveTeamLines:
         assert len(rows) == saved
 
     def test_resolves_player_ids(self, db: sqlite3.Connection) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
         save_team_lines(db, "EDM", players)
 
         row = db.execute(
@@ -313,7 +273,7 @@ class TestSaveTeamLines:
         assert row["player_id"] == 8478402
 
     def test_unmatched_get_null_id(self, db: sqlite3.Connection) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
         saved, unmatched = save_team_lines(db, "EDM", players)
 
         assert unmatched > 0  # "Someone Else", "Another Guy", etc.
@@ -324,7 +284,7 @@ class TestSaveTeamLines:
         assert null_rows["cnt"] == unmatched
 
     def test_clears_old_data_on_resave(self, db: sqlite3.Connection) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
         save_team_lines(db, "EDM", players)
 
         count_before = db.execute(
@@ -341,7 +301,7 @@ class TestSaveTeamLines:
         assert count_after == count_before  # no duplicates
 
     def test_linemates_stored_as_json(self, db: sqlite3.Connection) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
         save_team_lines(db, "EDM", players)
 
         row = db.execute(
@@ -355,7 +315,7 @@ class TestSaveTeamLines:
         assert "Zach Hyman" in ev_mates
 
     def test_updated_at_set(self, db: sqlite3.Connection) -> None:
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
         save_team_lines(db, "EDM", players)
 
         row = db.execute(
@@ -371,24 +331,29 @@ class TestSaveTeamLines:
 
 
 class TestFetchAllLines:
-    @patch("fetchers.dailyfaceoff.time.sleep")
-    @patch("fetchers.dailyfaceoff.fetch_team_lines")
-    @patch("fetchers.dailyfaceoff.parse_team_lines")
-    @patch("fetchers.dailyfaceoff.save_team_lines")
+    @patch("fetchers.puckpedia.time.sleep")
+    @patch("fetchers.puckpedia._close_browser")
+    @patch("fetchers.puckpedia._launch_browser")
+    @patch("fetchers.puckpedia.fetch_team_lines")
+    @patch("fetchers.puckpedia.parse_team_lines")
+    @patch("fetchers.puckpedia.save_team_lines")
     def test_iterates_all_teams(
         self,
         mock_save: MagicMock,
         mock_parse: MagicMock,
         mock_fetch: MagicMock,
+        mock_launch: MagicMock,
+        mock_close: MagicMock,
         mock_sleep: MagicMock,
         db: sqlite3.Connection,
     ) -> None:
-        mock_fetch.return_value = MOCK_COMBINATIONS
-        mock_parse.return_value = [{"player_name": "Test", "position": "C",
+        mock_launch.return_value = (MagicMock(), MagicMock(), MagicMock())
+        mock_fetch.return_value = MOCK_RAW
+        mock_parse.return_value = [{"player_name": "Test", "position": "c",
                                      "ev_line": 1, "pp_unit": None, "pk_unit": None,
                                      "ev_group": "f1", "pp_group": None, "pk_group": None,
                                      "ev_linemates": [], "pp_linemates": [],
-                                     "rating": 8.0}]
+                                     "rating": None}]
         mock_save.return_value = (1, 0)
 
         result = fetch_all_lines(db)
@@ -397,35 +362,49 @@ class TestFetchAllLines:
         assert result["players_saved"] == 32
         assert result["teams_failed"] == 0
         assert mock_sleep.call_count == 31  # sleep between teams
+        mock_close.assert_called_once()
 
-    @patch("fetchers.dailyfaceoff.time.sleep")
-    @patch("fetchers.dailyfaceoff.fetch_team_lines")
+    @patch("fetchers.puckpedia.time.sleep")
+    @patch("fetchers.puckpedia._close_browser")
+    @patch("fetchers.puckpedia._launch_browser")
+    @patch("fetchers.puckpedia.fetch_team_lines")
     def test_continues_on_team_failure(
         self,
         mock_fetch: MagicMock,
+        mock_launch: MagicMock,
+        mock_close: MagicMock,
         mock_sleep: MagicMock,
         db: sqlite3.Connection,
     ) -> None:
-        mock_fetch.side_effect = requests.ConnectionError("Network error")
+        mock_launch.return_value = (MagicMock(), MagicMock(), MagicMock())
+        mock_fetch.side_effect = Exception("Page load failed")
 
         result = fetch_all_lines(db)
 
         assert result["teams_failed"] == 32
         assert result["players_saved"] == 0
+        mock_close.assert_called_once()
 
-    @patch("fetchers.dailyfaceoff.time.sleep")
-    @patch("fetchers.dailyfaceoff.fetch_team_lines")
-    @patch("fetchers.dailyfaceoff.parse_team_lines")
-    @patch("fetchers.dailyfaceoff.save_team_lines")
+    @patch("fetchers.puckpedia.time.sleep")
+    @patch("fetchers.puckpedia._close_browser")
+    @patch("fetchers.puckpedia._launch_browser")
+    @patch("fetchers.puckpedia.fetch_team_lines")
+    @patch("fetchers.puckpedia.parse_team_lines")
+    @patch("fetchers.puckpedia.save_team_lines")
     def test_accumulates_unmatched(
         self,
         mock_save: MagicMock,
         mock_parse: MagicMock,
         mock_fetch: MagicMock,
+        mock_launch: MagicMock,
+        mock_close: MagicMock,
         mock_sleep: MagicMock,
         db: sqlite3.Connection,
     ) -> None:
-        mock_fetch.return_value = {"players": []}
+        mock_launch.return_value = (MagicMock(), MagicMock(), MagicMock())
+        mock_fetch.return_value = {"lw": [], "centers": [], "rw": [],
+                                   "ld": [], "rd": [], "goalies": [],
+                                   "pp1": [], "pp2": [], "pk1": [], "pk2": []}
         mock_parse.return_value = []
         mock_save.return_value = (5, 3)
 
@@ -433,6 +412,27 @@ class TestFetchAllLines:
 
         assert result["players_saved"] == 5 * 32
         assert result["unmatched"] == 3 * 32
+
+    @patch("fetchers.puckpedia.time.sleep")
+    @patch("fetchers.puckpedia._close_browser")
+    @patch("fetchers.puckpedia._launch_browser")
+    @patch("fetchers.puckpedia.fetch_team_lines")
+    def test_browser_closed_on_error(
+        self,
+        mock_fetch: MagicMock,
+        mock_launch: MagicMock,
+        mock_close: MagicMock,
+        mock_sleep: MagicMock,
+        db: sqlite3.Connection,
+    ) -> None:
+        """Browser is always closed even if an unexpected error occurs."""
+        mock_launch.return_value = (MagicMock(), MagicMock(), MagicMock())
+        mock_fetch.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt):
+            fetch_all_lines(db)
+
+        mock_close.assert_called_once()
 
 
 # =============================================================================
@@ -475,7 +475,7 @@ class TestGetLineContext:
 
     def test_returns_line_data(self, db: sqlite3.Connection) -> None:
         from assistant.queries import _get_line_context
-        players = parse_team_lines(MOCK_COMBINATIONS, "EDM")
+        players = parse_team_lines(MOCK_RAW, "EDM")
         save_team_lines(db, "EDM", players)
 
         result = _get_line_context(db, 8478402)
@@ -488,40 +488,46 @@ class TestGetLineContext:
 
 
 # =============================================================================
-# Live integration test — catches API structure changes
+# Live integration test — catches page structure changes
 # =============================================================================
 
 
-class TestLiveDailyFaceoff:
-    """Fetch a real DailyFaceoff page and parse it.
+class TestLivePuckPedia:
+    """Fetch a real PuckPedia depth chart and parse it.
 
-    Catches JSON structure changes that unit tests with mock data cannot.
-    Run with: pytest --integration tests/test_dailyfaceoff.py::TestLiveDailyFaceoff -v
+    Catches DOM structure changes that unit tests with mock data cannot.
+    Run with: pytest --integration tests/test_puckpedia.py::TestLivePuckPedia -v
     """
 
     @pytest.mark.integration
     def test_fetch_and_parse_one_team(self) -> None:
         """Fetch EDM lines from the live site and verify parsing works."""
-        combos = fetch_team_lines("edmonton-oilers")
+        from fetchers.puckpedia import _launch_browser, _close_browser, fetch_team_lines
 
-        assert isinstance(combos, dict)
-        assert "players" in combos
-        assert len(combos["players"]) > 0
+        pw, browser, page = _launch_browser()
+        try:
+            raw = fetch_team_lines(page, "EDM")
 
-        players = parse_team_lines(combos, "EDM")
+            assert isinstance(raw, dict)
+            assert len(raw["lw"]) > 0
+            assert len(raw["centers"]) > 0
 
-        assert len(players) > 10  # a real team has 20+ players
-        names = {p["player_name"] for p in players}
-        assert len(names) > 10
+            players = parse_team_lines(raw, "EDM")
 
-        # At least some players should have EV line assignments
-        ev_assigned = [p for p in players if p["ev_line"] is not None]
-        assert len(ev_assigned) > 5
+            assert len(players) > 10  # a real team has 20+ players
+            names = {p["player_name"] for p in players}
+            assert len(names) > 10
 
-        # At least some should have PP assignments
-        pp_assigned = [p for p in players if p["pp_unit"] is not None]
-        assert len(pp_assigned) > 0
+            # At least some players should have EV line assignments
+            ev_assigned = [p for p in players if p["ev_line"] is not None]
+            assert len(ev_assigned) > 5
 
-        # Linemates should be populated
-        first_liner = next(p for p in players if p["ev_line"] == 1 and p["ev_group"] == "f1")
-        assert len(first_liner["ev_linemates"]) >= 1
+            # At least some should have PP assignments
+            pp_assigned = [p for p in players if p["pp_unit"] is not None]
+            assert len(pp_assigned) > 0
+
+            # Linemates should be populated
+            first_liner = next(p for p in players if p["ev_line"] == 1 and p["ev_group"] == "f1")
+            assert len(first_liner["ev_linemates"]) >= 1
+        finally:
+            _close_browser(pw, browser)

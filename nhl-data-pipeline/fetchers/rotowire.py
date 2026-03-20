@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import random
 import re
 import sqlite3
 import time
@@ -24,7 +25,7 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
 
-from config.infra_constants import HTTP_TIMEOUT, ROTOWIRE_SEARCH_DELAY
+from config.infra_constants import HTTP_TIMEOUT, ROTOWIRE_SEARCH_DELAY, ROTOWIRE_SEARCH_JITTER
 from db.schema import get_db, init_db, upsert_player
 
 logger = logging.getLogger("pipeline.rotowire")
@@ -91,6 +92,7 @@ def match_player_name(
     conn: sqlite3.Connection,
     name: str | None,
     team_abbrev: str | None = None,
+    position: str | None = None,
 ) -> int | None:
     """Match a player name to a player_id in our players table.
 
@@ -199,6 +201,34 @@ def match_player_name(
         ]
         if matches:
             return _pick_by_team(matches, team_abbrev)
+
+    # 8. Last-name match (e.g. "McDavid" or "van Riemsdyk" from PuckPedia).
+    #    Also handles accented last names (e.g. "Fehervary" → "Fehérváry").
+    normalized_input = _strip_accents(name).lower()
+    cursor = conn.execute(
+        "SELECT id, last_name, team_abbrev, position FROM players",
+    )
+    rows = [
+        row for row in cursor.fetchall()
+        if row["last_name"]
+        and _strip_accents(row["last_name"]).lower() == normalized_input
+    ]
+    if rows:
+        # Narrow by team first
+        if team_abbrev:
+            team_rows = [r for r in rows if r["team_abbrev"] == team_abbrev]
+            candidates = team_rows if team_rows else rows
+        else:
+            candidates = rows
+        # If still ambiguous and position hint given, use it as tiebreaker
+        if len(candidates) > 1 and position:
+            pos_map = {"lw": "L", "rw": "R", "c": "C", "d": "D"}
+            nhl_pos = pos_map.get(position)
+            if nhl_pos:
+                pos_rows = [r for r in candidates if r["position"] == nhl_pos]
+                if pos_rows:
+                    candidates = pos_rows
+        return candidates[0]["id"]
 
     return None
 
@@ -432,7 +462,7 @@ def discover_rotowire_ids(
             continue
 
         if i > 0:
-            time.sleep(ROTOWIRE_SEARCH_DELAY)
+            time.sleep(ROTOWIRE_SEARCH_DELAY + random.uniform(0, ROTOWIRE_SEARCH_JITTER))
 
         try:
             results = search_rotowire_player(full_name, session)

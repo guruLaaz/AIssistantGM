@@ -19,8 +19,10 @@ BRAVE_SEARCH_TIMEOUT = 10  # Brave Search API timeout (seconds)
 DB_TIMEOUT = 30            # SQLite connection timeout (seconds)
 
 NHL_RATE_LIMIT = 0.2           # seconds between NHL API requests
-DAILYFACEOFF_RATE_LIMIT = 2.0  # seconds between DailyFaceoff requests
+PUCKPEDIA_RATE_LIMIT = 1.0     # seconds between PuckPedia requests
+PUCKPEDIA_RATE_JITTER = 1.5   # max random jitter added to PuckPedia delay
 ROTOWIRE_SEARCH_DELAY = 0.5   # seconds between Rotowire player searches
+ROTOWIRE_SEARCH_JITTER = 0.5  # max random jitter added to Rotowire search delay
 FANTRAX_PAGE_DELAY = 1        # seconds between paginated salary fetches
 
 BACKOFF_MAX_RETRIES = 4  # max retries on HTTP 429
