@@ -276,7 +276,11 @@ def _run_lines(conn, season):
     return fetch_all_lines(conn)
 
 
-from config.infra_constants import BACKFILL_MAX_SCROLLS as _BACKFILL_MAX_SCROLLS
+from config.infra_constants import (
+    BACKFILL_MAX_SCROLLS as _BACKFILL_MAX_SCROLLS,
+    BACKOFF_BASE,
+    BACKOFF_MAX_RETRIES,
+)
 
 
 def _run_backfill_news(conn, season):
@@ -342,8 +346,21 @@ _STEP_RUNNERS: dict[str, Any] = {
 # Core pipeline API
 # ---------------------------------------------------------------------------
 
+def _is_retryable(exc: Exception) -> bool:
+    """Return True if the exception is a transient HTTP error worth retrying."""
+    msg = str(exc)
+    # Retry on 5xx server errors and connection/timeout errors
+    for code in ("500 ", "502 ", "503 ", "504 "):
+        if code in msg:
+            return True
+    for keyword in ("ConnectionError", "Timeout", "timed out", "Connection aborted"):
+        if keyword.lower() in msg.lower():
+            return True
+    return False
+
+
 def run_step(step: str, db_path: Path, season: str) -> StepResult:
-    """Run a single pipeline step by name.
+    """Run a single pipeline step by name, with retries for transient errors.
 
     Args:
         step: Step name from PIPELINE_STEPS.
@@ -362,11 +379,16 @@ def run_step(step: str, db_path: Path, season: str) -> StepResult:
         )
 
     init_db(db_path)
-    conn = get_db(db_path)
-    try:
-        logger.info("Step: %s", step)
-        start = time_module.monotonic()
+    start = time_module.monotonic()
+    last_error: Exception | None = None
+
+    for attempt in range(1 + BACKOFF_MAX_RETRIES):
+        conn = get_db(db_path)
         try:
+            if attempt == 0:
+                logger.info("Step: %s", step)
+            else:
+                logger.info("Step: %s (retry %d/%d)", step, attempt, BACKOFF_MAX_RETRIES)
             detail = _STEP_RUNNERS[step](conn, season)
             duration = time_module.monotonic() - start
             _log_pipeline_step(conn, step, "ok")
@@ -375,15 +397,28 @@ def run_step(step: str, db_path: Path, season: str) -> StepResult:
                 name=step, status="ok", duration_s=duration, detail=detail,
             )
         except Exception as e:
+            last_error = e
             duration = time_module.monotonic() - start
-            _log_pipeline_step(conn, step, "error")
-            logger.error("  FAILED: %s (%.1fs)", e, duration)
-            return StepResult(
-                name=step, status="error", duration_s=duration,
-                detail={}, error=str(e),
-            )
-    finally:
-        conn.close()
+            if attempt < BACKOFF_MAX_RETRIES and _is_retryable(e):
+                wait = BACKOFF_BASE * (2 ** attempt)
+                logger.warning("  %s failed: %s — retrying in %ds", step, e, wait)
+                time_module.sleep(wait)
+            else:
+                _log_pipeline_step(conn, step, "error")
+                logger.error("  FAILED: %s (%.1fs)", e, duration)
+                return StepResult(
+                    name=step, status="error", duration_s=duration,
+                    detail={}, error=str(e),
+                )
+        finally:
+            conn.close()
+
+    # Should not reach here, but just in case
+    duration = time_module.monotonic() - start
+    return StepResult(
+        name=step, status="error", duration_s=duration,
+        detail={}, error=str(last_error),
+    )
 
 
 def run_pipeline(db_path: Path, season: str) -> list[StepResult]:
